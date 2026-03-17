@@ -31,25 +31,25 @@ def generate_sample_data(trend: str = "bullish") -> Dict[str, np.ndarray]:
         trend: "bullish", "bearish", 或 "range"
 
     Returns:
-        包含 4H 和 15m 数据的字典
+        包含 1H 和 15m 数据的字典
     """
-    # 生成 4H 数据
+    # 生成 1H 数据
     if trend == "bullish":
-        close_4h = np.linspace(100, 150, 200)  # 上涨趋势
+        close_1h = np.linspace(100, 150, 200)  # 上涨趋势
         base_price_15m = 140
         direction = 1
     elif trend == "bearish":
-        close_4h = np.linspace(150, 100, 200)  # 下跌趋势
+        close_1h = np.linspace(150, 100, 200)  # 下跌趋势
         base_price_15m = 110
         direction = -1
     else:  # range
-        close_4h = np.random.normal(125, 2, 200)  # 震荡
+        close_1h = np.random.normal(125, 2, 200)  # 震荡
         base_price_15m = 125
         direction = 0
 
     # 添加噪声
-    noise_4h = np.random.normal(0, 1, 200)
-    close_4h = close_4h + noise_4h
+    noise_1h = np.random.normal(0, 1, 200)
+    close_1h = close_1h + noise_1h
 
     # 生成 15m 数据
     close_15m = np.linspace(base_price_15m, base_price_15m + (20 * direction), 200)
@@ -71,7 +71,7 @@ def generate_sample_data(trend: str = "bullish") -> Dict[str, np.ndarray]:
     volume_15m = np.random.uniform(800, 1200, 200)
 
     return {
-        "4h": {"close": close_4h},
+        "1h": {"close": close_1h},
         "15m": {
             "open": close_15m - 0.5,
             "high": high_15m,
@@ -98,7 +98,7 @@ def example_1_basic_strategy():
     # 分析
     print("分析交易信号...")
     signal = strategy.analyze(
-        close_4h=data["4h"]["close"],
+        close_1h=data["1h"]["close"],
         high_15m=data["15m"]["high"],
         low_15m=data["15m"]["low"],
         close_15m=data["15m"]["close"],
@@ -127,7 +127,7 @@ def example_1_basic_strategy():
     data = generate_sample_data("bearish")
 
     signal = strategy.analyze(
-        close_4h=data["4h"]["close"],
+        close_1h=data["1h"]["close"],
         high_15m=data["15m"]["high"],
         low_15m=data["15m"]["low"],
         close_15m=data["15m"]["close"],
@@ -151,7 +151,7 @@ def example_1_basic_strategy():
     data = generate_sample_data("range")
 
     signal = strategy.analyze(
-        close_4h=data["4h"]["close"],
+        close_1h=data["1h"]["close"],
         high_15m=data["15m"]["high"],
         low_15m=data["15m"]["low"],
         close_15m=data["15m"]["close"],
@@ -304,7 +304,7 @@ def example_4_custom_config():
     # 生成数据并分析
     data = generate_sample_data("bullish")
     signal = strategy.analyze(
-        close_4h=data["4h"]["close"],
+        close_1h=data["1h"]["close"],
         high_15m=data["15m"]["high"],
         low_15m=data["15m"]["low"],
         close_15m=data["15m"]["close"],

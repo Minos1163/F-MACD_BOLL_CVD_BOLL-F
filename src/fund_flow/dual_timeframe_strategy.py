@@ -1,8 +1,8 @@
 """
-双周期趋势交易策略 (4H + 15m)
+双周期趋势交易策略 (1H + 15m)
 
 基于 EMA + VWAP + MACD 的双周期交易系统
-核心逻辑：4H定方向，15m找入场
+核心逻辑：1H定方向，15m找入场
 """
 
 from __future__ import annotations
@@ -39,11 +39,12 @@ class EMAConfig:
 @dataclass
 class MACDConfig:
     """MACD 配置"""
-    fast_period: int = 12
-    slow_period: int = 26
-    signal_period: int = 9
+    # 1H 周期 - 主要趋势判断
+    fast_period_1h: int = 12
+    slow_period_1h: int = 26
+    signal_period_1h: int = 9
 
-    # 15m 周期使用更敏感的参数
+    # 15m 周期 - 入场时机
     fast_period_15m: int = 8
     slow_period_15m: int = 21
     signal_period_15m: int = 5
@@ -128,10 +129,10 @@ class TrendAnalyzer:
     def __init__(self, ema_config: EMAConfig):
         self.ema_config = ema_config
 
-    def analyze_4h_trend(self,
+    def analyze_1h_trend(self,
                         close_prices: np.ndarray) -> TrendDirection:
         """
-        分析 4H 趋势
+        分析 1H 趋势
 
         条件：
         - 多头: 价格 > EMA55 且 EMA21 > EMA55
@@ -203,9 +204,9 @@ class MomentumAnalyzer:
     def __init__(self, macd_config: MACDConfig):
         self.macd_config = macd_config
 
-    def analyze_4h_momentum(self, close_prices: np.ndarray) -> Dict[str, any]:
+    def analyze_1h_momentum(self, close_prices: np.ndarray) -> Dict[str, any]:
         """
-        分析 4H 动能
+        分析 1H 动能
 
         返回：
         {
@@ -219,9 +220,9 @@ class MomentumAnalyzer:
         """
         macd_line, signal_line, histogram = TechnicalIndicators.calculate_macd(
             close_prices,
-            self.macd_config.fast_period,
-            self.macd_config.slow_period,
-            self.macd_config.signal_period
+            self.macd_config.fast_period_1h,
+            self.macd_config.slow_period_1h,
+            self.macd_config.signal_period_1h
         )
 
         current_hist = histogram[-1]
@@ -426,7 +427,7 @@ class EntryAnalyzer:
 
 
 class DualTimeframeStrategy:
-    """双周期交易策略 (4H + 15m)"""
+    """双周期交易策略 (1H + 15m)"""
 
     def __init__(self,
                  ema_config: Optional[EMAConfig] = None,
@@ -441,7 +442,7 @@ class DualTimeframeStrategy:
         self.entry_analyzer = EntryAnalyzer(self.ema_config, self.vwap_config)
 
     def analyze(self,
-                close_4h: np.ndarray,
+                close_1h: np.ndarray,
                 high_15m: np.ndarray,
                 low_15m: np.ndarray,
                 close_15m: np.ndarray,
@@ -450,27 +451,27 @@ class DualTimeframeStrategy:
         双周期分析
 
         流程：
-        1. 4H 判断趋势
+        1. 1H 判断趋势
         2. 15m 等待回调
         3. MACD 动能确认
         4. VWAP 资金确认
         5. 入场点确认
         """
 
-        # 步骤 1: 4H 趋势判断
-        trend_4h = self.trend_analyzer.analyze_4h_trend(close_4h)
+        # 步骤 1: 1H 趋势判断
+        trend_1h = self.trend_analyzer.analyze_1h_trend(close_1h)
 
-        if trend_4h == TrendDirection.NEUTRAL:
+        if trend_1h == TrendDirection.NEUTRAL:
             return None  # 趋势不明确，不交易
 
-        is_super_trend = self.trend_analyzer.is_super_trend(close_4h)
-        ema_alignment_4h = self.trend_analyzer.check_ema_alignment(close_4h)
+        is_super_trend = self.trend_analyzer.is_super_trend(close_1h)
+        ema_alignment_1h = self.trend_analyzer.check_ema_alignment(close_1h)
 
-        # 步骤 2: 4H 动能分析
-        momentum_4h = self.momentum_analyzer.analyze_4h_momentum(close_4h)
+        # 步骤 2: 1H 动能分析
+        momentum_1h = self.momentum_analyzer.analyze_1h_momentum(close_1h)
 
         # 检查顶背离（危险信号）
-        if momentum_4h["divergence"] == "bearish" and trend_4h == TrendDirection.BULLISH:
+        if momentum_1h["divergence"] == "bearish" and trend_1h == TrendDirection.BULLISH:
             return None  # 顶背离，不做多
 
         # 步骤 3: 15m 回调检查
@@ -482,7 +483,7 @@ class DualTimeframeStrategy:
         # 步骤 4: 15m 动能确认
         momentum_15m = self.momentum_analyzer.analyze_15m_momentum(close_15m)
 
-        if trend_4h == TrendDirection.BULLISH:
+        if trend_1h == TrendDirection.BULLISH:
             # 多头需要动能启动
             if not (momentum_15m["bar_turning_red"] or momentum_15m["cross_over"]):
                 return None
@@ -496,7 +497,7 @@ class DualTimeframeStrategy:
             high_15m, low_15m, close_15m, volume_15m
         )
 
-        if trend_4h == TrendDirection.BULLISH:
+        if trend_1h == TrendDirection.BULLISH:
             if not vwap_15m["above_vwap"]:
                 return None
         else:
@@ -508,7 +509,7 @@ class DualTimeframeStrategy:
         vwap_15m_value = TechnicalIndicators.calculate_vwap(high_15m, low_15m, close_15m, volume_15m)[-1]
 
         entry_price = self.entry_analyzer.find_optimal_entry(
-            close_15m, ema21_15m, vwap_15m_value, trend_4h
+            close_15m, ema21_15m, vwap_15m_value, trend_1h
         )
 
         if entry_price is None:
@@ -516,7 +517,7 @@ class DualTimeframeStrategy:
 
         # 计算止损和止盈
         stop_loss, take_profit = self._calculate_exit_levels(
-            close_15m, entry_price, trend_4h
+            close_15m, entry_price, trend_1h
         )
 
         # 计算风险回报比
@@ -525,22 +526,22 @@ class DualTimeframeStrategy:
         # 确定信号强度
         strength = self._determine_signal_strength(
             is_super_trend,
-            momentum_4h["histogram_growing"],
+            momentum_1h["histogram_growing"],
             pullback_15m["support_strength"],
             risk_reward
         )
 
         # 构建结构说明
         structure = self._build_structure_description(
-            trend_4h, is_super_trend, momentum_4h, momentum_15m,
-            pullback_15m, vwap_15m, ema_alignment_4h
+            trend_1h, is_super_trend, momentum_1h, momentum_15m,
+            pullback_15m, vwap_15m, ema_alignment_1h
         )
 
         # 生成理由
-        reason = self._generate_reason(trend_4h, strength, structure)
+        reason = self._generate_reason(trend_1h, strength, structure)
 
         return Signal(
-            direction=trend_4h,
+            direction=trend_1h,
             strength=strength,
             entry_price=entry_price,
             stop_loss=stop_loss,
@@ -620,7 +621,7 @@ class DualTimeframeStrategy:
     def _build_structure_description(self,
                                      trend: TrendDirection,
                                      is_super_trend: bool,
-                                     momentum_4h: Dict[str, any],
+                                     momentum_1h: Dict[str, any],
                                      momentum_15m: Dict[str, any],
                                      pullback: Dict[str, any],
                                      vwap: Dict[str, any],
@@ -632,12 +633,12 @@ class DualTimeframeStrategy:
             structure.append("超级趋势 (EMA21 > EMA55 > EMA200)")
 
         if trend == TrendDirection.BULLISH:
-            structure.append("4H 多头趋势")
+            structure.append("1H 多头趋势")
         else:
-            structure.append("4H 空头趋势")
+            structure.append("1H 空头趋势")
 
-        if momentum_4h["histogram_growing"]:
-            structure.append("4H 动能增强")
+        if momentum_1h["histogram_growing"]:
+            structure.append("1H 动能增强")
 
         if momentum_15m["bar_turning_red"] or momentum_15m["cross_over"]:
             structure.append("15m MACD 启动")
@@ -682,7 +683,7 @@ def create_strategy_config() -> Dict[str, any]:
             "ema200_period": 200
         },
         "macd": {
-            "4h": {
+            "1h": {
                 "fast_period": 12,
                 "slow_period": 26,
                 "signal_period": 9

@@ -74,10 +74,10 @@ class TestDualTimeframeStrategy:
 
     def test_bullish_signal_generation(self, strategy):
         """测试多头信号生成"""
-        # 创建模拟数据：4H 多头趋势
-        close_4h = np.linspace(100, 150, 200)  # 上涨趋势
+        # 创建模拟数据：1H 多头趋势
+        close_1h = np.linspace(100, 150, 200)  # 上涨趋势
         noise = np.random.normal(0, 1, 200)
-        close_4h = close_4h + noise
+        close_1h = close_1h + noise
 
         # 创建模拟数据：15m 回踩后启动
         close_15m = np.linspace(140, 150, 200)

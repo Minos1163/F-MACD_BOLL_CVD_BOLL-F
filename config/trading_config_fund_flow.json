@@ -89,9 +89,9 @@
   },
   "dual_timeframe": {
     "enabled": true,
-    "strategy_name": "EMA_VWAP_MACD_4H_15M",
-    "description": "双周期趋势交易策略 - 4H定方向，15m找入场",
-    "primary_timeframe": "4h",
+    "strategy_name": "EMA_VWAP_MACD_1H_15M",
+    "description": "双周期趋势交易策略 - 1H定方向，15m找入场",
+    "primary_timeframe": "1h",
     "entry_timeframe": "15m",
     "ema": {
       "ema21_period": 21,
@@ -99,7 +99,7 @@
       "ema200_period": 200
     },
     "macd": {
-      "4h": {
+      "1h": {
         "fast_period": 12,
         "slow_period": 26,
         "signal_period": 9
@@ -119,7 +119,7 @@
       "pullback_min_depth": 0.01,
       "pullback_max_depth": 0.03,
       "ema21_tolerance": 0.02,
-      "require_4h_trend": true,
+      "require_1h_trend": true,
       "require_15m_pullback": true,
       "require_momentum_trigger": true,
       "require_vwap_alignment": true
