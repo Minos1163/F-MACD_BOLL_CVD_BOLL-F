@@ -89,8 +89,8 @@
   },
   "dual_timeframe": {
     "enabled": true,
-    "strategy_name": "EMA_VWAP_MACD_1H_15M",
-    "description": "双周期趋势交易策略 - 1H定方向，15m找入场",
+    "strategy_name": "EMA_VWAP_MACD_1H_15M_WITH_4H_RISK",
+    "description": "双周期趋势交易策略 - 1H定方向，15m找入场，4H MACD做风控过滤",
     "primary_timeframe": "1h",
     "entry_timeframe": "15m",
     "ema": {
@@ -104,11 +104,20 @@
         "slow_period": 26,
         "signal_period": 9
       },
+      "4h": {
+        "fast_period": 12,
+        "slow_period": 26,
+        "signal_period": 9
+      },
       "15m": {
         "fast_period": 8,
         "slow_period": 21,
         "signal_period": 5
       }
+    },
+    "risk_filter": {
+      "enable_4h_macd": true,
+      "block_on_4h_divergence": true
     },
     "vwap": {
       "use_anchored": true,
@@ -955,6 +964,39 @@
           },
           "rule_overrides": {},
           "notes": "Best DOGE+SOL blend found in the focused search: +9.3% return, -5.5% max drawdown. Still weaker than DOGE-only."
+        },
+        "btc_eth_hours_guard_tight_v2": {
+          "symbols": [
+            "BTCUSDT",
+            "ETHUSDT"
+          ],
+          "allowed_entry_hours": [
+            0,
+            6,
+            7,
+            8,
+            9,
+            11,
+            12,
+            17,
+            18,
+            19,
+            20,
+            23
+          ],
+          "max_same_side_positions": 1,
+          "mode_overrides": {
+            "margin_pct_per_trade": 0.12,
+            "cooldown_bars": 20,
+            "min_1h_slope_pct": 0.0006,
+            "min_macd_hist_pct": 0.00016,
+            "min_bb_width_delta": 0.0012,
+            "require_macd_hist_expand": false,
+            "min_model_count": 1,
+            "require_dual_models": false
+          },
+          "rule_overrides": {},
+          "notes": "BTC+ETH tuned 30-day profile: +5.45% return, -3.12% max drawdown, PF 1.85 after excluding weak entry hours and tightening trend/volatility gates."
         }
       }
     }

@@ -1,8 +1,8 @@
 """
-双周期趋势交易策略 (1H + 15m)
+双周期趋势交易策略 (1H + 15m，保留 4H MACD 风控)
 
-基于 EMA + VWAP + MACD 的双周期交易系统
-核心逻辑：1H定方向，15m找入场
+基于 EMA + VWAP + MACD 的双周期交易系统。
+核心逻辑：1H定方向，15m找入场，4H MACD只做风险过滤。
 """
 
 from __future__ import annotations
@@ -43,6 +43,13 @@ class MACDConfig:
     fast_period_1h: int = 12
     slow_period_1h: int = 26
     signal_period_1h: int = 9
+
+    # 4H 周期 - 风险过滤
+    fast_period_4h: int = 12
+    slow_period_4h: int = 26
+    signal_period_4h: int = 9
+    enable_4h_risk_filter: bool = True
+    block_on_4h_divergence: bool = True
 
     # 15m 周期 - 入场时机
     fast_period_15m: int = 8
@@ -204,6 +211,32 @@ class MomentumAnalyzer:
     def __init__(self, macd_config: MACDConfig):
         self.macd_config = macd_config
 
+    def _analyze_macd_state(self,
+                            close_prices: np.ndarray,
+                            fast: int,
+                            slow: int,
+                            signal: int) -> Dict[str, any]:
+        """通用 MACD 状态分析。"""
+        macd_line, signal_line, histogram = TechnicalIndicators.calculate_macd(
+            close_prices, fast, slow, signal
+        )
+
+        current_hist = histogram[-1]
+        prev_hist = histogram[-2]
+
+        return {
+            "histogram": current_hist,
+            "histogram_growing": abs(current_hist) > abs(prev_hist),
+            "cross_over": histogram[-2] <= 0 and histogram[-1] > 0,
+            "cross_under": histogram[-2] >= 0 and histogram[-1] < 0,
+            "bar_turning_red": histogram[-2] < 0 and histogram[-1] > 0,
+            "bar_turning_green": histogram[-2] > 0 and histogram[-1] < 0,
+            "positive": current_hist > 0,
+            "divergence": self._check_divergence(close_prices, histogram),
+            "macd_line": macd_line[-1],
+            "signal_line": signal_line[-1]
+        }
+
     def analyze_1h_momentum(self, close_prices: np.ndarray) -> Dict[str, any]:
         """
         分析 1H 动能
@@ -218,61 +251,59 @@ class MomentumAnalyzer:
             "divergence": str  # "bullish", "bearish", "none"
         }
         """
-        macd_line, signal_line, histogram = TechnicalIndicators.calculate_macd(
+        state = self._analyze_macd_state(
             close_prices,
             self.macd_config.fast_period_1h,
             self.macd_config.slow_period_1h,
             self.macd_config.signal_period_1h
         )
-
-        current_hist = histogram[-1]
-        prev_hist = histogram[-2]
-
-        # 检查金叉/死叉
-        cross_over = (histogram[-2] <= 0 and histogram[-1] > 0)
-        cross_under = (histogram[-2] >= 0 and histogram[-1] < 0)
-
-        # 检查柱子增长
-        histogram_growing = abs(current_hist) > abs(prev_hist)
-
-        # 检查顶背离
-        divergence = self._check_divergence(close_prices, histogram)
-
         return {
-            "histogram": current_hist,
-            "histogram_growing": histogram_growing,
-            "cross_over": cross_over,
-            "cross_under": cross_under,
-            "positive": current_hist > 0,
-            "divergence": divergence
+            "histogram": state["histogram"],
+            "histogram_growing": state["histogram_growing"],
+            "cross_over": state["cross_over"],
+            "cross_under": state["cross_under"],
+            "positive": state["positive"],
+            "divergence": state["divergence"]
         }
+
+    def analyze_4h_risk_filter(self, close_prices: np.ndarray) -> Dict[str, any]:
+        """分析 4H MACD 风控，不参与主判向，只否决高风险方向。"""
+        state = self._analyze_macd_state(
+            close_prices,
+            self.macd_config.fast_period_4h,
+            self.macd_config.slow_period_4h,
+            self.macd_config.signal_period_4h
+        )
+
+        allow_long = state["positive"]
+        allow_short = state["histogram"] < 0
+
+        if self.macd_config.block_on_4h_divergence:
+            if state["divergence"] == "bearish" and (state["cross_under"] or state["histogram"] <= 0):
+                allow_long = False
+            if state["divergence"] == "bullish" and (state["cross_over"] or state["histogram"] >= 0):
+                allow_short = False
+
+        state["allow_long"] = allow_long
+        state["allow_short"] = allow_short
+        return state
 
     def analyze_15m_momentum(self, close_prices: np.ndarray) -> Dict[str, any]:
         """分析 15m 动能（使用更敏感的参数）"""
-        macd_line, signal_line, histogram = TechnicalIndicators.calculate_macd(
+        state = self._analyze_macd_state(
             close_prices,
             self.macd_config.fast_period_15m,
             self.macd_config.slow_period_15m,
             self.macd_config.signal_period_15m
         )
 
-        current_hist = histogram[-1]
-        prev_hist = histogram[-2]
-
-        cross_over = (histogram[-2] <= 0 and histogram[-1] > 0)
-        cross_under = (histogram[-2] >= 0 and histogram[-1] < 0)
-
-        # 检查柱子翻红（从负变正）
-        bar_turning_red = (histogram[-2] < 0 and histogram[-1] > 0)
-        bar_turning_green = (histogram[-2] > 0 and histogram[-1] < 0)
-
         return {
-            "histogram": current_hist,
-            "cross_over": cross_over,
-            "cross_under": cross_under,
-            "bar_turning_red": bar_turning_red,
-            "bar_turning_green": bar_turning_green,
-            "positive": current_hist > 0
+            "histogram": state["histogram"],
+            "cross_over": state["cross_over"],
+            "cross_under": state["cross_under"],
+            "bar_turning_red": state["bar_turning_red"],
+            "bar_turning_green": state["bar_turning_green"],
+            "positive": state["positive"]
         }
 
     def _check_divergence(self,
@@ -427,7 +458,7 @@ class EntryAnalyzer:
 
 
 class DualTimeframeStrategy:
-    """双周期交易策略 (1H + 15m)"""
+    """双周期交易策略 (1H + 15m，4H MACD 风控可选)"""
 
     def __init__(self,
                  ema_config: Optional[EMAConfig] = None,
@@ -446,16 +477,18 @@ class DualTimeframeStrategy:
                 high_15m: np.ndarray,
                 low_15m: np.ndarray,
                 close_15m: np.ndarray,
-                volume_15m: np.ndarray) -> Optional[Signal]:
+                volume_15m: np.ndarray,
+                close_4h: Optional[np.ndarray] = None) -> Optional[Signal]:
         """
         双周期分析
 
         流程：
         1. 1H 判断趋势
-        2. 15m 等待回调
-        3. MACD 动能确认
-        4. VWAP 资金确认
-        5. 入场点确认
+        2. 4H MACD 风险过滤（可选）
+        3. 15m 等待回调
+        4. MACD 动能确认
+        5. VWAP 资金确认
+        6. 入场点确认
         """
 
         # 步骤 1: 1H 趋势判断
@@ -471,28 +504,56 @@ class DualTimeframeStrategy:
         momentum_1h = self.momentum_analyzer.analyze_1h_momentum(close_1h)
 
         # 检查顶背离（危险信号）
-        if momentum_1h["divergence"] == "bearish" and trend_1h == TrendDirection.BULLISH:
+        if (
+            momentum_1h["divergence"] == "bearish"
+            and trend_1h == TrendDirection.BULLISH
+            and not momentum_1h["positive"]
+        ):
             return None  # 顶背离，不做多
+        if (
+            momentum_1h["divergence"] == "bullish"
+            and trend_1h == TrendDirection.BEARISH
+            and momentum_1h["positive"]
+        ):
+            return None  # 底背离，不做空
 
-        # 步骤 3: 15m 回调检查
+        # 步骤 3: 4H MACD 风控过滤（不负责定方向，只否决高风险入场）
+        risk_filter_4h = None
+        if self.macd_config.enable_4h_risk_filter and close_4h is not None:
+            risk_filter_4h = self.momentum_analyzer.analyze_4h_risk_filter(close_4h)
+
+            if trend_1h == TrendDirection.BULLISH and not risk_filter_4h["allow_long"]:
+                return None
+            if trend_1h == TrendDirection.BEARISH and not risk_filter_4h["allow_short"]:
+                return None
+
+        # 步骤 4: 15m 回调检查
         pullback_15m = self.entry_analyzer.check_pullback_to_ema21(close_15m)
 
         if not pullback_15m["is_pullback"]:
             return None  # 没有有效回调，等待
 
-        # 步骤 4: 15m 动能确认
+        # 步骤 5: 15m 动能确认
         momentum_15m = self.momentum_analyzer.analyze_15m_momentum(close_15m)
 
         if trend_1h == TrendDirection.BULLISH:
             # 多头需要动能启动
-            if not (momentum_15m["bar_turning_red"] or momentum_15m["cross_over"]):
+            if not (
+                momentum_15m["bar_turning_red"]
+                or momentum_15m["cross_over"]
+                or momentum_15m["positive"]
+            ):
                 return None
         else:
             # 空头需要动能向下
-            if not (momentum_15m["bar_turning_green"] or momentum_15m["cross_under"]):
+            if not (
+                momentum_15m["bar_turning_green"]
+                or momentum_15m["cross_under"]
+                or not momentum_15m["positive"]
+            ):
                 return None
 
-        # 步骤 5: VWAP 确认
+        # 步骤 6: VWAP 确认
         vwap_15m = self.entry_analyzer.check_vwap_alignment(
             high_15m, low_15m, close_15m, volume_15m
         )
@@ -504,7 +565,7 @@ class DualTimeframeStrategy:
             if vwap_15m["above_vwap"]:
                 return None
 
-        # 步骤 6: 计算入场点
+        # 步骤 7: 计算入场点
         ema21_15m = TechnicalIndicators.calculate_ema(close_15m, self.ema_config.ema21_period)[-1]
         vwap_15m_value = TechnicalIndicators.calculate_vwap(high_15m, low_15m, close_15m, volume_15m)[-1]
 
@@ -528,13 +589,14 @@ class DualTimeframeStrategy:
             is_super_trend,
             momentum_1h["histogram_growing"],
             pullback_15m["support_strength"],
-            risk_reward
+            risk_reward,
+            risk_filter_4h["histogram_growing"] if risk_filter_4h else None
         )
 
         # 构建结构说明
         structure = self._build_structure_description(
             trend_1h, is_super_trend, momentum_1h, momentum_15m,
-            pullback_15m, vwap_15m, ema_alignment_1h
+            pullback_15m, vwap_15m, ema_alignment_1h, risk_filter_4h
         )
 
         # 生成理由
@@ -556,30 +618,34 @@ class DualTimeframeStrategy:
                               entry_price: float,
                               trend: TrendDirection) -> Tuple[float, float]:
         """计算止损和止盈"""
-        # 方法1: 结构止损（最近低点/高点）
-        recent_range = np.max(close_prices[-10:]) - np.min(close_prices[-10:])
+        recent_lows = close_prices[-10:]
+        recent_highs = close_prices[-10:]
+        swing_window = close_prices[-20:-1] if len(close_prices) > 20 else close_prices[:-1]
+
+        if len(swing_window) == 0:
+            swing_window = close_prices
 
         if trend == TrendDirection.BULLISH:
             # 多头：止损在最近低点或 EMA55 下方
             stop_loss = max(
-                np.min(close_prices[-10:]),
+                np.min(recent_lows),
                 entry_price * (1 - 0.02)  # 默认 2% 止损
             )
 
-            # 止盈：5%-15% 或前高
-            take_profit = min(
-                np.max(close_prices[-20:]),
+            # 止盈至少高于入场价，优先取前高与固定收益中的更远目标
+            take_profit = max(
+                np.max(swing_window),
                 entry_price * (1 + 0.05)  # 默认 5% 止盈
             )
         else:
             # 空头
             stop_loss = min(
-                np.max(close_prices[-10:]),
+                np.max(recent_highs),
                 entry_price * (1 + 0.02)
             )
 
-            take_profit = max(
-                np.min(close_prices[-20:]),
+            take_profit = min(
+                np.min(swing_window),
                 entry_price * (1 - 0.05)
             )
 
@@ -589,7 +655,8 @@ class DualTimeframeStrategy:
                                    is_super_trend: bool,
                                    momentum_growing: bool,
                                    support_strength: float,
-                                   risk_reward: float) -> SignalStrength:
+                                   risk_reward: float,
+                                   risk_filter_growing: Optional[bool] = None) -> SignalStrength:
         """确定信号强度"""
         score = 0
 
@@ -609,6 +676,9 @@ class DualTimeframeStrategy:
         elif risk_reward > 2:
             score += 0.5
 
+        if risk_filter_growing is True:
+            score += 0.5
+
         if score >= 3:
             return SignalStrength.VERY_STRONG
         elif score >= 2:
@@ -625,7 +695,8 @@ class DualTimeframeStrategy:
                                      momentum_15m: Dict[str, any],
                                      pullback: Dict[str, any],
                                      vwap: Dict[str, any],
-                                     ema_alignment: Dict[str, bool]) -> List[str]:
+                                     ema_alignment: Dict[str, bool],
+                                     risk_filter_4h: Optional[Dict[str, any]] = None) -> List[str]:
         """构建结构说明"""
         structure = []
 
@@ -636,6 +707,15 @@ class DualTimeframeStrategy:
             structure.append("1H 多头趋势")
         else:
             structure.append("1H 空头趋势")
+
+        if risk_filter_4h is not None:
+            if trend == TrendDirection.BULLISH:
+                structure.append("4H MACD 风控通过 (多头侧)")
+            else:
+                structure.append("4H MACD 风控通过 (空头侧)")
+
+            if risk_filter_4h["histogram_growing"]:
+                structure.append("4H MACD 动能增强")
 
         if momentum_1h["histogram_growing"]:
             structure.append("1H 动能增强")
@@ -688,11 +768,20 @@ def create_strategy_config() -> Dict[str, any]:
                 "slow_period": 26,
                 "signal_period": 9
             },
+            "4h": {
+                "fast_period": 12,
+                "slow_period": 26,
+                "signal_period": 9
+            },
             "15m": {
                 "fast_period": 8,
                 "slow_period": 21,
                 "signal_period": 5
             }
+        },
+        "risk_filter": {
+            "enable_4h_macd": True,
+            "block_on_4h_divergence": True
         },
         "vwap": {
             "use_anchored": True,

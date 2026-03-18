@@ -4095,15 +4095,30 @@ class TradingBot:
         ff_cfg = self.config.get("fund_flow", {}) or {}
         regime_cfg = ff_cfg.get("regime", {}) if isinstance(ff_cfg.get("regime"), dict) else {}
         rule_cfg = ff_cfg.get("rule_strategy", {}) if isinstance(ff_cfg.get("rule_strategy"), dict) else {}
+        dual_cfg = self.config.get("dual_timeframe", {}) if isinstance(self.config.get("dual_timeframe"), dict) else {}
+        dual_risk_cfg = dual_cfg.get("risk_filter", {}) if isinstance(dual_cfg.get("risk_filter"), dict) else {}
 
         regime_timeframe = str(regime_cfg.get("timeframe", "15m") or "15m").strip().lower()
         primary_timeframe = str(rule_cfg.get("primary_trend_timeframe", regime_timeframe or "1h") or regime_timeframe or "1h").strip().lower()
         entry_timeframe = str(rule_cfg.get("entry_timeframe", ff_cfg.get("decision_timeframe") or "15m") or "15m").strip().lower()
         trend_limit = max(60, int(self._to_float(rule_cfg.get("trend_limit", 120), 120)))
         entry_limit = max(60, int(self._to_float(rule_cfg.get("entry_limit", 120), 120)))
+        dual_risk_enabled = bool(dual_risk_cfg.get("enable_4h_macd", dual_cfg.get("enabled", False)))
+        dual_risk_timeframe = str(
+            dual_risk_cfg.get("timeframe", dual_cfg.get("risk_timeframe", "4h")) or "4h"
+        ).strip().lower()
+        dual_risk_limit = max(60, int(self._to_float(dual_risk_cfg.get("limit", trend_limit), trend_limit)))
 
         trend_filters_by_timeframe: Dict[str, Dict[str, Any]] = {}
-        for timeframe, limit in ((primary_timeframe, trend_limit), (entry_timeframe, entry_limit), (regime_timeframe, trend_limit)):
+        requested_timeframes = [
+            (primary_timeframe, trend_limit),
+            (entry_timeframe, entry_limit),
+            (regime_timeframe, trend_limit),
+        ]
+        if dual_risk_enabled:
+            requested_timeframes.append((dual_risk_timeframe, dual_risk_limit))
+
+        for timeframe, limit in requested_timeframes:
             if timeframe in trend_filters_by_timeframe:
                 continue
             tf_metrics = self.market_data.get_trend_filter_metrics(symbol, interval=timeframe, limit=limit) or {}

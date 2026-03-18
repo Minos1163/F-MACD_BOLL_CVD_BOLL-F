@@ -1,0 +1,257 @@
+{
+  "mtf_system": {
+    "version": "1.0",
+    "name": "MTF_Trading_System",
+    "description": "多时间框架交易系统 - 1H主导 + 4H宏观风控 + 15m微观风控",
+    
+    "timeframes": {
+      "macro": {
+        "period": "4h",
+        "role": "宏观风控",
+        "description": "定调与方向许可，一票否决制"
+      },
+      "core": {
+        "period": "1h",
+        "role": "执行层",
+        "description": "信号生成核心，市场状态识别"
+      },
+      "micro": {
+        "period": "15m",
+        "role": "微观风控",
+        "description": "精准入场与衰竭预警"
+      }
+    },
+    
+    "indicators": {
+      "ema": {
+        "fast_period": 21,
+        "medium_period": 55,
+        "slow_period": 200
+      },
+      "macd_4h": {
+        "fast_period": 12,
+        "slow_period": 26,
+        "signal_period": 9,
+        "purpose": "宏观方向风控"
+      },
+      "macd_15m": {
+        "fast_period": 8,
+        "slow_period": 21,
+        "signal_period": 5,
+        "purpose": "微观衰竭风控"
+      },
+      "vwap": {
+        "use_anchored": true,
+        "anchor_period": "weekly",
+        "purpose": "机构成本确认"
+      }
+    },
+    
+    "scoring": {
+      "total_max_score": 100,
+      "pass_threshold": 70,
+      "s_grade_range": {
+        "min": 90,
+        "max": 100,
+        "position_multiplier": 1.0,
+        "description": "全仓标准"
+      },
+      "a_grade_range": {
+        "min": 70,
+        "max": 89,
+        "position_multiplier": 0.5,
+        "description": "半仓标准"
+      },
+      "b_grade_range": {
+        "min": 0,
+        "max": 69,
+        "position_multiplier": 0.0,
+        "description": "忽略信号"
+      },
+      "components": {
+        "trend_score": {
+          "max_score": 40,
+          "weight": "1H趋势结构"
+        },
+        "pullback_score": {
+          "max_score": 20,
+          "weight": "1H回撤质量"
+        },
+        "momentum_score": {
+          "max_score": 20,
+          "weight": "15m动能启动"
+        },
+        "macro_alignment_score": {
+          "max_score": 20,
+          "weight": "4H顺势度"
+        }
+      }
+    },
+    
+    "market_regime": {
+      "trend_on": {
+        "description": "强趋势状态",
+        "ema_divergence_threshold": 0.01,
+        "max_cross_count": 2,
+        "vwap_alignment_pct": 0.75,
+        "weight_adjustment": "提升1H结构权重，弱化15m动能"
+      },
+      "pullback": {
+        "description": "次级回调状态",
+        "ema21_distance_threshold": 0.02,
+        "ema55_support_required": true,
+        "vwap_support_required": true,
+        "weight_adjustment": "提升15m和4H MACD权重"
+      },
+      "chop": {
+        "description": "无序震荡状态",
+        "min_cross_count": 3,
+        "action": "系统强制休眠，不生成信号"
+      }
+    },
+    
+    "direction_control": {
+      "method": "4H一票否决制",
+      "long_permission": {
+        "conditions": [
+          "4H价格 > EMA55",
+          "MACD_4H不处于高位死叉",
+          "无顶背离"
+        ]
+      },
+      "short_permission": {
+        "conditions": [
+          "4H价格 < EMA55",
+          "MACD_4H不处于底背离金叉",
+          "无底背离"
+        ]
+      },
+      "veto_conditions": [
+        "1H信号方向与4H宏观方向完全相反"
+      ]
+    },
+    
+    "entry_logic": {
+      "required_conditions": [
+        "宏观：4H方向许可通过",
+        "结构：1H完成趋势->回踩EMA21->不破EMA55/VWAP",
+        "微观：15m MACD给出动能（翻红/金叉）",
+        "扳机：1H收盘价站上VWAP"
+      ],
+      "ema_pullback_model": {
+        "name": "EMA21回踩二次启动",
+        "phases": [
+          "第一波推升：1H价格突破VWAP并带起均线多头排列",
+          "回调阶段：1H K线缩量回落至EMA21附近",
+          "启动确立：15m MACD重新金叉，1H收长下影或实体阳线"
+        ]
+      }
+    },
+    
+    "exit_logic": {
+      "take_profit": {
+        "method": "分批平仓",
+        "first_target": {
+          "trigger": "1H前期结构高点/低点",
+          "action": "平仓50%"
+        },
+        "second_target": {
+          "trigger": "风险回报比达标（2.5:1 - 4:1）",
+          "action": "平仓剩余50%"
+        }
+      },
+      "micro_exhaustion": {
+        "trigger": "15m出现顶背离/底背离 + MACD死叉/金叉",
+        "action": "提前平掉剩余仓位50%",
+        "purpose": "锁定利润，防范假突破"
+      },
+      "stop_loss": {
+        "methods": [
+          "结构止损：1H K线实体收盘在EMA55之下",
+          "结构止损：跌破前序1H结构低点",
+          "风控止损：单笔最大亏损1.5%"
+        ]
+      }
+    },
+    
+    "risk_management": {
+      "position_sizing": {
+        "method": "ATR或结构距离动态计算",
+        "max_risk_per_trade": 0.015,
+        "max_position_size_pct": 0.6
+      },
+      "risk_reward": {
+        "minimum": 2.0,
+        "target_range": [2.5, 4.0]
+      },
+      "portfolio": {
+        "max_active_symbols": 3,
+        "max_daily_trades": 5,
+        "max_concurrent_positions": 2
+      }
+    },
+    
+    "profit_protection": {
+      "breakeven_trigger": {
+        "condition": "浮动盈利达到1H级别1ATR或1.5%-2%",
+        "action": "止损移至开仓均价"
+      },
+      "trailing_stop": {
+        "method": "1H EMA21动态追踪",
+        "rule": "1H收盘价不跌破EMA21则持有"
+      },
+      "macro_defense": {
+        "trigger": "MACD_4H出现反向势头",
+        "action": "止损线上移至盈亏平衡点",
+        "purpose": "风控降维"
+      }
+    },
+    
+    "reentry_suppression": {
+      "same_direction_cooldown": {
+        "trigger": "结构止损被触发",
+        "required_conditions": [
+          "等待15m MACD完成完整零轴上下循环",
+          "或等待1H重新站上VWAP"
+        ]
+      },
+      "max_loss_limit": {
+        "max_stop_losses_per_day": 2,
+        "freeze_duration_hours": 24,
+        "scope": "单一标的"
+      }
+    },
+    
+    "signal_pool_filters": {
+      "macd_4h_filter": {
+        "long_veto_conditions": [
+          "MACD_4H处于明显顶背离",
+          "MACD_4H刚形成死叉"
+        ],
+        "short_veto_conditions": [
+          "MACD_4H处于明显底背离",
+          "MACD_4H刚形成金叉"
+        ]
+      },
+      "macd_15m_filter": {
+        "delay_condition": "15m MACD绿柱快速缩短（动能衰退）",
+        "action": "延迟入场，直到动能重新匹配"
+      }
+    },
+    
+    "weight_router": {
+      "trend_on_weights": {
+        "trend_score": 0.45,
+        "pullback_score": 0.20,
+        "momentum_score": 0.15,
+        "macro_alignment_score": 0.20
+      },
+      "pullback_weights": {
+        "trend_score": 0.35,
+        "pullback_score": 0.15,
+        "momentum_score": 0.25,
+        "macro_alignment_score": 0.25
+      }
+    }
+  }
+}

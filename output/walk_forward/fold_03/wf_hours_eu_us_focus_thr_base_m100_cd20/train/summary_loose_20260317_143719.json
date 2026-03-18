@@ -1,0 +1,175 @@
+{
+  "mode": "loose",
+  "profile_name": "wf_hours_eu_us_focus_thr_base_m100_cd20",
+  "allowed_entry_hours": [
+    11,
+    12,
+    17,
+    18,
+    19,
+    20,
+    23
+  ],
+  "symbols": [
+    "BTCUSDT",
+    "ETHUSDT"
+  ],
+  "initial_capital": 1000.0,
+  "final_equity": 945.607269,
+  "total_return_pct": -5.4393,
+  "max_drawdown_pct": -6.1472,
+  "trade_count": 22,
+  "win_rate_pct": 18.1818,
+  "avg_trade_pnl": -2.317291,
+  "profit_factor": 0.135912,
+  "max_active_symbols": 2,
+  "max_same_side_positions": 1,
+  "leverage": 4.0,
+  "margin_pct_per_trade": 0.1,
+  "cooldown_bars": 20,
+  "min_1h_slope_pct": 0.0006,
+  "min_macd_hist_pct": 0.00016,
+  "min_bb_width_delta": 0.0012,
+  "require_dual_models": false,
+  "entry_signal_carry_bars": 1,
+  "entry_model_logic": "ANY_ONE_MODEL",
+  "max_daily_loss_percent": 5.0,
+  "max_consecutive_losses": 2,
+  "consecutive_loss_cooldown_seconds": 1800,
+  "risk_events": [
+    {
+      "timestamp": "2025-11-21T12:30:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=2 until=2025-11-21T13:00:00"
+    },
+    {
+      "timestamp": "2025-11-21T23:15:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=3 until=2025-11-21T23:45:00"
+    },
+    {
+      "timestamp": "2025-11-23T23:00:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=4 until=2025-11-23T23:30:00"
+    },
+    {
+      "timestamp": "2025-11-26T20:30:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=2 until=2025-11-26T21:00:00"
+    },
+    {
+      "timestamp": "2025-11-27T20:15:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=3 until=2025-11-27T20:45:00"
+    },
+    {
+      "timestamp": "2025-11-29T19:00:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=4 until=2025-11-29T19:30:00"
+    },
+    {
+      "timestamp": "2025-12-01T14:00:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=5 until=2025-12-01T14:30:00"
+    },
+    {
+      "timestamp": "2025-12-03T18:45:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=6 until=2025-12-03T19:15:00"
+    },
+    {
+      "timestamp": "2025-12-05T19:30:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=2 until=2025-12-05T20:00:00"
+    },
+    {
+      "timestamp": "2025-12-07T00:30:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=3 until=2025-12-07T01:00:00"
+    },
+    {
+      "timestamp": "2025-12-07T20:45:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=4 until=2025-12-07T21:15:00"
+    },
+    {
+      "timestamp": "2025-12-09T19:00:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=5 until=2025-12-09T19:30:00"
+    },
+    {
+      "timestamp": "2025-12-10T20:45:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=6 until=2025-12-10T21:15:00"
+    },
+    {
+      "timestamp": "2025-12-15T00:45:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=2 until=2025-12-15T01:15:00"
+    }
+  ],
+  "analysis": {
+    "worst_symbols": [
+      {
+        "symbol": "ETHUSDT",
+        "trade_count": 11,
+        "total_pnl": -33.32662898,
+        "avg_pnl": -3.029693543636364,
+        "win_rate": 27.27272727272727
+      },
+      {
+        "symbol": "BTCUSDT",
+        "trade_count": 11,
+        "total_pnl": -17.653764539999997,
+        "avg_pnl": -1.6048876854545453,
+        "win_rate": 9.090909090909092
+      }
+    ],
+    "worst_entry_hours": [
+      {
+        "entry_hour": 12,
+        "trade_count": 3,
+        "total_pnl": -16.91881525,
+        "avg_pnl": -5.6396050833333335,
+        "win_rate": 33.33333333333333
+      },
+      {
+        "entry_hour": 23,
+        "trade_count": 4,
+        "total_pnl": -10.80764019,
+        "avg_pnl": -2.7019100475,
+        "win_rate": 25.0
+      },
+      {
+        "entry_hour": 18,
+        "trade_count": 4,
+        "total_pnl": -8.87517811,
+        "avg_pnl": -2.2187945275,
+        "win_rate": 25.0
+      },
+      {
+        "entry_hour": 17,
+        "trade_count": 7,
+        "total_pnl": -7.115470869999999,
+        "avg_pnl": -1.0164958385714284,
+        "win_rate": 14.285714285714285
+      },
+      {
+        "entry_hour": 19,
+        "trade_count": 3,
+        "total_pnl": -7.08589408,
+        "avg_pnl": -2.3619646933333334,
+        "win_rate": 0.0
+      },
+      {
+        "entry_hour": 11,
+        "trade_count": 1,
+        "total_pnl": -0.17739502,
+        "avg_pnl": -0.17739502,
+        "win_rate": 0.0
+      }
+    ]
+  },
+  "days": 30,
+  "warmup_days": 7
+}

@@ -178,18 +178,19 @@ class EMAPullbackStrategy:
         )
 
     def analyze_entry(self,
-                      close_4h: np.ndarray,
+                      close_1h: np.ndarray,
                       high_15m: np.ndarray,
                       low_15m: np.ndarray,
                       close_15m: np.ndarray,
-                      volume_15m: np.ndarray) -> Optional[Signal]:
+                      volume_15m: np.ndarray,
+                      close_4h: Optional[np.ndarray] = None) -> Optional[Signal]:
         """
         分析入场点
 
         使用双周期策略进行完整分析
         """
         return self.dual_strategy.analyze(
-            close_4h, high_15m, low_15m, close_15m, volume_15m
+            close_1h, high_15m, low_15m, close_15m, volume_15m, close_4h=close_4h
         )
 
     def check_pullback_structure(self, close_15m: np.ndarray) -> Dict[str, any]:
@@ -344,11 +345,12 @@ class TrendFollowingEngine:
 
     def generate_signal(self,
                         symbol: str,
-                        close_4h: np.ndarray,
+                        close_1h: np.ndarray,
                         high_15m: np.ndarray,
                         low_15m: np.ndarray,
                         close_15m: np.ndarray,
-                        volume_15m: np.ndarray) -> Optional[Signal]:
+                        volume_15m: np.ndarray,
+                        close_4h: Optional[np.ndarray] = None) -> Optional[Signal]:
         """
         生成交易信号
 
@@ -358,10 +360,10 @@ class TrendFollowingEngine:
         3. 使用回踩策略分析入场点
         4. 计算置信度和风险等级
         """
-        # 分析市场状态（需要 1h 数据）
-        if len(close_4h) >= 200 and len(close_15m) >= 200:
-            close_1h_for_regime = close_4h  # 简化处理
-            market_state = self.analyze_market(symbol, close_4h, close_1h_for_regime)
+        # 分析市场状态（4H 结构 + 1H 主趋势）
+        higher_tf = close_4h if close_4h is not None else close_1h
+        if len(higher_tf) >= 200 and len(close_1h) >= 100:
+            market_state = self.analyze_market(symbol, higher_tf, close_1h)
         else:
             # 数据不足，无法判断状态
             market_state = MarketState(
@@ -378,7 +380,7 @@ class TrendFollowingEngine:
 
         # 使用回踩策略分析
         signal = self.pullback_strategy.analyze_entry(
-            close_4h, high_15m, low_15m, close_15m, volume_15m
+            close_1h, high_15m, low_15m, close_15m, volume_15m, close_4h=close_4h
         )
 
         if signal is None:
@@ -481,21 +483,24 @@ def create_trend_following_engine() -> TrendFollowingEngine:
 
 def analyze_symbol_with_trend_engine(engine: TrendFollowingEngine,
                                      symbol: str,
-                                     data_4h: Dict[str, List[float]],
-                                     data_15m: Dict[str, List[float]]) -> Optional[Signal]:
+                                     data_1h: Dict[str, List[float]],
+                                     data_15m: Dict[str, List[float]],
+                                     data_4h: Optional[Dict[str, List[float]]] = None) -> Optional[Signal]:
     """
     使用趋势引擎分析单个交易对
 
     Args:
         engine: 趋势跟踪引擎实例
         symbol: 交易对名称
-        data_4h: 4H 数据，包含 'close' 键
+        data_1h: 1H 数据，包含 'close' 键
         data_15m: 15m 数据，包含 'open', 'high', 'low', 'close', 'volume' 键
+        data_4h: 可选 4H 数据，仅用于 MACD 风控
 
     Returns:
         Signal 或 None
     """
-    close_4h = np.array(data_4h['close'])
+    close_1h = np.array(data_1h['close'])
+    close_4h = np.array(data_4h['close']) if data_4h is not None else None
 
     high_15m = np.array(data_15m['high'])
     low_15m = np.array(data_15m['low'])
@@ -503,5 +508,5 @@ def analyze_symbol_with_trend_engine(engine: TrendFollowingEngine,
     volume_15m = np.array(data_15m['volume'])
 
     return engine.generate_signal(
-        symbol, close_4h, high_15m, low_15m, close_15m, volume_15m
+        symbol, close_1h, high_15m, low_15m, close_15m, volume_15m, close_4h=close_4h
     )

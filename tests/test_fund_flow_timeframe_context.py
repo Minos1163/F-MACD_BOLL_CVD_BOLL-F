@@ -33,6 +33,21 @@ class _StubClient:
         return rows
 
 
+class _StubBotMarketData:
+    def __init__(self):
+        self.trend_calls = []
+
+    def get_realtime_market_data(self, _symbol: str):
+        return {}
+
+    def get_trend_filter_metrics(self, _symbol: str, interval: str = "15m", limit: int = 120):
+        self.trend_calls.append((interval, limit))
+        return {"ema_30": 100.0, "macd_cross": "NONE", "macd_zone": "NEAR_ZERO"}
+
+    def get_order_flow_snapshot(self, _symbol: str, interval: str = "1m", limit: int = 24):
+        return {}
+
+
 def test_get_trend_filter_metrics_includes_direction_feature_fields():
     manager = MarketDataManager(_StubClient())
     metrics = manager.get_trend_filter_metrics("BTCUSDT", interval="15m", limit=120)
@@ -97,3 +112,35 @@ def test_apply_timeframe_context_injects_full_trend_filter_snapshot():
     assert tf_ctx["bb_squeeze"] is False
     assert out["cvd_ratio"] == 0.12
     assert out["active_timeframe"] == "15m"
+
+
+def test_get_market_data_for_symbol_requests_4h_when_dual_risk_filter_enabled():
+    bot = TradingBot.__new__(TradingBot)
+    bot.config = {
+        "fund_flow": {
+            "decision_timeframe": "15m",
+            "regime": {"timeframe": "15m"},
+            "rule_strategy": {
+                "primary_trend_timeframe": "1h",
+                "entry_timeframe": "15m",
+                "trend_limit": 120,
+                "entry_limit": 120,
+            },
+        },
+        "dual_timeframe": {
+            "enabled": True,
+            "risk_filter": {
+                "enable_4h_macd": True,
+            },
+        },
+    }
+    bot.market_data = _StubBotMarketData()
+    bot._startup_trend_filter_cache = {}
+    bot._execution_quality_1m_config = lambda: {"timeframe": "1m", "trend_limit": 60, "orderflow_limit": 24}
+    bot._extract_orderbook_flow = lambda _symbol: {}
+
+    out = TradingBot.get_market_data_for_symbol(bot, "BTCUSDT")
+
+    assert "4h" in out["trend_filters_by_timeframe"]
+    requested_intervals = {interval for interval, _ in bot.market_data.trend_calls}
+    assert {"1h", "15m", "4h"} <= requested_intervals

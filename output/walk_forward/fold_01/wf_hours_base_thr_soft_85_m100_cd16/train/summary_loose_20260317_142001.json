@@ -1,0 +1,275 @@
+{
+  "mode": "loose",
+  "profile_name": "wf_hours_base_thr_soft_85_m100_cd16",
+  "allowed_entry_hours": [
+    0,
+    6,
+    7,
+    8,
+    9,
+    11,
+    12,
+    17,
+    18,
+    19,
+    20,
+    23
+  ],
+  "symbols": [
+    "BTCUSDT",
+    "ETHUSDT"
+  ],
+  "initial_capital": 1000.0,
+  "final_equity": 895.354128,
+  "total_return_pct": -10.4646,
+  "max_drawdown_pct": -10.6726,
+  "trade_count": 49,
+  "win_rate_pct": 18.3673,
+  "avg_trade_pnl": -1.98395,
+  "profit_factor": 0.281838,
+  "max_active_symbols": 2,
+  "max_same_side_positions": 1,
+  "leverage": 4.0,
+  "margin_pct_per_trade": 0.1,
+  "cooldown_bars": 16,
+  "min_1h_slope_pct": 0.00051,
+  "min_macd_hist_pct": 0.000136,
+  "min_bb_width_delta": 0.00102,
+  "require_dual_models": false,
+  "entry_signal_carry_bars": 1,
+  "entry_model_logic": "ANY_ONE_MODEL",
+  "max_daily_loss_percent": 5.0,
+  "max_consecutive_losses": 2,
+  "consecutive_loss_cooldown_seconds": 1800,
+  "risk_events": [
+    {
+      "timestamp": "2026-01-19T03:15:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=2 until=2026-01-19T03:45:00"
+    },
+    {
+      "timestamp": "2026-01-19T19:00:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=3 until=2026-01-19T19:30:00"
+    },
+    {
+      "timestamp": "2026-01-20T01:15:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=4 until=2026-01-20T01:45:00"
+    },
+    {
+      "timestamp": "2026-01-21T00:45:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=2 until=2026-01-21T01:15:00"
+    },
+    {
+      "timestamp": "2026-01-21T11:15:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=3 until=2026-01-21T11:45:00"
+    },
+    {
+      "timestamp": "2026-01-21T14:00:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=4 until=2026-01-21T14:30:00"
+    },
+    {
+      "timestamp": "2026-01-23T11:00:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=5 until=2026-01-23T11:30:00"
+    },
+    {
+      "timestamp": "2026-01-25T10:15:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=6 until=2026-01-25T10:45:00"
+    },
+    {
+      "timestamp": "2026-01-27T17:30:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=2 until=2026-01-27T18:00:00"
+    },
+    {
+      "timestamp": "2026-01-28T14:30:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=3 until=2026-01-28T15:00:00"
+    },
+    {
+      "timestamp": "2026-01-28T20:30:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=4 until=2026-01-28T21:00:00"
+    },
+    {
+      "timestamp": "2026-01-29T12:45:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=5 until=2026-01-29T13:15:00"
+    },
+    {
+      "timestamp": "2026-01-30T07:00:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=6 until=2026-01-30T07:30:00"
+    },
+    {
+      "timestamp": "2026-01-30T18:45:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=7 until=2026-01-30T19:15:00"
+    },
+    {
+      "timestamp": "2026-02-01T11:30:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=2 until=2026-02-01T12:00:00"
+    },
+    {
+      "timestamp": "2026-02-01T22:00:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=3 until=2026-02-01T22:30:00"
+    },
+    {
+      "timestamp": "2026-02-02T00:15:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=4 until=2026-02-02T00:45:00"
+    },
+    {
+      "timestamp": "2026-02-03T08:00:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=5 until=2026-02-03T08:30:00"
+    },
+    {
+      "timestamp": "2026-02-03T12:15:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=6 until=2026-02-03T12:45:00"
+    },
+    {
+      "timestamp": "2026-02-04T18:30:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=2 until=2026-02-04T19:00:00"
+    },
+    {
+      "timestamp": "2026-02-05T14:30:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=3 until=2026-02-05T15:00:00"
+    },
+    {
+      "timestamp": "2026-02-05T22:30:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=4 until=2026-02-05T23:00:00"
+    },
+    {
+      "timestamp": "2026-02-06T09:15:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=5 until=2026-02-06T09:45:00"
+    },
+    {
+      "timestamp": "2026-02-06T18:45:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=6 until=2026-02-06T19:15:00"
+    },
+    {
+      "timestamp": "2026-02-07T00:30:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=7 until=2026-02-07T01:00:00"
+    },
+    {
+      "timestamp": "2026-02-08T23:15:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=2 until=2026-02-08T23:45:00"
+    },
+    {
+      "timestamp": "2026-02-10T09:00:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=2 until=2026-02-10T09:30:00"
+    },
+    {
+      "timestamp": "2026-02-10T13:15:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=3 until=2026-02-10T13:45:00"
+    },
+    {
+      "timestamp": "2026-02-12T00:00:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=4 until=2026-02-12T00:30:00"
+    },
+    {
+      "timestamp": "2026-02-12T12:30:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=5 until=2026-02-12T13:00:00"
+    },
+    {
+      "timestamp": "2026-02-12T19:30:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=6 until=2026-02-12T20:00:00"
+    },
+    {
+      "timestamp": "2026-02-13T07:00:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=7 until=2026-02-13T07:30:00"
+    },
+    {
+      "timestamp": "2026-02-13T08:15:00",
+      "event": "consecutive_loss_stop",
+      "detail": "losses=8 until=2026-02-13T08:45:00"
+    }
+  ],
+  "analysis": {
+    "worst_symbols": [
+      {
+        "symbol": "ETHUSDT",
+        "trade_count": 30,
+        "total_pnl": -58.76808561,
+        "avg_pnl": -1.958936187,
+        "win_rate": 20.0
+      },
+      {
+        "symbol": "BTCUSDT",
+        "trade_count": 19,
+        "total_pnl": -38.44547821,
+        "avg_pnl": -2.023446221578947,
+        "win_rate": 15.789473684210526
+      }
+    ],
+    "worst_entry_hours": [
+      {
+        "entry_hour": 23,
+        "trade_count": 6,
+        "total_pnl": -33.02613772,
+        "avg_pnl": -5.504356286666667,
+        "win_rate": 0.0
+      },
+      {
+        "entry_hour": 11,
+        "trade_count": 5,
+        "total_pnl": -11.34792108,
+        "avg_pnl": -2.269584216,
+        "win_rate": 0.0
+      },
+      {
+        "entry_hour": 6,
+        "trade_count": 5,
+        "total_pnl": -10.99139511,
+        "avg_pnl": -2.198279022,
+        "win_rate": 20.0
+      },
+      {
+        "entry_hour": 20,
+        "trade_count": 3,
+        "total_pnl": -10.075124220000001,
+        "avg_pnl": -3.3583747400000004,
+        "win_rate": 0.0
+      },
+      {
+        "entry_hour": 17,
+        "trade_count": 10,
+        "total_pnl": -9.00057971,
+        "avg_pnl": -0.9000579710000001,
+        "win_rate": 40.0
+      },
+      {
+        "entry_hour": 12,
+        "trade_count": 1,
+        "total_pnl": -6.24507176,
+        "avg_pnl": -6.24507176,
+        "win_rate": 0.0
+      }
+    ]
+  },
+  "days": 30,
+  "warmup_days": 7
+}

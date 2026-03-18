@@ -391,6 +391,18 @@ class FundFlowDecisionEngine:
             min(1.0, self._to_float(rule_cfg.get("tp1_reduce_pct"), 0.5)),
         )
         self.rule_legacy_auxiliary_filters_enabled = bool(rule_cfg.get("legacy_auxiliary_filters_enabled", True))
+        dual_cfg = self.config.get("dual_timeframe", {}) if isinstance(self.config.get("dual_timeframe"), dict) else {}
+        dual_risk_cfg = dual_cfg.get("risk_filter", {}) if isinstance(dual_cfg.get("risk_filter"), dict) else {}
+        dual_enabled = bool(dual_cfg.get("enabled", False))
+        self.rule_4h_risk_filter_enabled = bool(
+            dual_risk_cfg.get("enable_4h_macd", dual_enabled)
+        )
+        self.rule_4h_risk_timeframe = str(
+            dual_risk_cfg.get("timeframe", dual_cfg.get("risk_timeframe", "4h")) or "4h"
+        ).strip().lower()
+        self.rule_4h_block_on_divergence = bool(
+            dual_risk_cfg.get("block_on_4h_divergence", dual_risk_cfg.get("block_on_divergence", False))
+        )
 
         # 启动时打印默认权重摘要（确认配置是否生效）
         import logging
@@ -2155,6 +2167,89 @@ class FundFlowDecisionEngine:
         entry_tf = timeframes.get(self.rule_entry_timeframe)
         return (trend_tf if isinstance(trend_tf, dict) else {}), (entry_tf if isinstance(entry_tf, dict) else {})
 
+    def _rule_4h_macd_risk_filter(self, market_flow_context: Dict[str, Any]) -> Dict[str, Any]:
+        base_state = {
+            "enabled": bool(self.rule_4h_risk_filter_enabled),
+            "timeframe": self.rule_4h_risk_timeframe,
+            "available": False,
+            "allow_long": True,
+            "allow_short": True,
+            "macd_cross": "NONE",
+            "macd_zone": "NEAR_ZERO",
+            "macd_hist": 0.0,
+            "macd_hist_delta": 0.0,
+            "macd_hist_expand_up": False,
+            "macd_hist_expand_down": False,
+            "divergence": "none",
+            "reason": "disabled",
+        }
+        if not self.rule_4h_risk_filter_enabled:
+            return base_state
+
+        timeframes = market_flow_context.get("timeframes") if isinstance(market_flow_context, dict) else {}
+        if not isinstance(timeframes, dict):
+            base_state["reason"] = "missing_timeframes"
+            return base_state
+
+        risk_tf = timeframes.get(self.rule_4h_risk_timeframe)
+        if not isinstance(risk_tf, dict):
+            base_state["reason"] = f"missing_{self.rule_4h_risk_timeframe}_context"
+            return base_state
+
+        macd_cross = str(risk_tf.get("macd_cross", "NONE")).upper()
+        macd_zone = str(risk_tf.get("macd_zone", "NEAR_ZERO")).upper()
+        macd_hist = self._to_float(risk_tf.get("macd_hist"), 0.0)
+        macd_hist_delta = self._to_float(risk_tf.get("macd_hist_delta"), 0.0)
+        macd_hist_expand_up = bool(risk_tf.get("macd_hist_expand_up", False))
+        macd_hist_expand_down = bool(risk_tf.get("macd_hist_expand_down", False))
+        last_open = self._to_float(risk_tf.get("last_open"), 0.0)
+        last_close = self._to_float(risk_tf.get("last_close"), 0.0)
+
+        allow_long = macd_hist > 0 or macd_zone == "ABOVE_ZERO"
+        allow_short = macd_hist < 0 or macd_zone == "BELOW_ZERO"
+        divergence = "none"
+
+        if self.rule_4h_block_on_divergence and last_open > 0 and last_close > 0:
+            bearish_divergence = (
+                last_close > last_open
+                and macd_hist > 0
+                and macd_hist_delta < 0
+                and not macd_hist_expand_up
+            )
+            bullish_divergence = (
+                last_close < last_open
+                and macd_hist < 0
+                and macd_hist_delta > 0
+                and not macd_hist_expand_down
+            )
+            if bearish_divergence:
+                divergence = "bearish"
+                if macd_cross == "DEAD" or macd_hist <= 0:
+                    allow_long = False
+            elif bullish_divergence:
+                divergence = "bullish"
+                if macd_cross == "GOLDEN" or macd_hist >= 0:
+                    allow_short = False
+
+        return {
+            "enabled": True,
+            "timeframe": self.rule_4h_risk_timeframe,
+            "available": True,
+            "allow_long": bool(allow_long),
+            "allow_short": bool(allow_short),
+            "macd_cross": macd_cross,
+            "macd_zone": macd_zone,
+            "macd_hist": macd_hist,
+            "macd_hist_delta": macd_hist_delta,
+            "macd_hist_expand_up": bool(macd_hist_expand_up),
+            "macd_hist_expand_down": bool(macd_hist_expand_down),
+            "divergence": divergence,
+            "reason": (
+                f"{self.rule_4h_risk_timeframe}_macd={macd_cross}/{macd_zone} "
+                f"hist={macd_hist:.4f} delta={macd_hist_delta:.4f} divergence={divergence}"
+            ),
+        }
+
     def _rule_position_pnl_ratio(
         self,
         position_side: str,
@@ -2250,6 +2345,7 @@ class FundFlowDecisionEngine:
         }
     def _rule_entry_confluence(self, market_flow_context: Dict[str, Any], regime_info: Dict[str, Any]) -> Dict[str, Any]:
         _, entry_tf = self._rule_strategy_context(market_flow_context)
+        risk_filter_4h = self._rule_4h_macd_risk_filter(market_flow_context or {})
         direction = str(regime_info.get("direction", "BOTH")).upper()
         close_price = self._to_float(entry_tf.get("last_close"), 0.0)
         open_price = self._to_float(entry_tf.get("last_open"), 0.0)
@@ -2308,8 +2404,20 @@ class FundFlowDecisionEngine:
 
         long_ok = direction == "LONG_ONLY" and bool(long_models)
         short_ok = direction == "SHORT_ONLY" and bool(short_models)
+        risk_reasons: List[str] = []
+        if long_ok and risk_filter_4h["enabled"] and not risk_filter_4h["allow_long"]:
+            long_ok = False
+            long_models = []
+            risk_reasons.append(f"{risk_filter_4h['timeframe']}_macd_risk_block long {risk_filter_4h['reason']}")
+        if short_ok and risk_filter_4h["enabled"] and not risk_filter_4h["allow_short"]:
+            short_ok = False
+            short_models = []
+            risk_reasons.append(f"{risk_filter_4h['timeframe']}_macd_risk_block short {risk_filter_4h['reason']}")
+
         reason = "entry_ready"
-        if not long_ok and not short_ok:
+        if risk_reasons:
+            reason = " | ".join(risk_reasons)
+        elif not long_ok and not short_ok:
             reason = (
                 f"15m_confluence_block dir={direction} ema_cross={ema_cross} "
                 f"macd={macd_cross}/{macd_zone} bb={bb_break}/expand={int(bb_width_expand)}"
@@ -2335,6 +2443,17 @@ class FundFlowDecisionEngine:
             "bb_lower": bb_lower,
             "bb_break": bb_break,
             "bb_width_expand": bool(bb_width_expand),
+            "risk_filter_4h": dict(risk_filter_4h),
+            "risk_filter_enabled": bool(risk_filter_4h.get("enabled", False)),
+            "risk_filter_timeframe": risk_filter_4h.get("timeframe", self.rule_4h_risk_timeframe),
+            "risk_filter_allow_long": bool(risk_filter_4h.get("allow_long", True)),
+            "risk_filter_allow_short": bool(risk_filter_4h.get("allow_short", True)),
+            "risk_filter_macd_cross": risk_filter_4h.get("macd_cross", "NONE"),
+            "risk_filter_macd_zone": risk_filter_4h.get("macd_zone", "NEAR_ZERO"),
+            "risk_filter_macd_hist": self._to_float(risk_filter_4h.get("macd_hist"), 0.0),
+            "risk_filter_macd_hist_delta": self._to_float(risk_filter_4h.get("macd_hist_delta"), 0.0),
+            "risk_filter_divergence": risk_filter_4h.get("divergence", "none"),
+            "risk_filter_reason": risk_filter_4h.get("reason", "disabled"),
             "reason": reason,
         }
     def _rule_stop_trigger(
@@ -2478,6 +2597,17 @@ class FundFlowDecisionEngine:
             "entry_bb_width_expand": bool(confluence.get("bb_width_expand", False)),
             "entry_long_models": list(confluence.get("long_models", [])),
             "entry_short_models": list(confluence.get("short_models", [])),
+            "risk_filter_4h": dict(confluence.get("risk_filter_4h", {})),
+            "risk_filter_enabled": bool(confluence.get("risk_filter_enabled", False)),
+            "risk_filter_timeframe": confluence.get("risk_filter_timeframe", self.rule_4h_risk_timeframe),
+            "risk_filter_allow_long": bool(confluence.get("risk_filter_allow_long", True)),
+            "risk_filter_allow_short": bool(confluence.get("risk_filter_allow_short", True)),
+            "risk_filter_macd_cross": confluence.get("risk_filter_macd_cross", "NONE"),
+            "risk_filter_macd_zone": confluence.get("risk_filter_macd_zone", "NEAR_ZERO"),
+            "risk_filter_macd_hist": confluence.get("risk_filter_macd_hist", 0.0),
+            "risk_filter_macd_hist_delta": confluence.get("risk_filter_macd_hist_delta", 0.0),
+            "risk_filter_divergence": confluence.get("risk_filter_divergence", "none"),
+            "risk_filter_reason": confluence.get("risk_filter_reason", "disabled"),
             "runner_activate_pct": self.rule_runner_activate_pct,
             "tp1_reduce_pct": self.rule_tp1_reduce_pct,
         }

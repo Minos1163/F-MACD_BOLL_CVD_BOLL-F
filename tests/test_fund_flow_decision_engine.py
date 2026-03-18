@@ -1222,6 +1222,80 @@ def test_rule_entry_confluence_macd_short_requires_ema_cross():
     assert confluence["short_models"] == []
 
 
+def test_rule_entry_confluence_blocks_long_when_4h_macd_risk_is_bearish():
+    cfg = _rule_cfg()
+    cfg["dual_timeframe"] = {
+        "enabled": True,
+        "risk_filter": {
+            "enable_4h_macd": True,
+            "block_on_4h_divergence": True,
+        },
+    }
+    engine = FundFlowDecisionEngine(cfg)
+    ctx = _rule_entry_context(direction="LONG_ONLY")
+    ctx["timeframes"]["4h"] = {
+        "last_open": 101.0,
+        "last_close": 99.0,
+        "macd_cross": "DEAD",
+        "macd_zone": "BELOW_ZERO",
+        "macd_hist": -0.15,
+        "macd_hist_delta": -0.04,
+        "macd_hist_expand_up": False,
+        "macd_hist_expand_down": True,
+    }
+    confluence = engine._rule_entry_confluence(ctx, {"direction": "LONG_ONLY"})
+    assert confluence["long_ok"] is False
+    assert confluence["long_models"] == []
+    assert confluence["risk_filter_allow_long"] is False
+    assert "4h_macd_risk_block" in confluence["reason"]
+
+
+def test_rule_entry_confluence_blocks_short_when_4h_macd_risk_is_bullish():
+    cfg = _rule_cfg()
+    cfg["dual_timeframe"] = {
+        "enabled": True,
+        "risk_filter": {
+            "enable_4h_macd": True,
+            "block_on_4h_divergence": True,
+        },
+    }
+    engine = FundFlowDecisionEngine(cfg)
+    ctx = _rule_entry_context(direction="SHORT_ONLY")
+    ctx["timeframes"]["4h"] = {
+        "last_open": 99.0,
+        "last_close": 101.0,
+        "macd_cross": "GOLDEN",
+        "macd_zone": "ABOVE_ZERO",
+        "macd_hist": 0.15,
+        "macd_hist_delta": 0.04,
+        "macd_hist_expand_up": True,
+        "macd_hist_expand_down": False,
+    }
+    confluence = engine._rule_entry_confluence(ctx, {"direction": "SHORT_ONLY"})
+    assert confluence["short_ok"] is False
+    assert confluence["short_models"] == []
+    assert confluence["risk_filter_allow_short"] is False
+    assert "4h_macd_risk_block" in confluence["reason"]
+
+
+def test_rule_entry_confluence_keeps_entry_when_4h_risk_context_is_missing():
+    cfg = _rule_cfg()
+    cfg["dual_timeframe"] = {
+        "enabled": True,
+        "risk_filter": {
+            "enable_4h_macd": True,
+        },
+    }
+    engine = FundFlowDecisionEngine(cfg)
+    confluence = engine._rule_entry_confluence(
+        _rule_entry_context(direction="LONG_ONLY"),
+        {"direction": "LONG_ONLY"},
+    )
+    assert confluence["long_ok"] is True
+    assert confluence["risk_filter_allow_long"] is True
+    assert confluence["risk_filter_reason"] == "missing_4h_context"
+
+
 def test_rule_risk_plan_respects_2_to_5_pct_stop_band():
     engine = FundFlowDecisionEngine(_rule_cfg())
     risk_plan = engine._rule_build_risk_plan(

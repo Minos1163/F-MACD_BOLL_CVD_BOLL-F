@@ -23,7 +23,20 @@ DEFAULT_CONFIG_REL = "config/trading_config_fund_flow.json"
 def _resolve_config_path(config_arg: str | None) -> str | None:
     if config_arg is None:
         return None
-    return config_arg if os.path.isabs(config_arg) else os.path.join(PROJECT_ROOT, config_arg)
+    if os.path.isabs(config_arg):
+        return os.path.abspath(config_arg)
+
+    cwd_candidate = os.path.abspath(config_arg)
+    if os.path.exists(cwd_candidate):
+        return cwd_candidate
+
+    project_candidate = os.path.join(PROJECT_ROOT, config_arg)
+    if os.path.exists(project_candidate):
+        return project_candidate
+
+    # Keep legacy behavior for repo-root startup commands like:
+    # `python src/main.py --config config/trading_config_fund_flow.json`
+    return project_candidate
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -37,7 +50,10 @@ def _load_startup_config(config_path: str | None) -> dict:
     if not config_path:
         return {}
     try:
-        with open(config_path, "r", encoding="utf-8") as f:
+        resolved_path = _resolve_config_path(config_path)
+        if not resolved_path or not os.path.exists(resolved_path):
+            return {}
+        with open(resolved_path, "r", encoding="utf-8") as f:
             loaded = json.load(f)
     except Exception:
         return {}

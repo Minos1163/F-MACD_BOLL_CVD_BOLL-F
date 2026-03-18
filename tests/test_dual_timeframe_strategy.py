@@ -59,9 +59,10 @@ class TestTechnicalIndicators:
         vwap = TechnicalIndicators.calculate_vwap(high, low, close, volume)
 
         assert len(vwap) == len(close)
-        # VWAP 应该在高低价之间
-        for i in range(len(vwap)):
-            assert low[i] <= vwap[i] <= high[i]
+        # 累积 VWAP 应该位于整体价格区间内，且在上涨样本里逐步抬升
+        assert vwap.min() >= low.min()
+        assert vwap.max() <= high.max()
+        assert np.all(np.diff(vwap) >= 0)
 
 
 class TestDualTimeframeStrategy:
@@ -76,19 +77,20 @@ class TestDualTimeframeStrategy:
         """测试多头信号生成"""
         # 创建模拟数据：1H 多头趋势
         close_1h = np.linspace(100, 150, 200)  # 上涨趋势
-        noise = np.random.normal(0, 1, 200)
-        close_1h = close_1h + noise
+        close_4h = np.linspace(95, 150, 200)
 
         # 创建模拟数据：15m 回踩后启动
         close_15m = np.linspace(140, 150, 200)
-        close_15m[150:160] -= 2  # 回踩
-        close_15m[160:] += 3  # 重新上涨
+        close_15m[188:194] -= 3  # 临近末端回踩
+        close_15m[194:] += 2.5  # 二次启动
 
         high_15m = close_15m + 1
         low_15m = close_15m - 1
         volume_15m = np.ones(200) * 1000
 
-        signal = strategy.analyze(close_4h, high_15m, low_15m, close_15m, volume_15m)
+        signal = strategy.analyze(
+            close_1h, high_15m, low_15m, close_15m, volume_15m, close_4h=close_4h
+        )
 
         # 应该生成信号
         assert signal is not None
@@ -101,21 +103,22 @@ class TestDualTimeframeStrategy:
 
     def test_bearish_signal_generation(self, strategy):
         """测试空头信号生成"""
-        # 创建模拟数据：4H 空头趋势
-        close_4h = np.linspace(150, 100, 200)  # 下跌趋势
-        noise = np.random.normal(0, 1, 200)
-        close_4h = close_4h + noise
+        # 创建模拟数据：1H 空头趋势 + 4H 风控同向
+        close_1h = np.linspace(150, 100, 200)  # 下跌趋势
+        close_4h = np.linspace(155, 100, 200)
 
         # 创建模拟数据：15m 反弹后下跌
         close_15m = np.linspace(110, 100, 200)
-        close_15m[150:160] += 2  # 反弹
-        close_15m[160:] -= 3  # 继续下跌
+        close_15m[188:193] += 2.58  # 临近末端反弹
+        close_15m[193:] -= 1.3  # 继续下跌
 
         high_15m = close_15m + 1
         low_15m = close_15m - 1
         volume_15m = np.ones(200) * 1000
 
-        signal = strategy.analyze(close_4h, high_15m, low_15m, close_15m, volume_15m)
+        signal = strategy.analyze(
+            close_1h, high_15m, low_15m, close_15m, volume_15m, close_4h=close_4h
+        )
 
         # 应该生成信号
         assert signal is not None
@@ -129,14 +132,17 @@ class TestDualTimeframeStrategy:
     def test_no_signal_in_range(self, strategy):
         """测试震荡市场不生成信号"""
         # 创建模拟数据：震荡
-        close_4h = np.random.normal(100, 2, 200)
+        close_1h = np.random.normal(100, 2, 200)
+        close_4h = np.random.normal(100, 3, 200)
 
         high_15m = np.random.normal(100, 1, 200)
         low_15m = np.random.normal(100, 1, 200)
         close_15m = (high_15m + low_15m) / 2
         volume_15m = np.ones(200) * 1000
 
-        signal = strategy.analyze(close_4h, high_15m, low_15m, close_15m, volume_15m)
+        signal = strategy.analyze(
+            close_1h, high_15m, low_15m, close_15m, volume_15m, close_4h=close_4h
+        )
 
         # 震荡市场不应该生成信号
         assert signal is None
@@ -144,20 +150,42 @@ class TestDualTimeframeStrategy:
     def test_risk_reward_calculation(self, strategy):
         """测试风险回报比计算"""
         # 创建模拟数据
-        close_4h = np.linspace(100, 150, 200)
+        close_1h = np.linspace(100, 150, 200)
+        close_4h = np.linspace(95, 150, 200)
         close_15m = np.linspace(140, 150, 200)
-        close_15m[150:160] -= 2
-        close_15m[160:] += 3
+        close_15m[188:194] -= 3
+        close_15m[194:] += 2.5
 
         high_15m = close_15m + 1
         low_15m = close_15m - 1
         volume_15m = np.ones(200) * 1000
 
-        signal = strategy.analyze(close_4h, high_15m, low_15m, close_15m, volume_15m)
+        signal = strategy.analyze(
+            close_1h, high_15m, low_15m, close_15m, volume_15m, close_4h=close_4h
+        )
 
         if signal:
             # 风险回报比应该 >= 1.5
             assert signal.risk_reward >= 1.5
+
+    def test_4h_macd_risk_filter_blocks_countertrend_long(self, strategy):
+        """测试 4H MACD 风控会拦截与高周期动能冲突的多头入场"""
+        close_1h = np.linspace(100, 150, 200)
+        close_4h = np.linspace(160, 100, 200)  # 4H 明显空头
+
+        close_15m = np.linspace(140, 150, 200)
+        close_15m[188:194] -= 3
+        close_15m[194:] += 2.5
+
+        high_15m = close_15m + 1
+        low_15m = close_15m - 1
+        volume_15m = np.ones(200) * 1000
+
+        signal = strategy.analyze(
+            close_1h, high_15m, low_15m, close_15m, volume_15m, close_4h=close_4h
+        )
+
+        assert signal is None
 
 
 class TestEMAPullbackStrategy:
@@ -179,7 +207,7 @@ class TestEMAPullbackStrategy:
         # 应该检测到回踩
         assert result is not None
         assert 'distance_to_ema21' in result
-        assert 'pullback_depth' in result
+        assert 'valid_structure' in result
 
     def test_detect_secondary_launch(self, pullback_strategy):
         """测试检测二次启动"""
@@ -229,8 +257,8 @@ class TestTrendFollowingEngine:
         # 创建多头趋势数据
         close_4h = np.linspace(100, 150, 200)
         close_15m = np.linspace(140, 150, 200)
-        close_15m[150:160] -= 2
-        close_15m[160:] += 3
+        close_15m[188:194] -= 3
+        close_15m[194:] += 2.5
 
         high_15m = close_15m + 1
         low_15m = close_15m - 1
@@ -242,7 +270,8 @@ class TestTrendFollowingEngine:
             high_15m,
             low_15m,
             close_15m,
-            volume_15m
+            volume_15m,
+            close_4h=close_4h
         )
 
         # 应该生成信号或返回 None（取决于市场状态）
@@ -280,16 +309,19 @@ class TestSignalQuality:
 
     def test_bullish_signal_has_correct_levels(self, strategy):
         """测试多头信号的止盈止损"""
-        close_4h = np.linspace(100, 150, 200)
+        close_1h = np.linspace(100, 150, 200)
+        close_4h = np.linspace(95, 150, 200)
         close_15m = np.linspace(140, 150, 200)
-        close_15m[150:160] -= 2
-        close_15m[160:] += 3
+        close_15m[188:194] -= 3
+        close_15m[194:] += 2.5
 
         high_15m = close_15m + 1
         low_15m = close_15m - 1
         volume_15m = np.ones(200) * 1000
 
-        signal = strategy.analyze(close_4h, high_15m, low_15m, close_15m, volume_15m)
+        signal = strategy.analyze(
+            close_1h, high_15m, low_15m, close_15m, volume_15m, close_4h=close_4h
+        )
 
         if signal and signal.direction == TrendDirection.BULLISH:
             assert signal.take_profit > signal.entry_price
@@ -299,16 +331,19 @@ class TestSignalQuality:
 
     def test_bearish_signal_has_correct_levels(self, strategy):
         """测试空头信号的止盈止损"""
-        close_4h = np.linspace(150, 100, 200)
+        close_1h = np.linspace(150, 100, 200)
+        close_4h = np.linspace(155, 100, 200)
         close_15m = np.linspace(110, 100, 200)
-        close_15m[150:160] += 2
-        close_15m[160:] -= 3
+        close_15m[188:193] += 2.58
+        close_15m[193:] -= 1.3
 
         high_15m = close_15m + 1
         low_15m = close_15m - 1
         volume_15m = np.ones(200) * 1000
 
-        signal = strategy.analyze(close_4h, high_15m, low_15m, close_15m, volume_15m)
+        signal = strategy.analyze(
+            close_1h, high_15m, low_15m, close_15m, volume_15m, close_4h=close_4h
+        )
 
         if signal and signal.direction == TrendDirection.BEARISH:
             assert signal.take_profit < signal.entry_price
@@ -327,7 +362,8 @@ class TestStrategyEdgeCases:
 
     def test_insufficient_data(self, strategy):
         """测试数据不足的情况"""
-        close_4h = np.random.normal(100, 1, 50)  # 数据不足
+        close_1h = np.random.normal(100, 1, 50)  # 数据不足
+        close_4h = np.random.normal(100, 1, 50)
         close_15m = np.random.normal(100, 1, 50)
 
         high_15m = close_15m + 1
@@ -335,13 +371,16 @@ class TestStrategyEdgeCases:
         volume_15m = np.ones(50) * 1000
 
         # 不应该崩溃
-        signal = strategy.analyze(close_4h, high_15m, low_15m, close_15m, volume_15m)
+        signal = strategy.analyze(
+            close_1h, high_15m, low_15m, close_15m, volume_15m, close_4h=close_4h
+        )
         # 可能返回 None（数据不足）
         assert signal is None or isinstance(signal, Signal)
 
     def test_high_volatility(self, strategy):
         """测试高波动市场"""
-        close_4h = np.random.normal(100, 10, 200)  # 高波动
+        close_1h = np.random.normal(100, 10, 200)  # 高波动
+        close_4h = np.random.normal(100, 12, 200)
         close_15m = np.random.normal(100, 5, 200)
 
         high_15m = close_15m + 5
@@ -349,12 +388,15 @@ class TestStrategyEdgeCases:
         volume_15m = np.random.uniform(500, 1500, 200)
 
         # 不应该崩溃
-        signal = strategy.analyze(close_4h, high_15m, low_15m, close_15m, volume_15m)
+        signal = strategy.analyze(
+            close_1h, high_15m, low_15m, close_15m, volume_15m, close_4h=close_4h
+        )
         assert signal is None or isinstance(signal, Signal)
 
     def test_zero_volume(self, strategy):
         """测试零成交量的情况"""
-        close_4h = np.linspace(100, 150, 200)
+        close_1h = np.linspace(100, 150, 200)
+        close_4h = np.linspace(95, 150, 200)
         close_15m = np.linspace(140, 150, 200)
 
         high_15m = close_15m + 1
@@ -362,7 +404,9 @@ class TestStrategyEdgeCases:
         volume_15m = np.zeros(200)  # 零成交量
 
         # 不应该崩溃（虽然 VWAP 可能异常）
-        signal = strategy.analyze(close_4h, high_15m, low_15m, close_15m, volume_15m)
+        signal = strategy.analyze(
+            close_1h, high_15m, low_15m, close_15m, volume_15m, close_4h=close_4h
+        )
         assert signal is None or isinstance(signal, Signal)
 
 

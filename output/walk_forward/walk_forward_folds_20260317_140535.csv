@@ -1,0 +1,6 @@
+﻿fold,train_start,train_end,test_start,test_end,selected_profile,selected_mode,selected_train_score,selected_test_return_pct,selected_test_drawdown_pct,selected_test_profit_factor,baseline_mode,baseline_test_return_pct,baseline_test_drawdown_pct,baseline_test_profit_factor
+fold_01,2025-09-18T06:00:00,2025-10-18T06:00:00,2025-10-18T06:00:00,2025-11-17T06:00:00,btc_eth_hours_guard_tight_v2,loose,5.311535,-5.3564,-5.6588,0.557655,strict,-17.136,-17.136,0.438521
+fold_02,2025-10-18T06:00:00,2025-11-17T06:00:00,2025-11-17T06:00:00,2025-12-17T06:00:00,btc_eth_hours_guard_tight_v2,loose,-1.76043,-7.4515,-8.5777,0.178845,strict,-9.8846,-14.2833,0.694884
+fold_03,2025-11-17T06:00:00,2025-12-17T06:00:00,2025-12-17T06:00:00,2026-01-16T06:00:00,baseline,strict,-7.934915,-18.9744,-19.028,0.200713,strict,-18.9744,-19.028,0.200713
+fold_04,2025-12-17T06:00:00,2026-01-16T06:00:00,2026-01-16T06:00:00,2026-02-15T06:00:00,btc_eth_hours_guard_tight_v2,loose,-5.835265,-10.7602,-11.0089,0.320186,strict,-3.8733,-7.7124,0.929349
+fold_05,2026-01-16T06:00:00,2026-02-15T06:00:00,2026-02-15T06:00:00,2026-03-17T06:00:00,baseline,strict,2.72085,-12.3908,-13.2568,0.617192,strict,-12.3908,-13.2568,0.617192

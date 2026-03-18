@@ -4,8 +4,15 @@
 演示如何使用 DualTimeframeStrategy 和 TrendFollowingEngine
 """
 
-import numpy as np
+from pathlib import Path
+import sys
 from typing import Dict, List
+
+import numpy as np
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 from src.fund_flow.dual_timeframe_strategy import (
     DualTimeframeStrategy,
     EMAConfig,
@@ -31,35 +38,39 @@ def generate_sample_data(trend: str = "bullish") -> Dict[str, np.ndarray]:
         trend: "bullish", "bearish", 或 "range"
 
     Returns:
-        包含 1H 和 15m 数据的字典
+        包含 4H、1H 和 15m 数据的字典
     """
-    # 生成 1H 数据
+    # 生成 4H 数据
     if trend == "bullish":
-        close_1h = np.linspace(100, 150, 200)  # 上涨趋势
+        close_4h = np.linspace(95, 150, 200)  # 上涨趋势
+        close_1h = np.linspace(100, 150, 200)  # 主趋势更敏捷
         base_price_15m = 140
         direction = 1
     elif trend == "bearish":
+        close_4h = np.linspace(155, 100, 200)  # 下跌趋势
         close_1h = np.linspace(150, 100, 200)  # 下跌趋势
         base_price_15m = 110
         direction = -1
     else:  # range
+        close_4h = np.random.normal(125, 3, 200)
         close_1h = np.random.normal(125, 2, 200)  # 震荡
         base_price_15m = 125
         direction = 0
 
     # 添加噪声
+    noise_4h = np.random.normal(0, 1.2, 200)
     noise_1h = np.random.normal(0, 1, 200)
+    close_4h = close_4h + noise_4h
     close_1h = close_1h + noise_1h
 
     # 生成 15m 数据
-    close_15m = np.linspace(base_price_15m, base_price_15m + (20 * direction), 200)
+    close_15m = np.linspace(base_price_15m, base_price_15m + (10 * direction), 200)
 
     # 添加回踩结构
     if trend != "range":
-        # 回踩
-        close_15m[150:160] -= (2 * direction)
-        # 二次启动
-        close_15m[160:] += (3 * direction)
+        # 将回踩/反弹放到尾段，便于策略在最近窗口识别
+        close_15m[188:194] -= (3 * direction)
+        close_15m[194:] += (2.5 * direction)
 
     # 添加噪声
     noise_15m = np.random.normal(0, 0.5, 200)
@@ -71,6 +82,7 @@ def generate_sample_data(trend: str = "bullish") -> Dict[str, np.ndarray]:
     volume_15m = np.random.uniform(800, 1200, 200)
 
     return {
+        "4h": {"close": close_4h},
         "1h": {"close": close_1h},
         "15m": {
             "open": close_15m - 0.5,
@@ -102,12 +114,13 @@ def example_1_basic_strategy():
         high_15m=data["15m"]["high"],
         low_15m=data["15m"]["low"],
         close_15m=data["15m"]["close"],
-        volume_15m=data["15m"]["volume"]
+        volume_15m=data["15m"]["volume"],
+        close_4h=data["4h"]["close"]
     )
 
     # 显示结果
     if signal:
-        print(f"\n✓ 发现交易信号！")
+        print(f"\n[OK] 发现交易信号！")
         print(f"  方向: {signal.direction.value}")
         print(f"  强度: {signal.strength.value}")
         print(f"  入场价: {signal.entry_price:.2f}")
@@ -119,7 +132,7 @@ def example_1_basic_strategy():
         for s in signal.structure:
             print(f"    - {s}")
     else:
-        print("\n✗ 未发现交易信号")
+        print("\n[NO] 未发现交易信号")
 
     # 测试空头市场
     print("\n" + "-" * 40)
@@ -131,11 +144,12 @@ def example_1_basic_strategy():
         high_15m=data["15m"]["high"],
         low_15m=data["15m"]["low"],
         close_15m=data["15m"]["close"],
-        volume_15m=data["15m"]["volume"]
+        volume_15m=data["15m"]["volume"],
+        close_4h=data["4h"]["close"]
     )
 
     if signal:
-        print(f"\n✓ 发现交易信号！")
+        print(f"\n[OK] 发现交易信号！")
         print(f"  方向: {signal.direction.value}")
         print(f"  强度: {signal.strength.value}")
         print(f"  入场价: {signal.entry_price:.2f}")
@@ -143,7 +157,7 @@ def example_1_basic_strategy():
         print(f"  止盈价: {signal.take_profit:.2f}")
         print(f"  风险回报比: {signal.risk_reward:.2f}")
     else:
-        print("\n✗ 未发现交易信号")
+        print("\n[NO] 未发现交易信号")
 
     # 测试震荡市场
     print("\n" + "-" * 40)
@@ -155,13 +169,14 @@ def example_1_basic_strategy():
         high_15m=data["15m"]["high"],
         low_15m=data["15m"]["low"],
         close_15m=data["15m"]["close"],
-        volume_15m=data["15m"]["volume"]
+        volume_15m=data["15m"]["volume"],
+        close_4h=data["4h"]["close"]
     )
 
     if signal:
-        print(f"\n✓ 发现交易信号（不应该出现）")
+        print(f"\n[WARN] 发现交易信号（不应该出现）")
     else:
-        print("\n✓ 震荡市场，未发现交易信号（符合预期）")
+        print("\n[OK] 震荡市场，未发现交易信号（符合预期）")
 
 
 def example_2_trend_following_engine():
@@ -182,7 +197,7 @@ def example_2_trend_following_engine():
     market_state = engine.analyze_market(
         "BTCUSDT",
         data["4h"]["close"],
-        data["4h"]["close"]  # 简化处理
+        data["1h"]["close"]
     )
 
     print(f"\n市场状态:")
@@ -195,15 +210,16 @@ def example_2_trend_following_engine():
     print("\n生成交易信号...")
     signal = engine.generate_signal(
         "BTCUSDT",
-        data["4h"]["close"],
+        data["1h"]["close"],
         data["15m"]["high"],
         data["15m"]["low"],
         data["15m"]["close"],
-        data["15m"]["volume"]
+        data["15m"]["volume"],
+        close_4h=data["4h"]["close"]
     )
 
     if signal:
-        print(f"\n✓ 发现交易信号！")
+        print(f"\n[OK] 发现交易信号！")
         print(f"  方向: {signal.direction.value}")
         print(f"  强度: {signal.strength.value}")
         print(f"  入场价: {signal.entry_price:.2f}")
@@ -239,8 +255,9 @@ def example_3_multiple_symbols():
         signal = analyze_symbol_with_trend_engine(
             engine,
             symbol,
-            data["4h"],
-            data["15m"]
+            data["1h"],
+            data["15m"],
+            data_4h=data["4h"]
         )
 
         if signal:
@@ -277,9 +294,12 @@ def example_4_custom_config():
     )
 
     macd_config = MACDConfig(
-        fast_period=12,
-        slow_period=26,
-        signal_period=9,
+        fast_period_1h=12,
+        slow_period_1h=26,
+        signal_period_1h=9,
+        fast_period_4h=12,
+        slow_period_4h=26,
+        signal_period_4h=9,
         fast_period_15m=8,
         slow_period_15m=21,
         signal_period_15m=5
@@ -297,7 +317,8 @@ def example_4_custom_config():
     print(f"  EMA21: {ema_config.ema21_period}")
     print(f"  EMA55: {ema_config.ema55_period}")
     print(f"  EMA200: {ema_config.ema200_period}")
-    print(f"  MACD (4H): {macd_config.fast_period}, {macd_config.slow_period}, {macd_config.signal_period}")
+    print(f"  MACD (1H): {macd_config.fast_period_1h}, {macd_config.slow_period_1h}, {macd_config.signal_period_1h}")
+    print(f"  MACD (4H 风控): {macd_config.fast_period_4h}, {macd_config.slow_period_4h}, {macd_config.signal_period_4h}")
     print(f"  MACD (15m): {macd_config.fast_period_15m}, {macd_config.slow_period_15m}, {macd_config.signal_period_15m}")
     print(f"  VWAP: {'Anchored' if vwap_config.use_anchored else 'Regular'}")
 
@@ -308,11 +329,12 @@ def example_4_custom_config():
         high_15m=data["15m"]["high"],
         low_15m=data["15m"]["low"],
         close_15m=data["15m"]["close"],
-        volume_15m=data["15m"]["volume"]
+        volume_15m=data["15m"]["volume"],
+        close_4h=data["4h"]["close"]
     )
 
     if signal:
-        print(f"\n✓ 发现交易信号！")
+        print(f"\n[OK] 发现交易信号！")
         print(f"  方向: {signal.direction.value}")
         print(f"  强度: {signal.strength.value}")
         print(f"  入场价: {signal.entry_price:.2f}")
@@ -334,7 +356,12 @@ def example_5_strategy_config():
     print(f"    - EMA55: {config['ema']['ema55_period']}")
     print(f"    - EMA200: {config['ema']['ema200_period']}")
 
-    print(f"\n  MACD 配置 (4H):")
+    print(f"\n  MACD 配置 (1H):")
+    print(f"    - 快线: {config['macd']['1h']['fast_period']}")
+    print(f"    - 慢线: {config['macd']['1h']['slow_period']}")
+    print(f"    - 信号线: {config['macd']['1h']['signal_period']}")
+
+    print(f"\n  MACD 配置 (4H 风控):")
     print(f"    - 快线: {config['macd']['4h']['fast_period']}")
     print(f"    - 慢线: {config['macd']['4h']['slow_period']}")
     print(f"    - 信号线: {config['macd']['4h']['signal_period']}")
@@ -347,6 +374,10 @@ def example_5_strategy_config():
     print(f"\n  VWAP 配置:")
     print(f"    - 使用锚定: {config['vwap']['use_anchored']}")
     print(f"    - 锚定周期: {config['vwap']['anchor_period']}")
+
+    print(f"\n  4H 风控:")
+    print(f"    - 启用 4H MACD: {config['risk_filter']['enable_4h_macd']}")
+    print(f"    - 背离直接拦截: {config['risk_filter']['block_on_4h_divergence']}")
 
     print(f"\n  入场条件:")
     print(f"    - 最小回踩: {config['entry']['pullback_min_depth']*100:.1f}%")
