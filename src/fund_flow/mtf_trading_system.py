@@ -1,6 +1,7 @@
 """
-多时间框架（MTF）交易系统 V1.0
-核心逻辑：1H为主执行层，4H定宏观边界，15m抓微观动能
+多时间框架（MTF）交易系统 V2.0
+核心逻辑：五层共振系统 - 4H宏观定调 → 1H趋势确认 → 15m回调买点 → 5m启动确认 → 1m精准入场
+VWAP作为机构成本线贯穿全流程
 """
 
 from __future__ import annotations
@@ -20,9 +21,9 @@ class TrendDirection(Enum):
 
 class SignalGrade(Enum):
     """信号等级"""
-    S_GRADE = "S"  # 90-100分，全仓
-    A_GRADE = "A"  # 70-89分，半仓
-    B_GRADE = "B"  # <70分，忽略
+    S_GRADE = "S"  # 五层全共振，全仓
+    A_GRADE = "A"  # 四层共振，半仓
+    B_GRADE = "B"  # 三层共振，忽略
 
 
 class MarketRegime(Enum):
@@ -41,28 +42,60 @@ class SignalType(Enum):
     NONE = "none"
 
 
+class VWAPState(Enum):
+    """VWAP状态"""
+    ABOVE = "above"    # 价格 > VWAP，多头控制
+    BELOW = "below"    # 价格 < VWAP，空头控制
+    NEUTRAL = "neutral"  # 价格接近VWAP
+
+
 @dataclass
 class MTFConfig:
-    """多时间框架配置"""
+    """多时间框架配置 - 五层共振系统"""
     # EMA参数
-    ema_fast: int = 21
-    ema_medium: int = 55
-    ema_slow: int = 200
+    ema_fast: int = 21      # 15m/5m回踩参考
+    ema_medium: int = 55    # 1H趋势确认
+    ema_slow: int = 200     # 4H宏观趋势
     
-    # MACD参数 - 4H
+    # MACD参数 - 4H (宏观定调)
     macd_4h_fast: int = 12
     macd_4h_slow: int = 26
     macd_4h_signal: int = 9
     
-    # MACD参数 - 15m
+    # MACD参数 - 1H (趋势确认)
+    macd_1h_fast: int = 12
+    macd_1h_slow: int = 26
+    macd_1h_signal: int = 9
+    
+    # MACD参数 - 15m (回调买点)
     macd_15m_fast: int = 8
     macd_15m_slow: int = 21
     macd_15m_signal: int = 5
     
+    # MACD参数 - 5m (启动确认)
+    macd_5m_fast: int = 8
+    macd_5m_slow: int = 21
+    macd_5m_signal: int = 5
+    
+    # MACD参数 - 1m (精准入场)
+    macd_1m_fast: int = 8
+    macd_1m_slow: int = 21
+    macd_1m_signal: int = 5
+    
+    # VWAP参数
+    vwap_anchor: str = "session"  # session/daily/weekly
+    
+    # 五层共振评分
+    layer_4h_weight: int = 20  # 宏观层权重
+    layer_1h_weight: int = 25  # 趋势层权重
+    layer_15m_weight: int = 20  # 回调层权重
+    layer_5m_weight: int = 20   # 启动层权重
+    layer_1m_weight: int = 15   # 入场层权重
+    
     # 评分阈值
     score_pass_threshold: int = 70
-    score_s_grade_min: int = 90
-    score_a_grade_min: int = 70
+    score_s_grade_min: int = 90  # 五层全共振
+    score_a_grade_min: int = 70  # 四层共振
     
     # 风控参数
     max_risk_per_trade: float = 0.015  # 1.5%
@@ -161,41 +194,76 @@ class TechnicalIndicators:
         return atr
 
 
-class MacroLayer:
-    """宏观层 (4H) - 定调与风控"""
+class MacroLayer4H:
+    """第一层：宏观层 (4H) - 趋势定调"""
     
     def __init__(self, config: MTFConfig):
         self.config = config
+    
+    def analyze_4h_trend(self, close: np.ndarray) -> Dict[str, any]:
+        """
+        4H 趋势分析 - 做多条件：
+        1. 价格 > EMA200 (长期偏多)
+        2. MACD柱 > 0 (动能向上)
+        
+        返回：
+        {
+            "passed": bool,
+            "score": int,  # 0-20分
+            "price_above_ema200": bool,
+            "macd_histogram_positive": bool,
+            "reason": str
+        }
+        """
+        # 计算 EMA200
+        ema200 = TechnicalIndicators.calculate_ema(close, self.config.ema_slow)
+        current_price = close[-1]
+        current_ema200 = ema200[-1]
+        
+        # 计算 MACD
+        _, _, histogram = TechnicalIndicators.calculate_macd(
+            close,
+            self.config.macd_4h_fast,
+            self.config.macd_4h_slow,
+            self.config.macd_4h_signal
+        )
+        current_hist = histogram[-1]
+        
+        # 检查条件
+        price_above_ema200 = current_price > current_ema200
+        macd_positive = current_hist > 0
+        
+        # 计算得分
+        score = 0
+        if price_above_ema200:
+            score += 10
+        if macd_positive:
+            score += 10
+        
+        passed = price_above_ema200 and macd_positive
+        
+        return {
+            "passed": passed,
+            "score": score,
+            "price_above_ema200": price_above_ema200,
+            "macd_histogram_positive": macd_positive,
+            "reason": f"4H宏观: 价格{'>' if price_above_ema200 else '<'}EMA200, MACD柱{'>' if macd_positive else '<'}0"
+        }
     
     def get_direction_permission(self,
                                 close: np.ndarray,
                                 macd_line: np.ndarray,
                                 signal_line: np.ndarray,
                                 histogram: np.ndarray) -> Dict[str, any]:
-        """
-        获取方向许可（4H 一票否决制）
-        
-        返回：
-        {
-            "long_allowed": bool,
-            "short_allowed": bool,
-            "reason": str,
-            "macd_state": str  # "bullish", "bearish", "neutral"
-        }
-        """
-        ema55 = TechnicalIndicators.calculate_ema(close, self.config.ema_medium)
+        """获取方向许可（4H 一票否决制）- 保持兼容"""
+        ema200 = TechnicalIndicators.calculate_ema(close, self.config.ema_slow)
         current_price = close[-1]
-        current_ema55 = ema55[-1]
+        current_ema200 = ema200[-1]
         
-        # MACD 状态
         current_hist = histogram[-1]
-        prev_hist = histogram[-2]
-        
-        # 检查死叉/金叉
         is_death_cross = (histogram[-2] > 0 and histogram[-1] < 0)
         is_golden_cross = (histogram[-2] < 0 and histogram[-1] > 0)
         
-        # 检查顶背离/底背离
         divergence = self._check_divergence(close, histogram)
         
         result = {
@@ -205,25 +273,24 @@ class MacroLayer:
             "macd_state": "neutral"
         }
         
-        # 判断 MACD 状态
         if current_hist > 0:
             result["macd_state"] = "bullish"
         elif current_hist < 0:
             result["macd_state"] = "bearish"
         
-        # 做多许可
-        if current_price > current_ema55:
+        # 做多许可：价格 > EMA200 且 MACD柱 > 0
+        if current_price > current_ema200 and current_hist > 0:
             if not (divergence == "bearish" or is_death_cross):
                 result["long_allowed"] = True
-                result["reason"] = "4H 多头许可通过"
+                result["reason"] = "4H 多头许可通过 (价格>EMA200 + MACD柱>0)"
             else:
                 result["reason"] = f"4H 做多被否决: {divergence} 或死叉"
         
-        # 做空许可
-        if current_price < current_ema55:
+        # 做空许可：价格 < EMA200 且 MACD柱 < 0
+        if current_price < current_ema200 and current_hist < 0:
             if not (divergence == "bullish" or is_golden_cross):
                 result["short_allowed"] = True
-                result["reason"] = "4H 空头许可通过"
+                result["reason"] = "4H 空头许可通过 (价格<EMA200 + MACD柱<0)"
             else:
                 result["reason"] = f"4H 做空被否决: {divergence} 或金叉"
         
@@ -263,11 +330,589 @@ class MacroLayer:
         return "none"
 
 
-class CoreLayer:
-    """执行层 (1H) - 信号生成核心"""
+class LaunchLayer5m:
+    """第四层：启动确认层 (5m) - 资金推动确认"""
     
     def __init__(self, config: MTFConfig):
         self.config = config
+    
+    def analyze_5m_launch(self,
+                         close: np.ndarray,
+                         high: np.ndarray,
+                         low: np.ndarray,
+                         volume: np.ndarray) -> Dict[str, any]:
+        """
+        5m 启动确认 - 做多条件：
+        1. MACD柱子翻红（比金叉提前2-3根K线）
+        2. 价格突破VWAP (资金推动)
+        
+        优化说明：
+        - 柱子翻红信号比金叉提前2-3根K线
+        - 翻红后红柱增强信号更强
+        
+        返回：
+        {
+            "passed": bool,
+            "score": int,  # 0-20分
+            "histogram_cross": bool,       # 柱子翻红信号
+            "bars_since_cross": int,       # 翻红后几根K线
+            "price_above_vwap": bool,
+            "vwap_value": float,
+            "reason": str
+        }
+        """
+        # 计算 MACD
+        _, _, histogram = TechnicalIndicators.calculate_macd(
+            close,
+            self.config.macd_5m_fast,
+            self.config.macd_5m_slow,
+            self.config.macd_5m_signal
+        )
+        
+        # MACD 柱子翻红检测（比金叉提前2-3根K线）
+        histogram_cross = False
+        bars_since_cross = -1
+        red_bar_strength = 0.0
+        
+        if len(histogram) >= 5:
+            # 检测柱子从负转正
+            for i in range(len(histogram) - 2, max(0, len(histogram) - 6), -1):
+                if histogram[i] < 0 and histogram[i + 1] >= 0:
+                    histogram_cross = True
+                    bars_since_cross = len(histogram) - 1 - i
+                    break
+            
+            # 计算红柱强度
+            if histogram[-1] > 0 and len(histogram) >= 3:
+                # 红柱增强
+                if histogram[-1] > histogram[-2] > histogram[-3]:
+                    red_bar_strength = 1.0  # 强
+                elif histogram[-1] > histogram[-2]:
+                    red_bar_strength = 0.7  # 中
+                else:
+                    red_bar_strength = 0.3  # 弱
+        
+        # 计算 VWAP
+        vwap = TechnicalIndicators.calculate_vwap(high, low, close, volume)
+        current_vwap = vwap[-1]
+        current_price = close[-1]
+        
+        # 价格突破 VWAP 判断
+        price_above_vwap = current_price > current_vwap
+        
+        # 计算得分（柱子翻红权重更高）
+        score = 0
+        if histogram_cross:
+            if bars_since_cross <= 2:
+                score += 12  # 刚翻红，强信号
+            elif bars_since_cross <= 4:
+                score += 10  # 翻红后1-2根
+            else:
+                score += 6   # 翻红较久
+        
+        # 红柱增强加分
+        if histogram[-1] > 0 and red_bar_strength > 0.5:
+            score += int(red_bar_strength * 3)
+        
+        if price_above_vwap:
+            score += 10
+        
+        # 通过条件：柱子翻红（或当前红柱增强）且价格在VWAP上方
+        passed = (histogram_cross or (histogram[-1] > 0 and red_bar_strength > 0.5)) and price_above_vwap
+        
+        return {
+            "passed": passed,
+            "score": min(20, score),
+            "histogram_cross": histogram_cross,
+            "bars_since_cross": bars_since_cross,
+            "red_bar_strength": red_bar_strength,
+            "price_above_vwap": price_above_vwap,
+            "vwap_value": current_vwap,
+            "reason": f"5m启动: MACD柱{'翻红(' + str(bars_since_cross) + '根前)' if histogram_cross else '红柱增强' if histogram[-1] > 0 else '无信号'}, 价格{'>' if price_above_vwap else '<'}VWAP"
+        }
+
+
+class EntryLayer1m:
+    """第五层：精准入场层 (1m) - 启动瞬间捕捉"""
+    
+    def __init__(self, config: MTFConfig):
+        self.config = config
+    
+    def analyze_1m_entry(self,
+                        close: np.ndarray,
+                        high: np.ndarray,
+                        low: np.ndarray,
+                        volume: np.ndarray) -> Dict[str, any]:
+        """
+        1m 精准入场 - 做多条件：
+        1. MACD柱子翻红（比金叉提前2-3根K线）
+        2. 价格站上VWAP (确认启动)
+        
+        优化说明：
+        - 柱子翻红比金叉提前2-3根K线，捕捉启动瞬间
+        - 翻红后红柱增强 = 更强入场信号
+        
+        返回：
+        {
+            "passed": bool,
+            "score": int,  # 0-15分
+            "histogram_cross": bool,       # 柱子翻红信号
+            "bars_since_cross": int,       # 翻红后几根K线
+            "price_above_vwap": bool,
+            "entry_price": float,
+            "vwap_value": float,
+            "reason": str
+        }
+        """
+        # 计算 MACD
+        _, _, histogram = TechnicalIndicators.calculate_macd(
+            close,
+            self.config.macd_1m_fast,
+            self.config.macd_1m_slow,
+            self.config.macd_1m_signal
+        )
+        
+        # MACD 柱子翻红检测（比金叉提前2-3根K线）
+        histogram_cross = False
+        bars_since_cross = -1
+        red_bar_strength = 0.0
+        
+        if len(histogram) >= 5:
+            # 检测柱子从负转正
+            for i in range(len(histogram) - 2, max(0, len(histogram) - 6), -1):
+                if histogram[i] < 0 and histogram[i + 1] >= 0:
+                    histogram_cross = True
+                    bars_since_cross = len(histogram) - 1 - i
+                    break
+            
+            # 计算红柱强度
+            if histogram[-1] > 0 and len(histogram) >= 3:
+                if histogram[-1] > histogram[-2] > histogram[-3]:
+                    red_bar_strength = 1.0  # 强
+                elif histogram[-1] > histogram[-2]:
+                    red_bar_strength = 0.7  # 中
+                else:
+                    red_bar_strength = 0.3  # 弱
+        
+        # 计算 VWAP
+        vwap = TechnicalIndicators.calculate_vwap(high, low, close, volume)
+        current_vwap = vwap[-1]
+        current_price = close[-1]
+        
+        # 价格站上 VWAP 判断
+        price_above_vwap = current_price > current_vwap
+        
+        # 计算得分
+        score = 0
+        if histogram_cross:
+            if bars_since_cross <= 1:
+                score += 10  # 刚翻红，最强入场
+            elif bars_since_cross <= 3:
+                score += 8   # 翻红后1-2根
+            else:
+                score += 5   # 翻红较久
+        
+        # 红柱增强加分
+        if histogram[-1] > 0 and red_bar_strength > 0.5:
+            score += int(red_bar_strength * 2)
+        
+        if price_above_vwap:
+            score += 7
+        
+        # 通过条件：柱子翻红（或红柱增强）且价格在VWAP上方
+        passed = (histogram_cross or (histogram[-1] > 0 and red_bar_strength > 0.5)) and price_above_vwap
+        
+        return {
+            "passed": passed,
+            "score": min(15, score),
+            "histogram_cross": histogram_cross,
+            "bars_since_cross": bars_since_cross,
+            "red_bar_strength": red_bar_strength,
+            "price_above_vwap": price_above_vwap,
+            "entry_price": current_price,
+            "vwap_value": current_vwap,
+            "reason": f"1m入场: MACD柱{'翻红(' + str(bars_since_cross) + '根前)' if histogram_cross else '红柱增强' if histogram[-1] > 0 else '无信号'}, 价格{'站上' if price_above_vwap else '未站上'}VWAP"
+        }
+
+
+class VWAPAnalyzer:
+    """VWAP 分析工具 - 机构成本线"""
+    
+    @staticmethod
+    def get_vwap_state(price: float, vwap: float) -> VWAPState:
+        """
+        获取 VWAP 状态
+        
+        价格 > VWAP: 多头控制
+        价格 < VWAP: 空头控制
+        """
+        distance_pct = (price - vwap) / vwap
+        if distance_pct > 0.005:
+            return VWAPState.ABOVE
+        elif distance_pct < -0.005:
+            return VWAPState.BELOW
+        else:
+            return VWAPState.NEUTRAL
+    
+    @staticmethod
+    def calculate_session_vwap(high: np.ndarray,
+                                low: np.ndarray,
+                                close: np.ndarray,
+                                volume: np.ndarray,
+                                session_start: int = 0) -> np.ndarray:
+        """
+        计算会话 VWAP
+        
+        VWAP = Σ(Price × Volume) / ΣVolume
+        """
+        typical_price = (high + low + close) / 3
+        tp_volume = typical_price * volume
+        
+        cum_tp_volume = np.cumsum(tp_volume[session_start:])
+        cum_volume = np.cumsum(volume[session_start:])
+        
+        vwap = np.zeros_like(close, dtype=float)
+        for i in range(session_start, len(close)):
+            rel_idx = i - session_start
+            if cum_volume[rel_idx] != 0:
+                vwap[i] = cum_tp_volume[rel_idx] / cum_volume[rel_idx]
+            else:
+                vwap[i] = close[i]
+        
+        return vwap
+
+
+class LaunchLayer5m:
+    """第四层：启动确认层 (5m) - 资金推动确认"""
+    
+    def __init__(self, config: MTFConfig):
+        self.config = config
+    
+    def analyze_5m_launch(self,
+                         close: np.ndarray,
+                         high: np.ndarray,
+                         low: np.ndarray,
+                         volume: np.ndarray) -> Dict[str, any]:
+        """
+        5m 启动确认 - 做多条件：
+        1. MACD柱子翻红（比金叉提前2-3根K线）
+        2. 价格突破VWAP (资金推动)
+        
+        优化说明：
+        - 柱子翻红信号比金叉提前2-3根K线
+        - 翻红后红柱增强信号更强
+        
+        返回：
+        {
+            "passed": bool,
+            "score": int,  # 0-20分
+            "histogram_cross": bool,       # 柱子翻红信号
+            "bars_since_cross": int,       # 翻红后几根K线
+            "price_above_vwap": bool,
+            "vwap_value": float,
+            "reason": str
+        }
+        """
+        # 计算 MACD
+        _, _, histogram = TechnicalIndicators.calculate_macd(
+            close,
+            self.config.macd_5m_fast,
+            self.config.macd_5m_slow,
+            self.config.macd_5m_signal
+        )
+        
+        # MACD 柱子翻红检测（比金叉提前2-3根K线）
+        histogram_cross = False
+        bars_since_cross = -1
+        red_bar_strength = 0.0
+        
+        if len(histogram) >= 5:
+            # 检测柱子从负转正
+            for i in range(len(histogram) - 2, max(0, len(histogram) - 6), -1):
+                if histogram[i] < 0 and histogram[i + 1] >= 0:
+                    histogram_cross = True
+                    bars_since_cross = len(histogram) - 1 - i
+                    break
+            
+            # 计算红柱强度
+            if histogram[-1] > 0 and len(histogram) >= 3:
+                # 红柱增强
+                if histogram[-1] > histogram[-2] > histogram[-3]:
+                    red_bar_strength = 1.0  # 强
+                elif histogram[-1] > histogram[-2]:
+                    red_bar_strength = 0.7  # 中
+                else:
+                    red_bar_strength = 0.3  # 弱
+        
+        # 计算 VWAP
+        vwap = TechnicalIndicators.calculate_vwap(high, low, close, volume)
+        current_vwap = vwap[-1]
+        current_price = close[-1]
+        
+        # 价格突破 VWAP 判断
+        price_above_vwap = current_price > current_vwap
+        
+        # 计算得分（柱子翻红权重更高）
+        score = 0
+        if histogram_cross:
+            if bars_since_cross <= 2:
+                score += 12  # 刚翻红，强信号
+            elif bars_since_cross <= 4:
+                score += 10  # 翻红后1-2根
+            else:
+                score += 6   # 翻红较久
+        
+        # 红柱增强加分
+        if histogram[-1] > 0 and red_bar_strength > 0.5:
+            score += int(red_bar_strength * 3)
+        
+        if price_above_vwap:
+            score += 10
+        
+        # 通过条件：柱子翻红（或当前红柱增强）且价格在VWAP上方
+        passed = (histogram_cross or (histogram[-1] > 0 and red_bar_strength > 0.5)) and price_above_vwap
+        
+        return {
+            "passed": passed,
+            "score": min(20, score),
+            "histogram_cross": histogram_cross,
+            "bars_since_cross": bars_since_cross,
+            "red_bar_strength": red_bar_strength,
+            "price_above_vwap": price_above_vwap,
+            "vwap_value": current_vwap,
+            "reason": f"5m启动: MACD柱{'翻红(' + str(bars_since_cross) + '根前)' if histogram_cross else '红柱增强' if histogram[-1] > 0 else '无信号'}, 价格{'>' if price_above_vwap else '<'}VWAP"
+        }
+
+
+class EntryLayer1m:
+    """第五层：精准入场层 (1m) - 启动瞬间捕捉"""
+    
+    def __init__(self, config: MTFConfig):
+        self.config = config
+    
+    def analyze_1m_entry(self,
+                        close: np.ndarray,
+                        high: np.ndarray,
+                        low: np.ndarray,
+                        volume: np.ndarray) -> Dict[str, any]:
+        """
+        1m 精准入场 - 做多条件：
+        1. MACD柱子翻红（比金叉提前2-3根K线）
+        2. 价格站上VWAP (确认启动)
+        
+        优化说明：
+        - 柱子翻红比金叉提前2-3根K线，捕捉启动瞬间
+        - 翻红后红柱增强 = 更强入场信号
+        
+        返回：
+        {
+            "passed": bool,
+            "score": int,  # 0-15分
+            "histogram_cross": bool,       # 柱子翻红信号
+            "bars_since_cross": int,       # 翻红后几根K线
+            "price_above_vwap": bool,
+            "entry_price": float,
+            "vwap_value": float,
+            "reason": str
+        }
+        """
+        # 计算 MACD
+        _, _, histogram = TechnicalIndicators.calculate_macd(
+            close,
+            self.config.macd_1m_fast,
+            self.config.macd_1m_slow,
+            self.config.macd_1m_signal
+        )
+        
+        # MACD 柱子翻红检测（比金叉提前2-3根K线）
+        histogram_cross = False
+        bars_since_cross = -1
+        red_bar_strength = 0.0
+        
+        if len(histogram) >= 5:
+            # 检测柱子从负转正
+            for i in range(len(histogram) - 2, max(0, len(histogram) - 6), -1):
+                if histogram[i] < 0 and histogram[i + 1] >= 0:
+                    histogram_cross = True
+                    bars_since_cross = len(histogram) - 1 - i
+                    break
+            
+            # 计算红柱强度
+            if histogram[-1] > 0 and len(histogram) >= 3:
+                if histogram[-1] > histogram[-2] > histogram[-3]:
+                    red_bar_strength = 1.0  # 强
+                elif histogram[-1] > histogram[-2]:
+                    red_bar_strength = 0.7  # 中
+                else:
+                    red_bar_strength = 0.3  # 弱
+        
+        # 计算 VWAP
+        vwap = TechnicalIndicators.calculate_vwap(high, low, close, volume)
+        current_vwap = vwap[-1]
+        current_price = close[-1]
+        
+        # 价格站上 VWAP 判断
+        price_above_vwap = current_price > current_vwap
+        
+        # 计算得分
+        score = 0
+        if histogram_cross:
+            if bars_since_cross <= 1:
+                score += 10  # 刚翻红，最强入场
+            elif bars_since_cross <= 3:
+                score += 8   # 翻红后1-2根
+            else:
+                score += 5   # 翻红较久
+        
+        # 红柱增强加分
+        if histogram[-1] > 0 and red_bar_strength > 0.5:
+            score += int(red_bar_strength * 2)
+        
+        if price_above_vwap:
+            score += 7
+        
+        # 通过条件：柱子翻红（或红柱增强）且价格在VWAP上方
+        passed = (histogram_cross or (histogram[-1] > 0 and red_bar_strength > 0.5)) and price_above_vwap
+        
+        return {
+            "passed": passed,
+            "score": min(15, score),
+            "histogram_cross": histogram_cross,
+            "bars_since_cross": bars_since_cross,
+            "red_bar_strength": red_bar_strength,
+            "price_above_vwap": price_above_vwap,
+            "entry_price": current_price,
+            "vwap_value": current_vwap,
+            "reason": f"1m入场: MACD柱{'翻红(' + str(bars_since_cross) + '根前)' if histogram_cross else '红柱增强' if histogram[-1] > 0 else '无信号'}, 价格{'站上' if price_above_vwap else '未站上'}VWAP"
+        }
+
+
+class VWAPAnalyzer:
+    """VWAP 分析工具 - 机构成本线"""
+    
+    @staticmethod
+    def get_vwap_state(price: float, vwap: float) -> VWAPState:
+        """
+        获取 VWAP 状态
+        
+        价格 > VWAP: 多头控制
+        价格 < VWAP: 空头控制
+        """
+        distance_pct = (price - vwap) / vwap
+        if distance_pct > 0.005:
+            return VWAPState.ABOVE
+        elif distance_pct < -0.005:
+            return VWAPState.BELOW
+        else:
+            return VWAPState.NEUTRAL
+    
+    @staticmethod
+    def calculate_session_vwap(high: np.ndarray,
+                                low: np.ndarray,
+                                close: np.ndarray,
+                                volume: np.ndarray,
+                                session_start: int = 0) -> np.ndarray:
+        """
+        计算会话 VWAP
+        
+        VWAP = Σ(Price × Volume) / ΣVolume
+        """
+        typical_price = (high + low + close) / 3
+        tp_volume = typical_price * volume
+        
+        cum_tp_volume = np.cumsum(tp_volume[session_start:])
+        cum_volume = np.cumsum(volume[session_start:])
+        
+        vwap = np.zeros_like(close, dtype=float)
+        for i in range(session_start, len(close)):
+            rel_idx = i - session_start
+            if cum_volume[rel_idx] != 0:
+                vwap[i] = cum_tp_volume[rel_idx] / cum_volume[rel_idx]
+            else:
+                vwap[i] = close[i]
+        
+        return vwap
+
+
+class CoreLayer1H:
+    """第二层：趋势确认层 (1H) - 信号生成核心"""
+    
+    def __init__(self, config: MTFConfig):
+        self.config = config
+    
+    def analyze_1h_trend(self,
+                        close: np.ndarray,
+                        high: np.ndarray,
+                        low: np.ndarray,
+                        volume: np.ndarray) -> Dict[str, any]:
+        """
+        1H 趋势确认 - 做多条件：
+        1. 价格 > EMA55 (趋势稳定)
+        2. MACD向上 (动能向上)
+        3. 价格 > VWAP (多头控制)
+        
+        返回：
+        {
+            "passed": bool,
+            "score": int,  # 0-25分
+            "price_above_ema55": bool,
+            "macd_rising": bool,
+            "vwap_state": VWAPState,
+            "reason": str
+        }
+        """
+        # 计算 EMA55
+        ema55 = TechnicalIndicators.calculate_ema(close, self.config.ema_medium)
+        current_price = close[-1]
+        current_ema55 = ema55[-1]
+        
+        # 计算 MACD
+        _, _, histogram = TechnicalIndicators.calculate_macd(
+            close,
+            self.config.macd_1h_fast,
+            self.config.macd_1h_slow,
+            self.config.macd_1h_signal
+        )
+        
+        # MACD 向上判断
+        macd_rising = histogram[-1] > histogram[-2]
+        
+        # 计算 VWAP
+        vwap = TechnicalIndicators.calculate_vwap(high, low, close, volume)
+        current_vwap = vwap[-1]
+        
+        # VWAP 状态
+        vwap_distance_pct = (current_price - current_vwap) / current_vwap
+        if vwap_distance_pct > 0.005:
+            vwap_state = VWAPState.ABOVE
+        elif vwap_distance_pct < -0.005:
+            vwap_state = VWAPState.BELOW
+        else:
+            vwap_state = VWAPState.NEUTRAL
+        
+        # 检查条件
+        price_above_ema55 = current_price > current_ema55
+        
+        # 计算得分
+        score = 0
+        if price_above_ema55:
+            score += 10
+        if macd_rising:
+            score += 8
+        if vwap_state == VWAPState.ABOVE:
+            score += 7
+        
+        passed = price_above_ema55 and macd_rising and vwap_state == VWAPState.ABOVE
+        
+        return {
+            "passed": passed,
+            "score": score,
+            "price_above_ema55": price_above_ema55,
+            "macd_rising": macd_rising,
+            "vwap_state": vwap_state,
+            "vwap_value": current_vwap,
+            "reason": f"1H趋势: 价格{'>' if price_above_ema55 else '<'}EMA55, MACD{'向上' if macd_rising else '向下'}, VWAP状态={vwap_state.value}"
+        }
     
     def identify_regime(self, close: np.ndarray, vwap: np.ndarray) -> MarketRegime:
         """
@@ -417,11 +1062,64 @@ class CoreLayer:
         }
 
 
-class MicroLayer:
-    """微观层 (15m) - 精准入场与风控"""
+class MicroLayer15m:
+    """第三层：回调买点层 (15m) - 寻找趋势中的回调买点"""
     
     def __init__(self, config: MTFConfig):
         self.config = config
+    
+    def analyze_15m_pullback(self, close: np.ndarray) -> Dict[str, any]:
+        """
+        15m 回调买点 - 做多条件：
+        1. MACD金叉 (动能转强)
+        2. 价格回踩EMA21 (趋势中的回调)
+        
+        返回：
+        {
+            "passed": bool,
+            "score": int,  # 0-20分
+            "macd_golden_cross": bool,
+            "price_near_ema21": bool,
+            "reason": str
+        }
+        """
+        # 计算 EMA21
+        ema21 = TechnicalIndicators.calculate_ema(close, self.config.ema_fast)
+        current_price = close[-1]
+        current_ema21 = ema21[-1]
+        
+        # 计算 MACD
+        _, _, histogram = TechnicalIndicators.calculate_macd(
+            close,
+            self.config.macd_15m_fast,
+            self.config.macd_15m_slow,
+            self.config.macd_15m_signal
+        )
+        
+        # MACD 金叉判断
+        macd_golden_cross = histogram[-2] <= 0 and histogram[-1] > 0
+        
+        # 价格回踩 EMA21 判断 (价格在 EMA21 附近 ±2%)
+        distance_to_ema21 = abs(current_price - current_ema21) / current_ema21
+        price_near_ema21 = distance_to_ema21 < 0.02
+        
+        # 计算得分
+        score = 0
+        if macd_golden_cross:
+            score += 12
+        if price_near_ema21:
+            score += 8
+        
+        passed = macd_golden_cross and price_near_ema21
+        
+        return {
+            "passed": passed,
+            "score": score,
+            "macd_golden_cross": macd_golden_cross,
+            "price_near_ema21": price_near_ema21,
+            "ema21_value": current_ema21,
+            "reason": f"15m回调: MACD{'金叉' if macd_golden_cross else '无金叉'}, 价格{'接近' if price_near_ema21 else '远离'}EMA21"
+        }
     
     def calculate_momentum_score(self,
                                 close: np.ndarray,
@@ -521,6 +1219,510 @@ class MicroLayer:
             return "bullish"
         
         return "none"
+
+
+class LaunchLayer5m:
+    """第四层：启动确认层 (5m) - 资金推动确认"""
+    
+    def __init__(self, config: MTFConfig):
+        self.config = config
+    
+    def analyze_5m_launch(self,
+                         close: np.ndarray,
+                         high: np.ndarray,
+                         low: np.ndarray,
+                         volume: np.ndarray) -> Dict[str, any]:
+        """
+        5m 启动确认 - 做多条件：
+        1. MACD柱子翻红（比金叉提前2-3根K线）
+        2. 价格突破VWAP (资金推动)
+        
+        优化说明：
+        - 柱子翻红信号比金叉提前2-3根K线
+        - 翻红后红柱增强信号更强
+        
+        返回：
+        {
+            "passed": bool,
+            "score": int,  # 0-20分
+            "histogram_cross": bool,       # 柱子翻红信号
+            "bars_since_cross": int,       # 翻红后几根K线
+            "price_above_vwap": bool,
+            "vwap_value": float,
+            "reason": str
+        }
+        """
+        # 计算 MACD
+        _, _, histogram = TechnicalIndicators.calculate_macd(
+            close,
+            self.config.macd_5m_fast,
+            self.config.macd_5m_slow,
+            self.config.macd_5m_signal
+        )
+        
+        # MACD 柱子翻红检测（比金叉提前2-3根K线）
+        histogram_cross = False
+        bars_since_cross = -1
+        red_bar_strength = 0.0
+        
+        if len(histogram) >= 5:
+            # 检测柱子从负转正
+            for i in range(len(histogram) - 2, max(0, len(histogram) - 6), -1):
+                if histogram[i] < 0 and histogram[i + 1] >= 0:
+                    histogram_cross = True
+                    bars_since_cross = len(histogram) - 1 - i
+                    break
+            
+            # 计算红柱强度
+            if histogram[-1] > 0 and len(histogram) >= 3:
+                # 红柱增强
+                if histogram[-1] > histogram[-2] > histogram[-3]:
+                    red_bar_strength = 1.0  # 强
+                elif histogram[-1] > histogram[-2]:
+                    red_bar_strength = 0.7  # 中
+                else:
+                    red_bar_strength = 0.3  # 弱
+        
+        # 计算 VWAP
+        vwap = TechnicalIndicators.calculate_vwap(high, low, close, volume)
+        current_vwap = vwap[-1]
+        current_price = close[-1]
+        
+        # 价格突破 VWAP 判断
+        price_above_vwap = current_price > current_vwap
+        
+        # 计算得分（柱子翻红权重更高）
+        score = 0
+        if histogram_cross:
+            if bars_since_cross <= 2:
+                score += 12  # 刚翻红，强信号
+            elif bars_since_cross <= 4:
+                score += 10  # 翻红后1-2根
+            else:
+                score += 6   # 翻红较久
+        
+        # 红柱增强加分
+        if histogram[-1] > 0 and red_bar_strength > 0.5:
+            score += int(red_bar_strength * 3)
+        
+        if price_above_vwap:
+            score += 10
+        
+        # 通过条件：柱子翻红（或当前红柱增强）且价格在VWAP上方
+        passed = (histogram_cross or (histogram[-1] > 0 and red_bar_strength > 0.5)) and price_above_vwap
+        
+        return {
+            "passed": passed,
+            "score": min(20, score),
+            "histogram_cross": histogram_cross,
+            "bars_since_cross": bars_since_cross,
+            "red_bar_strength": red_bar_strength,
+            "price_above_vwap": price_above_vwap,
+            "vwap_value": current_vwap,
+            "reason": f"5m启动: MACD柱{'翻红(' + str(bars_since_cross) + '根前)' if histogram_cross else '红柱增强' if histogram[-1] > 0 else '无信号'}, 价格{'>' if price_above_vwap else '<'}VWAP"
+        }
+
+
+class EntryLayer1m:
+    """第五层：精准入场层 (1m) - 启动瞬间捕捉"""
+    
+    def __init__(self, config: MTFConfig):
+        self.config = config
+    
+    def analyze_1m_entry(self,
+                        close: np.ndarray,
+                        high: np.ndarray,
+                        low: np.ndarray,
+                        volume: np.ndarray) -> Dict[str, any]:
+        """
+        1m 精准入场 - 做多条件：
+        1. MACD柱子翻红（比金叉提前2-3根K线）
+        2. 价格站上VWAP (确认启动)
+        
+        优化说明：
+        - 柱子翻红比金叉提前2-3根K线，捕捉启动瞬间
+        - 翻红后红柱增强 = 更强入场信号
+        
+        返回：
+        {
+            "passed": bool,
+            "score": int,  # 0-15分
+            "histogram_cross": bool,       # 柱子翻红信号
+            "bars_since_cross": int,       # 翻红后几根K线
+            "price_above_vwap": bool,
+            "entry_price": float,
+            "vwap_value": float,
+            "reason": str
+        }
+        """
+        # 计算 MACD
+        _, _, histogram = TechnicalIndicators.calculate_macd(
+            close,
+            self.config.macd_1m_fast,
+            self.config.macd_1m_slow,
+            self.config.macd_1m_signal
+        )
+        
+        # MACD 柱子翻红检测（比金叉提前2-3根K线）
+        histogram_cross = False
+        bars_since_cross = -1
+        red_bar_strength = 0.0
+        
+        if len(histogram) >= 5:
+            # 检测柱子从负转正
+            for i in range(len(histogram) - 2, max(0, len(histogram) - 6), -1):
+                if histogram[i] < 0 and histogram[i + 1] >= 0:
+                    histogram_cross = True
+                    bars_since_cross = len(histogram) - 1 - i
+                    break
+            
+            # 计算红柱强度
+            if histogram[-1] > 0 and len(histogram) >= 3:
+                if histogram[-1] > histogram[-2] > histogram[-3]:
+                    red_bar_strength = 1.0  # 强
+                elif histogram[-1] > histogram[-2]:
+                    red_bar_strength = 0.7  # 中
+                else:
+                    red_bar_strength = 0.3  # 弱
+        
+        # 计算 VWAP
+        vwap = TechnicalIndicators.calculate_vwap(high, low, close, volume)
+        current_vwap = vwap[-1]
+        current_price = close[-1]
+        
+        # 价格站上 VWAP 判断
+        price_above_vwap = current_price > current_vwap
+        
+        # 计算得分
+        score = 0
+        if histogram_cross:
+            if bars_since_cross <= 1:
+                score += 10  # 刚翻红，最强入场
+            elif bars_since_cross <= 3:
+                score += 8   # 翻红后1-2根
+            else:
+                score += 5   # 翻红较久
+        
+        # 红柱增强加分
+        if histogram[-1] > 0 and red_bar_strength > 0.5:
+            score += int(red_bar_strength * 2)
+        
+        if price_above_vwap:
+            score += 7
+        
+        # 通过条件：柱子翻红（或红柱增强）且价格在VWAP上方
+        passed = (histogram_cross or (histogram[-1] > 0 and red_bar_strength > 0.5)) and price_above_vwap
+        
+        return {
+            "passed": passed,
+            "score": min(15, score),
+            "histogram_cross": histogram_cross,
+            "bars_since_cross": bars_since_cross,
+            "red_bar_strength": red_bar_strength,
+            "price_above_vwap": price_above_vwap,
+            "entry_price": current_price,
+            "vwap_value": current_vwap,
+            "reason": f"1m入场: MACD柱{'翻红(' + str(bars_since_cross) + '根前)' if histogram_cross else '红柱增强' if histogram[-1] > 0 else '无信号'}, 价格{'站上' if price_above_vwap else '未站上'}VWAP"
+        }
+
+
+class VWAPAnalyzer:
+    """VWAP 分析工具 - 机构成本线"""
+    
+    @staticmethod
+    def get_vwap_state(price: float, vwap: float) -> VWAPState:
+        """
+        获取 VWAP 状态
+        
+        价格 > VWAP: 多头控制
+        价格 < VWAP: 空头控制
+        """
+        distance_pct = (price - vwap) / vwap
+        if distance_pct > 0.005:
+            return VWAPState.ABOVE
+        elif distance_pct < -0.005:
+            return VWAPState.BELOW
+        else:
+            return VWAPState.NEUTRAL
+    
+    @staticmethod
+    def calculate_session_vwap(high: np.ndarray,
+                                low: np.ndarray,
+                                close: np.ndarray,
+                                volume: np.ndarray,
+                                session_start: int = 0) -> np.ndarray:
+        """
+        计算会话 VWAP
+        
+        VWAP = Σ(Price × Volume) / ΣVolume
+        """
+        typical_price = (high + low + close) / 3
+        tp_volume = typical_price * volume
+        
+        cum_tp_volume = np.cumsum(tp_volume[session_start:])
+        cum_volume = np.cumsum(volume[session_start:])
+        
+        vwap = np.zeros_like(close, dtype=float)
+        for i in range(session_start, len(close)):
+            rel_idx = i - session_start
+            if cum_volume[rel_idx] != 0:
+                vwap[i] = cum_tp_volume[rel_idx] / cum_volume[rel_idx]
+            else:
+                vwap[i] = close[i]
+        
+        return vwap
+
+
+class LaunchLayer5m:
+    """第四层：启动确认层 (5m) - 资金推动确认"""
+    
+    def __init__(self, config: MTFConfig):
+        self.config = config
+    
+    def analyze_5m_launch(self,
+                         close: np.ndarray,
+                         high: np.ndarray,
+                         low: np.ndarray,
+                         volume: np.ndarray) -> Dict[str, any]:
+        """
+        5m 启动确认 - 做多条件：
+        1. MACD柱子翻红（比金叉提前2-3根K线）
+        2. 价格突破VWAP (资金推动)
+        
+        优化说明：
+        - 柱子翻红信号比金叉提前2-3根K线
+        - 翻红后红柱增强信号更强
+        
+        返回：
+        {
+            "passed": bool,
+            "score": int,  # 0-20分
+            "histogram_cross": bool,       # 柱子翻红信号
+            "bars_since_cross": int,       # 翻红后几根K线
+            "price_above_vwap": bool,
+            "vwap_value": float,
+            "reason": str
+        }
+        """
+        # 计算 MACD
+        _, _, histogram = TechnicalIndicators.calculate_macd(
+            close,
+            self.config.macd_5m_fast,
+            self.config.macd_5m_slow,
+            self.config.macd_5m_signal
+        )
+        
+        # MACD 柱子翻红检测（比金叉提前2-3根K线）
+        histogram_cross = False
+        bars_since_cross = -1
+        red_bar_strength = 0.0
+        
+        if len(histogram) >= 5:
+            # 检测柱子从负转正
+            for i in range(len(histogram) - 2, max(0, len(histogram) - 6), -1):
+                if histogram[i] < 0 and histogram[i + 1] >= 0:
+                    histogram_cross = True
+                    bars_since_cross = len(histogram) - 1 - i
+                    break
+            
+            # 计算红柱强度
+            if histogram[-1] > 0 and len(histogram) >= 3:
+                # 红柱增强
+                if histogram[-1] > histogram[-2] > histogram[-3]:
+                    red_bar_strength = 1.0  # 强
+                elif histogram[-1] > histogram[-2]:
+                    red_bar_strength = 0.7  # 中
+                else:
+                    red_bar_strength = 0.3  # 弱
+        
+        # 计算 VWAP
+        vwap = TechnicalIndicators.calculate_vwap(high, low, close, volume)
+        current_vwap = vwap[-1]
+        current_price = close[-1]
+        
+        # 价格突破 VWAP 判断
+        price_above_vwap = current_price > current_vwap
+        
+        # 计算得分（柱子翻红权重更高）
+        score = 0
+        if histogram_cross:
+            if bars_since_cross <= 2:
+                score += 12  # 刚翻红，强信号
+            elif bars_since_cross <= 4:
+                score += 10  # 翻红后1-2根
+            else:
+                score += 6   # 翻红较久
+        
+        # 红柱增强加分
+        if histogram[-1] > 0 and red_bar_strength > 0.5:
+            score += int(red_bar_strength * 3)
+        
+        if price_above_vwap:
+            score += 10
+        
+        # 通过条件：柱子翻红（或当前红柱增强）且价格在VWAP上方
+        passed = (histogram_cross or (histogram[-1] > 0 and red_bar_strength > 0.5)) and price_above_vwap
+        
+        return {
+            "passed": passed,
+            "score": min(20, score),
+            "histogram_cross": histogram_cross,
+            "bars_since_cross": bars_since_cross,
+            "red_bar_strength": red_bar_strength,
+            "price_above_vwap": price_above_vwap,
+            "vwap_value": current_vwap,
+            "reason": f"5m启动: MACD柱{'翻红(' + str(bars_since_cross) + '根前)' if histogram_cross else '红柱增强' if histogram[-1] > 0 else '无信号'}, 价格{'>' if price_above_vwap else '<'}VWAP"
+        }
+
+
+class EntryLayer1m:
+    """第五层：精准入场层 (1m) - 启动瞬间捕捉"""
+    
+    def __init__(self, config: MTFConfig):
+        self.config = config
+    
+    def analyze_1m_entry(self,
+                        close: np.ndarray,
+                        high: np.ndarray,
+                        low: np.ndarray,
+                        volume: np.ndarray) -> Dict[str, any]:
+        """
+        1m 精准入场 - 做多条件：
+        1. MACD柱子翻红（比金叉提前2-3根K线）
+        2. 价格站上VWAP (确认启动)
+        
+        优化说明：
+        - 柱子翻红比金叉提前2-3根K线，捕捉启动瞬间
+        - 翻红后红柱增强 = 更强入场信号
+        
+        返回：
+        {
+            "passed": bool,
+            "score": int,  # 0-15分
+            "histogram_cross": bool,       # 柱子翻红信号
+            "bars_since_cross": int,       # 翻红后几根K线
+            "price_above_vwap": bool,
+            "entry_price": float,
+            "vwap_value": float,
+            "reason": str
+        }
+        """
+        # 计算 MACD
+        _, _, histogram = TechnicalIndicators.calculate_macd(
+            close,
+            self.config.macd_1m_fast,
+            self.config.macd_1m_slow,
+            self.config.macd_1m_signal
+        )
+        
+        # MACD 柱子翻红检测（比金叉提前2-3根K线）
+        histogram_cross = False
+        bars_since_cross = -1
+        red_bar_strength = 0.0
+        
+        if len(histogram) >= 5:
+            # 检测柱子从负转正
+            for i in range(len(histogram) - 2, max(0, len(histogram) - 6), -1):
+                if histogram[i] < 0 and histogram[i + 1] >= 0:
+                    histogram_cross = True
+                    bars_since_cross = len(histogram) - 1 - i
+                    break
+            
+            # 计算红柱强度
+            if histogram[-1] > 0 and len(histogram) >= 3:
+                if histogram[-1] > histogram[-2] > histogram[-3]:
+                    red_bar_strength = 1.0  # 强
+                elif histogram[-1] > histogram[-2]:
+                    red_bar_strength = 0.7  # 中
+                else:
+                    red_bar_strength = 0.3  # 弱
+        
+        # 计算 VWAP
+        vwap = TechnicalIndicators.calculate_vwap(high, low, close, volume)
+        current_vwap = vwap[-1]
+        current_price = close[-1]
+        
+        # 价格站上 VWAP 判断
+        price_above_vwap = current_price > current_vwap
+        
+        # 计算得分
+        score = 0
+        if histogram_cross:
+            if bars_since_cross <= 1:
+                score += 10  # 刚翻红，最强入场
+            elif bars_since_cross <= 3:
+                score += 8   # 翻红后1-2根
+            else:
+                score += 5   # 翻红较久
+        
+        # 红柱增强加分
+        if histogram[-1] > 0 and red_bar_strength > 0.5:
+            score += int(red_bar_strength * 2)
+        
+        if price_above_vwap:
+            score += 7
+        
+        # 通过条件：柱子翻红（或红柱增强）且价格在VWAP上方
+        passed = (histogram_cross or (histogram[-1] > 0 and red_bar_strength > 0.5)) and price_above_vwap
+        
+        return {
+            "passed": passed,
+            "score": min(15, score),
+            "histogram_cross": histogram_cross,
+            "bars_since_cross": bars_since_cross,
+            "red_bar_strength": red_bar_strength,
+            "price_above_vwap": price_above_vwap,
+            "entry_price": current_price,
+            "vwap_value": current_vwap,
+            "reason": f"1m入场: MACD柱{'翻红(' + str(bars_since_cross) + '根前)' if histogram_cross else '红柱增强' if histogram[-1] > 0 else '无信号'}, 价格{'站上' if price_above_vwap else '未站上'}VWAP"
+        }
+
+
+class VWAPAnalyzer:
+    """VWAP 分析工具 - 机构成本线"""
+    
+    @staticmethod
+    def get_vwap_state(price: float, vwap: float) -> VWAPState:
+        """
+        获取 VWAP 状态
+        
+        价格 > VWAP: 多头控制
+        价格 < VWAP: 空头控制
+        """
+        distance_pct = (price - vwap) / vwap
+        if distance_pct > 0.005:
+            return VWAPState.ABOVE
+        elif distance_pct < -0.005:
+            return VWAPState.BELOW
+        else:
+            return VWAPState.NEUTRAL
+    
+    @staticmethod
+    def calculate_session_vwap(high: np.ndarray,
+                                low: np.ndarray,
+                                close: np.ndarray,
+                                volume: np.ndarray,
+                                session_start: int = 0) -> np.ndarray:
+        """
+        计算会话 VWAP
+        
+        VWAP = Σ(Price × Volume) / ΣVolume
+        """
+        typical_price = (high + low + close) / 3
+        tp_volume = typical_price * volume
+        
+        cum_tp_volume = np.cumsum(tp_volume[session_start:])
+        cum_volume = np.cumsum(volume[session_start:])
+        
+        vwap = np.zeros_like(close, dtype=float)
+        for i in range(session_start, len(close)):
+            rel_idx = i - session_start
+            if cum_volume[rel_idx] != 0:
+                vwap[i] = cum_tp_volume[rel_idx] / cum_volume[rel_idx]
+            else:
+                vwap[i] = close[i]
+        
+        return vwap
 
 
 class ScoreFusionEngine:

@@ -38,6 +38,17 @@ from src.fund_flow import (
     Operation as FundFlowOperation,
     TriggerEngine,
 )
+# 动态止损系统
+from src.fund_flow.dynamic_stop_loss import (
+    DynamicStopLossCalculator,
+    ATRCalculator,
+    MarketStateDetector,
+    TrailingStopManager,
+    StopLossCircuitBreaker,
+    MarketState,
+    EntryPosition,
+    StopLossStage,
+)
 from src.fund_flow.log_compaction import (
     compact_decision_payload,
     compact_flow_context_payload,
@@ -278,6 +289,17 @@ class TradingBot:
         self._last_entry_bucket_id: Optional[int] = None
         self._analysis_bucket_state: Dict[str, int] = {}
         self.fund_flow_storage = None
+        
+        # 动态止损系统初始化
+        self._dynamic_stop_loss_enabled: bool = bool(
+            self.config.get("fund_flow", {}).get("engine_params", {}).get("TREND", {}).get("dynamic_stop_loss_enabled", True)
+        )
+        self._dynamic_stop_loss_calculator: Optional[DynamicStopLossCalculator] = None
+        self._trailing_stop_manager: Optional[TrailingStopManager] = None
+        self._stop_loss_circuit_breaker: Optional[StopLossCircuitBreaker] = None
+        self._market_state_detector: Optional[MarketStateDetector] = None
+        self._position_stop_loss_state: Dict[str, Dict[str, Any]] = {}  # 存储每个仓位的止损状态
+        
         self._load_risk_state()
         self._init_fund_flow_modules()
         self._preload_market_history_on_startup()
@@ -3495,6 +3517,24 @@ class TradingBot:
                 f"🗂️ signal registry入库完成: definitions={int(sync_result.get('definitions', 0))}, "
                 f"pools={int(sync_result.get('pools', 0))}, version={self._signal_registry_version}"
             )
+        
+        # 初始化动态止损系统
+        if self._dynamic_stop_loss_enabled:
+            try:
+                self._dynamic_stop_loss_calculator = DynamicStopLossCalculator(config={
+                    "default_risk_pct": 0.01,
+                    "max_risk_pct": 0.015,
+                    "account_size": 10000,  # 将在运行时更新
+                    "atr_period": 14,
+                    "lookback_period": 20
+                })
+                self._trailing_stop_manager = TrailingStopManager()
+                self._stop_loss_circuit_breaker = StopLossCircuitBreaker()
+                self._market_state_detector = MarketStateDetector()
+                print("✅ 动态止损系统已启用: ATR(14) + VAF修正 + 止损熔断")
+            except Exception as e:
+                print(f"⚠️ 动态止损系统初始化失败，使用默认止损: {e}")
+                self._dynamic_stop_loss_enabled = False
 
     def _build_signal_pool_configs_from_config(self, ff_cfg: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
         out: Dict[str, Dict[str, Any]] = {}
@@ -4497,11 +4537,143 @@ class TradingBot:
         if abs(val) > 0.05:
             val = val / 100.0
         return abs(val)
+    
+    def _get_account_balance(self) -> float:
+        """获取账户总权益"""
+        try:
+            if hasattr(self, 'account_data') and self.account_data:
+                return float(self.account_data.get_total_equity() or 0.0)
+        except Exception:
+            pass
+        return 10000.0  # 默认返回一个合理的值
+    
+    def _calculate_dynamic_stop_loss(
+        self,
+        symbol: str,
+        entry_price: float,
+        side: str,
+        current_price: Optional[float] = None,
+        account_balance: Optional[float] = None,
+        entry_position: str = "standard"
+    ) -> Dict[str, Any]:
+        """
+        使用动态止损系统计算止损价格
+        
+        Args:
+            symbol: 交易对
+            entry_price: 入场价格
+            side: 方向 (LONG/SHORT)
+            current_price: 当前价格 (用于获取市场数据)
+            account_balance: 账户余额 (用于计算仓位)
+            entry_position: 入场位置类型 (standard/deviated_2_3/acceleration)
+        
+        Returns:
+            {
+                "stop_price": 止损价格,
+                "stop_distance": 止损距离,
+                "stop_distance_pct": 止损距离百分比,
+                "suggested_position": 建议仓位,
+                "market_state": 市场状态,
+                "trailing_plan": 移动止损计划,
+                "is_circuit_breaker": 是否触发熔断,
+                "validation_warnings": 校验警告
+            }
+        """
+        result = {
+            "stop_price": None,
+            "stop_distance": 0.0,
+            "stop_distance_pct": 0.0,
+            "suggested_position": 0.0,
+            "market_state": "unknown",
+            "trailing_plan": {},
+            "is_circuit_breaker": False,
+            "validation_warnings": [],
+            "fallback_to_pct": False
+        }
+        
+        # 如果动态止损未启用，返回None使用默认百分比止损
+        if not self._dynamic_stop_loss_enabled or self._dynamic_stop_loss_calculator is None:
+            result["fallback_to_pct"] = True
+            return result
+        
+        try:
+            # 获取1H K线数据用于计算ATR和市场状态
+            # 注意：这里需要实际获取K线数据，简化处理使用模拟数据
+            import numpy as np
+            
+            # 尝试获取真实的K线数据
+            try:
+                klines = self.client.get_klines(symbol=symbol, interval="1h", limit=50)
+                if klines and len(klines) >= 30:
+                    close = np.array([float(k[4]) for k in klines])
+                    high = np.array([float(k[2]) for k in klines])
+                    low = np.array([float(k[3]) for k in klines])
+                    volume = np.array([float(k[5]) for k in klines])
+                else:
+                    # K线数据不足，降级使用默认百分比止损
+                    result["fallback_to_pct"] = True
+                    result["validation_warnings"].append("K线数据不足，使用默认百分比止损")
+                    return result
+            except Exception as e:
+                result["fallback_to_pct"] = True
+                result["validation_warnings"].append(f"获取K线数据失败: {e}")
+                return result
+            
+            # 获取账户余额
+            balance = account_balance or self._get_account_balance()
+            
+            # 转换入场位置类型
+            position_map = {
+                "standard": EntryPosition.STANDARD,
+                "deviated_2_3": EntryPosition.DEVIATED_2_3,
+                "acceleration": EntryPosition.ACCELERATION
+            }
+            entry_pos = position_map.get(entry_position, EntryPosition.STANDARD)
+            
+            # 计算动态止损
+            direction = "long" if side == "LONG" else "short"
+            stop_result = self._dynamic_stop_loss_calculator.calculate(
+                close=close,
+                high=high,
+                low=low,
+                volume=volume,
+                entry_price=entry_price,
+                direction=direction,
+                entry_position=entry_pos,
+                account_size=balance,
+                risk_pct=0.01  # 1%风险
+            )
+            
+            result["stop_price"] = stop_result.stop_price
+            result["stop_distance"] = stop_result.stop_distance
+            result["stop_distance_pct"] = stop_result.stop_distance_pct
+            result["suggested_position"] = stop_result.suggested_position
+            result["market_state"] = stop_result.market_state.value
+            result["trailing_plan"] = stop_result.trailing_plan
+            result["is_circuit_breaker"] = not stop_result.is_valid and any("熔断" in w for w in stop_result.validation_warnings)
+            result["validation_warnings"] = stop_result.validation_warnings
+            
+            # 记录止损状态
+            self._position_stop_loss_state[symbol] = {
+                "entry_price": entry_price,
+                "stop_price": stop_result.stop_price,
+                "market_state": stop_result.market_state.value,
+                "atr": stop_result.atr_info.current_atr,
+                "atr_ratio": stop_result.atr_info.atr_ratio,
+                "coefficient": stop_result.stop_coefficient
+            }
+            
+        except Exception as e:
+            result["fallback_to_pct"] = True
+            result["validation_warnings"].append(f"动态止损计算失败: {e}")
+        
+        return result
 
     def _repair_missing_protection(self, symbol: str, position: Dict[str, Any]) -> Dict[str, Any]:
         side = str(position.get("side", "")).upper()
         entry_price = self._to_float(position.get("entry_price"), 0.0)
         qty = self._to_float(position.get("amount"), 0.0)
+        current_price = self._to_float(position.get("mark_price"), 0.0)
         if side not in ("LONG", "SHORT"):
             return {"status": "error", "message": f"invalid position side: {side}"}
         if entry_price <= 0 or qty <= 0:
@@ -4514,14 +4686,55 @@ class TradingBot:
         sl_pct = self._normalize_percent(sl_raw, 0.01)
         tp_pct = self._normalize_percent(tp_raw, 0.03)
 
+        # 尝试使用动态止损系统
+        stop_loss = None
+        dynamic_sl_used = False
+        dynamic_sl_info = ""
+        
+        if self._dynamic_stop_loss_enabled:
+            try:
+                account_balance = self._get_account_balance()
+                dynamic_result = self._calculate_dynamic_stop_loss(
+                    symbol=symbol,
+                    entry_price=entry_price,
+                    side=side,
+                    current_price=current_price,
+                    account_balance=account_balance
+                )
+                
+                if not dynamic_result.get("fallback_to_pct") and dynamic_result.get("stop_price"):
+                    stop_loss = dynamic_result["stop_price"]
+                    dynamic_sl_used = True
+                    dynamic_sl_info = (
+                        f"动态止损: 市场={dynamic_result.get('market_state', 'unknown')}, "
+                        f"距离={dynamic_result.get('stop_distance_pct', 0):.2%}"
+                    )
+                    if dynamic_result.get("validation_warnings"):
+                        dynamic_sl_info += f", 警告={', '.join(dynamic_result['validation_warnings'])}"
+                    
+                    # 如果触发熔断，打印警告
+                    if dynamic_result.get("is_circuit_breaker"):
+                        print(f"⚠️ {symbol} 止损熔断已触发，使用固定百分比止损")
+            except Exception as e:
+                print(f"⚠️ {symbol} 动态止损计算失败，使用默认百分比: {e}")
+        
+        # 如果动态止损未启用或计算失败，使用默认百分比止损
+        if stop_loss is None:
+            if side == "LONG":
+                stop_loss = entry_price * (1.0 - sl_pct) if sl_pct > 0 else None
+            else:
+                stop_loss = entry_price * (1.0 + sl_pct) if sl_pct > 0 else None
+
         if side == "LONG":
-            stop_loss = entry_price * (1.0 - sl_pct) if sl_pct > 0 else None
             take_profit = entry_price * (1.0 + tp_pct) if tp_pct > 0 else None
             side_enum = IntentPositionSide.LONG
         else:
-            stop_loss = entry_price * (1.0 + sl_pct) if sl_pct > 0 else None
             take_profit = entry_price * (1.0 - tp_pct) if tp_pct > 0 else None
             side_enum = IntentPositionSide.SHORT
+        
+        # 打印动态止损信息
+        if dynamic_sl_used:
+            print(f"🎯 {symbol} {side} 使用动态止损: SL={stop_loss:.2f}, {dynamic_sl_info}")
 
         return self.client._execute_protection_v2(
             symbol=symbol,

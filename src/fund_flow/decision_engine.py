@@ -8,6 +8,8 @@ from src.config.config_loader import ConfigLoader
 from src.fund_flow.models import ExecutionMode, FundFlowDecision, Operation, TimeInForce
 from src.fund_flow.deepseek_weight_router import DeepSeekWeightRouter, WeightMap
 from src.fund_flow.weight_router import WeightRouter
+# 新MACD多时间框架策略
+from src.fund_flow.macd_strategy import MACDStrategyEngine, MACDStrategyConfig, MACDSignal
 
 
 class FundFlowDecisionEngine:
@@ -411,6 +413,30 @@ class FundFlowDecisionEngine:
         logger.info("[WeightRouter] default_weights(RANGE): %s", self.default_weights_config.get("RANGE", {}))
         logger.info("[WeightRouter] score_fusion enabled=%s, 15m_weight=%.2f, 5m_weight=%.2f",
                     self.score_fusion_enabled, self.score_15m_weight, self.score_5m_weight)
+        
+        # ========== 新MACD多时间框架策略 ==========
+        macd_cfg = ff.get("macd_mtf_strategy", {}) if isinstance(ff.get("macd_mtf_strategy"), dict) else {}
+        self.macd_mtf_strategy_enabled = bool(macd_cfg.get("enabled", True))  # 默认启用新策略
+        self.macd_mtf_strategy_config = MACDStrategyConfig(
+            macd_1h_fast=int(macd_cfg.get("macd_1h_fast", 12)),
+            macd_1h_slow=int(macd_cfg.get("macd_1h_slow", 26)),
+            macd_1h_signal=int(macd_cfg.get("macd_1h_signal", 9)),
+            macd_4h_fast=int(macd_cfg.get("macd_4h_fast", 12)),
+            macd_4h_slow=int(macd_cfg.get("macd_4h_slow", 26)),
+            macd_4h_signal=int(macd_cfg.get("macd_4h_signal", 9)),
+            macd_15m_fast=int(macd_cfg.get("macd_15m_fast", 12)),
+            macd_15m_slow=int(macd_cfg.get("macd_15m_slow", 26)),
+            macd_15m_signal=int(macd_cfg.get("macd_15m_signal", 9)),
+            min_entry_score=max(0.0, min(1.0, self._to_float(macd_cfg.get("min_entry_score"), 0.3))),
+            min_signal_score=max(0.0, min(1.0, self._to_float(macd_cfg.get("min_signal_score"), 0.45))),
+            weight_1h_direction=max(0.0, min(1.0, self._to_float(macd_cfg.get("weight_1h_direction"), 0.40))),
+            weight_4h_enhancement=max(0.0, min(1.0, self._to_float(macd_cfg.get("weight_4h_enhancement"), 0.20))),
+            weight_15m_entry=max(0.0, min(1.0, self._to_float(macd_cfg.get("weight_15m_entry"), 0.25))),
+            weight_volume=max(0.0, min(1.0, self._to_float(macd_cfg.get("weight_volume"), 0.15))),
+        )
+        self.macd_strategy_engine = MACDStrategyEngine(self.macd_mtf_strategy_config)
+        logger.info("[MACD_MTF] 新MACD策略 enabled=%s, min_signal_score=%.2f",
+                    self.macd_mtf_strategy_enabled, self.macd_mtf_strategy_config.min_signal_score)
     
     def _parse_default_weights(self, dw_cfg: Dict[str, Any], prefix: str) -> Dict[str, float]:
         """
@@ -1097,6 +1123,19 @@ class FundFlowDecisionEngine:
         default_leverage: int,
         allowed_levels: Optional[Sequence[int]] = None,
     ) -> int:
+        """
+        选择杠杆倍数（优化版 - 高信号分时降低杠杆）
+        
+        逻辑说明：
+        - 信号分刚好超过门槛时：使用较高杠杆（抓住机会）
+        - 信号分过高时（>0.85）：降低杠杆（防止过度拟合/趋势末端）
+        - 信号分极高时（>0.95）：使用最低杠杆（警惕陷阱）
+        
+        这是因为：
+        1. 高分信号可能出现在趋势末端（过度拟合风险）
+        2. 高分信号的止损可能被放大
+        3. 中等信号分反而是更稳定的机会
+        """
         min_lev = max(1, int(min_leverage))
         max_lev = max(min_lev, int(max_leverage))
         default_lev = min(max_lev, max(min_lev, int(default_leverage)))
@@ -1110,11 +1149,29 @@ class FundFlowDecisionEngine:
             levels = [default_lev]
         if len(levels) == 1:
             return levels[0]
+        
         s = min(max(float(score), 0.0), 1.0)
         th = min(max(float(threshold), 0.0), 0.99)
         denom = max(1e-6, 1.0 - th)
         strength = max(0.0, min(1.0, (s - th) / denom))
-        idx = min(len(levels) - 1, int(strength * len(levels)))
+        
+        # 新增：高分反向调整
+        # 当信号强度过高时，反向降低杠杆
+        if strength > 0.85:
+            # 高分信号：降低杠杆
+            # strength=0.85 -> idx=中高
+            # strength=0.95 -> idx=低
+            # strength=1.0 -> idx=最低
+            reverse_strength = (strength - 0.85) / 0.15  # 0~1
+            adjusted_strength = 0.5 * (1 - reverse_strength)  # 0.5 -> 0
+            idx = min(len(levels) - 1, int(adjusted_strength * len(levels)))
+        elif strength > 0.6:
+            # 中高分信号：使用默认杠杆
+            idx = min(len(levels) - 1, len(levels) // 2)
+        else:
+            # 正常分数：标准逻辑
+            idx = min(len(levels) - 1, int(strength * len(levels)))
+        
         lev = levels[idx]
         if lev <= 0:
             return default_lev
@@ -2539,6 +2596,193 @@ class FundFlowDecisionEngine:
             "ema_break_triggered": bool(ema_break_triggered),
             "macd_triggered": bool(macd_triggered),
         }
+    
+    def _decide_macd_strategy(
+        self,
+        symbol: str,
+        portfolio: Dict[str, Any],
+        price: float,
+        market_flow_context: Dict[str, Any],
+        regime_info: Dict[str, Any],
+    ) -> FundFlowDecision:
+        """
+        新MACD多时间框架策略决策
+        
+        策略架构：
+        - MACD_1H 定方向（柱子翻红/翻绿/缩短等确认买卖方向）
+        - MACD_4H 确认增强（同向增强信号，不作为买卖点）
+        - MACD_15M 跟随入场（跟随1H方向执行买卖）
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        current_pos = (portfolio.get("positions") or {}).get(symbol)
+        pos_side = str((current_pos or {}).get("side", "")).upper()
+        
+        # 提取多时间框架数据
+        timeframes = market_flow_context.get("timeframes") if isinstance(market_flow_context, dict) else {}
+        if not isinstance(timeframes, dict):
+            return FundFlowDecision(
+                operation=Operation.HOLD,
+                symbol=symbol,
+                reason="macd_mtf_missing_timeframes",
+                metadata={"error": "missing timeframes data"}
+            )
+        
+        # 获取15M、1H、4H数据
+        tf_15m = timeframes.get("15m", {})
+        tf_1h = timeframes.get("1h", {})
+        tf_4h = timeframes.get("4h", {})
+        
+        if not tf_15m or not tf_1h or not tf_4h:
+            return FundFlowDecision(
+                operation=Operation.HOLD,
+                symbol=symbol,
+                reason="macd_mtf_missing_tf_data",
+                metadata={"error": f"missing 15m/1h/4h data"}
+            )
+        
+        # 提取MACD柱状图数据
+        # 假设数据格式: {"macd_hist": [...], "macd": [...], "macd_signal": [...]}
+        # 或者单个值: {"macd_hist": 0.001, ...}
+        
+        # 获取MACD柱状图历史数据（如果有）
+        macd_hist_15m = tf_15m.get("macd_hist_series") or tf_15m.get("macd_hist_array") or []
+        macd_hist_1h = tf_1h.get("macd_hist_series") or tf_1h.get("macd_hist_array") or []
+        macd_hist_4h = tf_4h.get("macd_hist_series") or tf_4h.get("macd_hist_array") or []
+        
+        # 如果没有历史数据，尝试从单个值构建
+        if not macd_hist_15m:
+            hist_15m_val = self._to_float(tf_15m.get("macd_hist"), 0.0)
+            hist_15m_prev = self._to_float(tf_15m.get("macd_hist_prev"), hist_15m_val)
+            macd_hist_15m = [hist_15m_prev, hist_15m_val]
+        
+        if not macd_hist_1h:
+            hist_1h_val = self._to_float(tf_1h.get("macd_hist"), 0.0)
+            hist_1h_prev = self._to_float(tf_1h.get("macd_hist_prev"), hist_1h_val)
+            macd_hist_1h = [hist_1h_prev, hist_1h_val]
+        
+        if not macd_hist_4h:
+            hist_4h_val = self._to_float(tf_4h.get("macd_hist"), 0.0)
+            hist_4h_prev = self._to_float(tf_4h.get("macd_hist_prev"), hist_4h_val)
+            macd_hist_4h = [hist_4h_prev, hist_4h_val]
+        
+        # 转换为numpy数组
+        import numpy as np
+        macd_hist_15m = np.array(macd_hist_15m) if macd_hist_15m else np.array([0.0])
+        macd_hist_1h = np.array(macd_hist_1h) if macd_hist_1h else np.array([0.0])
+        macd_hist_4h = np.array(macd_hist_4h) if macd_hist_4h else np.array([0.0])
+        
+        # 计算成交量比率
+        volume = self._to_float(tf_15m.get("volume"), 0.0)
+        avg_volume = self._to_float(tf_15m.get("avg_volume"), volume) or volume
+        volume_ratio = volume / avg_volume if avg_volume > 0 else 1.0
+        
+        # 调用MACD策略引擎分析
+        signal = self.macd_strategy_engine.analyze(
+            macd_hist_15m=macd_hist_15m,
+            macd_hist_1h=macd_hist_1h,
+            macd_hist_4h=macd_hist_4h,
+            idx_15m=len(macd_hist_15m) - 1,
+            idx_1h=len(macd_hist_1h) - 1,
+            idx_4h=len(macd_hist_4h) - 1,
+            volume_ratio=volume_ratio
+        )
+        
+        # 构建元数据
+        metadata = {
+            "strategy_mode": "macd_mtf_strategy",
+            "signal_direction": signal.direction,
+            "signal_score": signal.signal_score,
+            "signal_type_1h": signal.signal_type_1h,
+            "signal_strength_1h": signal.signal_strength_1h,
+            "is_4h_enhanced": signal.is_4h_enhanced,
+            "enhancement_score": signal.enhancement_score,
+            "entry_type_15m": signal.entry_type_15m,
+            "entry_score_15m": signal.entry_score_15m,
+            "volume_ratio": volume_ratio,
+            "regime": regime_info.get("regime"),
+            "direction_lock": regime_info.get("direction", "BOTH"),
+        }
+        
+        # 根据信号方向决定操作
+        if signal.direction == 'long' and signal.signal_score >= self.macd_mtf_strategy_config.min_signal_score:
+            # 检查是否有反向持仓需要平仓
+            if pos_side == "SHORT":
+                return FundFlowDecision(
+                    operation=Operation.CLOSE_SHORT,
+                    symbol=symbol,
+                    portion=1.0,
+                    reason=f"macd_mtf_close_short_1h_{signal.signal_type_1h}",
+                    metadata=metadata
+                )
+            
+            # 开多仓
+            leverage = self._calculate_leverage_from_score(signal.signal_score)
+            portion = self._calculate_portion_from_score(signal.signal_score)
+            
+            return FundFlowDecision(
+                operation=Operation.OPEN_LONG,
+                symbol=symbol,
+                portion=portion,
+                leverage=leverage,
+                reason=f"macd_mtf_long_1h_{signal.signal_type_1h}_15m_{signal.entry_type_15m}",
+                metadata=metadata
+            )
+            
+        elif signal.direction == 'short' and signal.signal_score >= self.macd_mtf_strategy_config.min_signal_score:
+            # 检查是否有反向持仓需要平仓
+            if pos_side == "LONG":
+                return FundFlowDecision(
+                    operation=Operation.CLOSE_LONG,
+                    symbol=symbol,
+                    portion=1.0,
+                    reason=f"macd_mtf_close_long_1h_{signal.signal_type_1h}",
+                    metadata=metadata
+                )
+            
+            # 开空仓
+            leverage = self._calculate_leverage_from_score(signal.signal_score)
+            portion = self._calculate_portion_from_score(signal.signal_score)
+            
+            return FundFlowDecision(
+                operation=Operation.OPEN_SHORT,
+                symbol=symbol,
+                portion=portion,
+                leverage=leverage,
+                reason=f"macd_mtf_short_1h_{signal.signal_type_1h}_15m_{signal.entry_type_15m}",
+                metadata=metadata
+            )
+        
+        # 无明确信号
+        return FundFlowDecision(
+            operation=Operation.HOLD,
+            symbol=symbol,
+            reason=f"macd_mtf_hold_{signal.direction}_score_{signal.signal_score:.2f}",
+            metadata=metadata
+        )
+    
+    def _calculate_leverage_from_score(self, score: float) -> int:
+        """根据信号评分计算杠杆"""
+        if score >= 0.75:
+            return min(self.max_leverage, 5)
+        elif score >= 0.60:
+            return min(self.max_leverage, 4)
+        elif score >= 0.45:
+            return min(self.max_leverage, 3)
+        else:
+            return self.min_leverage
+    
+    def _calculate_portion_from_score(self, score: float) -> float:
+        """根据信号评分计算仓位比例"""
+        base_portion = self.default_portion
+        if score >= 0.75:
+            return min(self.max_symbol_position_portion, base_portion * 1.2)
+        elif score >= 0.60:
+            return base_portion
+        else:
+            return base_portion * 0.8
+    
     def _decide_rule_strategy(
         self,
         symbol: str,
@@ -3948,6 +4192,11 @@ class FundFlowDecisionEngine:
         direction = str(regime_info.get("direction", "BOTH")).upper()
         if self.rule_strategy_enabled:
             return self._decide_rule_strategy(symbol, portfolio, price, market_flow_context or {}, regime_info)
+        
+        # 新MACD多时间框架策略（优先级高于默认策略）
+        if self.macd_mtf_strategy_enabled:
+            return self._decide_macd_strategy(symbol, portfolio, price, market_flow_context or {}, regime_info)
+        
         trend_cfg = self._trend_capture_config()
         trend_pending = self._compute_trend_pending(symbol, market_flow_context or {}, regime_info, cfg=trend_cfg)
         

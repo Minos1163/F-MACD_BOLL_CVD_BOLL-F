@@ -1,0 +1,1117 @@
+{
+  "mtf_system_v3": {
+    "version": "3.0",
+    "name": "BTC_Complete_Trading_System",
+    "description": "BTC完整交易系统 - 4H定方向 → 1H主操作周期 → 15m找机会 → 5m精准入场 → 分批加仓 → 规则化出场",
+    "applicable_symbols": ["BTC", "ETH", "BNB"],
+    "strategy_type": "趋势跟随 + 回调二次启动",
+    
+    "execution_motto": {
+      "line_1": "4H 告诉你能做什么方向",
+      "line_2": "1H 告诉你现在能不能做",
+      "line_3": "15m 告诉你大概在哪里做",
+      "line_4": "5m 告诉你精确的触发点"
+    },
+    
+    "four_layers": {
+      "layer_1_4h": {
+        "name": "定方向层",
+        "period": "4h",
+        "weight": 30,
+        "role": "没有4H方向，不做任何交易",
+        "long_conditions": {
+          "condition_1": "价格 > EMA55",
+          "condition_2": "EMA21 > EMA55",
+          "condition_3": "MACD柱子 > 0",
+          "condition_4": "价格 > Anchored VWAP",
+          "threshold": "满足4条中至少3条"
+        },
+        "short_conditions": {
+          "condition_1": "价格 < EMA55",
+          "condition_2": "EMA21 < EMA55",
+          "condition_3": "MACD柱子 < 0",
+          "condition_4": "价格 < Anchored VWAP",
+          "threshold": "满足4条中至少3条"
+        },
+        "strong_bullish": "价格 > EMA21 > EMA55 > EMA200",
+        "strong_bearish": "价格 < EMA21 < EMA55 < EMA200"
+      },
+      
+      "layer_2_1h": {
+        "name": "主操作层（核心）",
+        "period": "1h",
+        "weight": 35,
+        "role": "结构过滤器 + 止损锚定 + 加仓基准",
+        "three_core_functions": {
+          "structure_filter": "4H做多背景下，1H必须同样维持多头结构",
+          "stop_loss_anchor": "主止损锚定1H关键结构低点下方",
+          "add_position_base": "第二笔确认仓等待1H层面结构突破"
+        },
+        "long_waiting_patterns": [
+          "价格回踩1H EMA21不破",
+          "回踩到1H VWAP附近获得支撑",
+          "1H MACD红柱缩短后停止缩短",
+          "1H成交量在回踩时明显缩减"
+        ],
+        "time_stop": "进场后3～5根1H K线仍未启动，减仓50%或直接清仓"
+      },
+      
+      "layer_3_15m": {
+        "name": "触发层",
+        "period": "15m",
+        "weight": 20,
+        "role": "确认回踩质量，不独立入场",
+        "ideal_long_pullback": [
+          "价格回踩15m EMA21或VWAP",
+          "15m MACD红柱缩短（但未死叉）",
+          "回调成交量明显缩减",
+          "K线形态：小阴线缩量/十字星/下影线/多根小K线收敛"
+        ],
+        "ideal_short_bounce": [
+          "价格反弹至15m EMA21或VWAP下方",
+          "15m MACD绿柱缩短（但未金叉）",
+          "反弹成交量明显缩减",
+          "K线形态：上影线/小阳缩量/横盘受压"
+        ]
+      },
+      
+      "layer_4_5m": {
+        "name": "精准入场层",
+        "period": "5m",
+        "weight": 15,
+        "role": "捕捉精确的触发点",
+        "long_entry_combos": {
+          "combo_a": "5m MACD金叉 + 价格站上VWAP",
+          "combo_b": "5m MACD柱子翻红 + 放量突破15m小结构高点",
+          "combo_c": "5m价格有效突破15m关键小高点（带量）"
+        },
+        "short_entry_combos": {
+          "combo_a": "5m MACD死叉 + 价格跌回VWAP下方",
+          "combo_b": "5m MACD柱子翻绿 + 跌破15m小结构低点",
+          "combo_c": "5m价格有效跌破15m关键小低点（带量）"
+        }
+      }
+    },
+    
+    "position_management": {
+      "method": "分批建仓，绝不一把梭",
+      "positions": {
+        "first_position": {
+          "ratio": "40%",
+          "entry": "5m入场信号触发",
+          "stop_loss": "1H关键结构低点"
+        },
+        "confirm_position": {
+          "ratio": "30%",
+          "entry": "突破1H小结构高点 + MACD放大",
+          "stop_loss": "提至开仓价附近"
+        },
+        "accelerate_position": {
+          "ratio": "30%",
+          "entry": "主升/跌浪加速 + 1H突破前高",
+          "stop_loss": "沿1H EMA21移动"
+        }
+      },
+      "benefits": [
+        "第一次看错：亏损控制在40%仓位的单笔止损内",
+        "看对方向：三笔仓位叠加，利润最大化",
+        "心态更稳：不因满仓而情绪化止损"
+      ]
+    },
+    
+    "stop_loss_system": {
+      "long_stop_loss": {
+        "primary": "1H最近关键结构低点下方",
+        "secondary": "1H EMA55下方",
+        "emergency": "15m最近回踩低点下方"
+      },
+      "short_stop_loss": {
+        "primary": "1H最近关键结构高点上方"
+      },
+      "time_stop": {
+        "3_5_bars_1h_no_move": "减仓50%或清仓",
+        "5_bars_15m_no_move": "减仓观察",
+        "direction_conflict": "立即止损，不等待"
+      }
+    },
+    
+    "add_position_rules": {
+      "principle": "只允许盈利后加仓，亏损状态下绝不加仓",
+      "first_add_conditions": [
+        "首仓已有浮盈",
+        "价格突破1H小结构前高",
+        "1H MACD红柱继续扩大",
+        "价格在1H VWAP上方",
+        "成交量有所放大"
+      ],
+      "second_add_conditions": [
+        "出现三次启动模型的第三次启动",
+        "回踩比前次更浅（低点抬高）",
+        "1H EMA21支撑更强",
+        "1H MACD红柱继续扩大",
+        "出现加速放量突破"
+      ],
+      "forbidden_conditions": [
+        "当前仓位处于亏损状态",
+        "价格离1H EMA21距离过远（超过2%）",
+        "1H出现连续3根以上大阳/阴",
+        "成交量未有效放大",
+        "MACD虽创新高但价格推进明显变弱（顶背离风险）",
+        "距前高/阻力位不足1%"
+      ]
+    },
+    
+    "exit_system": {
+      "batch_take_profit": {
+        "target_1": {"profit": "+1% ~ +1.5%", "action": "减1/3", "purpose": "锁定初步利润"},
+        "target_2": {"profit": "+2% ~ +3%", "action": "再减1/3", "purpose": "锁定主要利润"},
+        "target_3": {"profit": "超过+3%", "action": "剩余让跑", "purpose": "移动止损跟踪"}
+      },
+      "structure_take_profit": [
+        "4H / 1H前高（关键阻力）",
+        "前期密集成交区（压力明显）",
+        "整数关口附近（市场心理位）",
+        "Anchored VWAP上方显著偏离（均值回归风险）"
+      ],
+      "momentum_exhaustion": [
+        "1H MACD红柱开始缩短",
+        "15m / 5m出现明显顶背离",
+        "放量冲高后快速回落（缩量无法跟进）",
+        "1H价格跌破EMA21（清仓信号）"
+      ]
+    },
+    
+    "trailing_stop": {
+      "stage_1_breakeven": {
+        "trigger": "首仓浮盈 ≥ +0.5%",
+        "action": "止损提至开仓价（保本止损）",
+        "purpose": "消除亏损可能，进入无风险持仓状态"
+      },
+      "stage_2_lock_profit": {
+        "trigger": "1H形成新的低点抬高（第一次回踩不破）",
+        "action": "止损提至1H前一个结构低点下方",
+        "purpose": "锁住部分利润，给行情呼吸空间"
+      },
+      "stage_3_tracking": {
+        "trigger": "进入主升浪（价格加速，量能放大）",
+        "action": "沿1H EMA21动态上移止损",
+        "purpose": "让利润最大化奔跑，直至趋势结束"
+      }
+    },
+    
+    "signal_filters": {
+      "do_trade": [
+        "4H趋势方向明确（≥3/4条件满足）",
+        "1H结构回踩后企稳",
+        "15m回踩缩量，结构良好",
+        "上涨量 > 回调量（做多时）",
+        "四层周期方向一致"
+      ],
+      "do_not_trade": [
+        "4H横盘区间的中间位置",
+        "1H与4H方向出现明显冲突",
+        "15m连续大阳/大阴后的追单",
+        "MACD已远离零轴后的后排进场",
+        "无成交量配合的假突破",
+        "价格离VWAP/EMA偏差超过2%"
+      ],
+      "additional_rules": {
+        "volume_price_match": "做多时必须满足：上涨量 > 回调量",
+        "no_chase_big_candle": "大阳/大阴出现后，至少等一次回踩才考虑入场",
+        "no_chase_far_from_ema": "价格偏离1H EMA21超过2%时，不做追多/追空",
+        "wait_on_conflict": "4H多头 + 1H强空 → 等，不硬做任何方向"
+      }
+    },
+    
+    "common_mistakes": {
+      "entry_mistakes": [
+        "4H没有明确趋势时强行入场",
+        "1H未企稳就根据15m信号入场",
+        "15m没有回踩就直接追涨/追跌",
+        "MACD金叉后不看位置直接冲",
+        "不等5m与上层周期共振确认"
+      ],
+      "position_mistakes": [
+        "第一笔就满仓（无法加仓，心态崩）",
+        "亏损状态下继续加仓摊薄",
+        "多次信号共振后仍只开小仓"
+      ],
+      "exit_mistakes": [
+        "第一笔浮盈就全平",
+        "情绪化止盈（涨一点就跑，跌一点就割）",
+        "MACD缩短的信号出现后仍不减仓",
+        "没有使用移动止损",
+        "靠感觉而非规则决定出场时机"
+      ]
+    },
+    
+    "indicators": {
+      "ema": {
+        "4h": {"fast": 21, "medium": 55, "slow": 200, "purpose": "趋势结构判断"},
+        "1h": {"fast": 21, "medium": 55, "purpose": "结构支撑/压力"},
+        "15m": {"fast": 21, "medium": 55, "purpose": "回踩结构判断"}
+      },
+      "macd": {
+        "4h": {"fast": 12, "slow": 26, "signal": 9, "purpose": "动能方向确认"},
+        "1h": {"fast": 12, "slow": 26, "signal": 9, "purpose": "动能强弱判断"},
+        "15m": {"fast": 8, "slow": 21, "signal": 5, "purpose": "灵敏动能变化"},
+        "5m": {"fast": 6, "slow": 20, "signal": 4, "purpose": "超灵敏入场信号"}
+      },
+      "vwap": {
+        "4h": {"type": "Anchored VWAP", "purpose": "价值中枢判断"},
+        "1h_15m_5m": {"type": "日内VWAP", "purpose": "短期价值中枢"}
+      },
+      "volume": {
+        "ma_period": 20,
+        "purpose": "量能异常识别"
+      }
+    },
+    
+    "stabilization_scorer": {
+      "description": "1H企稳量化判定器 - 五维度打分模型",
+      "total_max_score": 100,
+      "entry_threshold": 70,
+      
+      "five_dimensions": {
+        "dimension_1_macd": {
+          "name": "MACD动能",
+          "max_score": 30,
+          "weight": "30%",
+          "core_logic": "动能衰减是回调结束的核心信号",
+          "scoring_rules": {
+            "连续缩短": {"condition": "连续≥2根柱子绝对值递减", "score": 8},
+            "衰减幅度": {
+              "strong": {"ratio": "< 0.30", "score": 10, "description": "强势衰减，信号极强"},
+              "standard": {"ratio": "< 0.50", "score": 10, "description": "标准衰减，信号良好"},
+              "weak": {"ratio": "< 0.70", "score": 5, "description": "弱势衰减，信号一般"},
+              "fail": {"ratio": "≥ 0.70", "score": 0, "description": "几乎未衰减"}
+            },
+            "斜率趋平": {"condition": "DIF-DEA差值收窄，不再加速", "score": 7},
+            "未死叉": {"condition": "柱子绝对值仍>0，DIF在DEA上方", "score": 5}
+          }
+        },
+        
+        "dimension_2_price": {
+          "name": "价格结构",
+          "max_score": 30,
+          "weight": "30%",
+          "core_logic": "价格位置决定回调深浅与风险",
+          "scoring_rules": {
+            "EMA21偏差率": {
+              "perfect": {"deviation": "≤ 0.5%", "score": 12, "description": "贴近均线，轻量回调"},
+              "acceptable": {"deviation": "0.5%~1.0%", "score": 6, "description": "可接受，适当降低首仓"},
+              "fail": {"deviation": "> 1.0%", "score": 0, "description": "偏离过远，不建议入场"}
+            },
+            "EMA55不破": {"condition": "1H收盘价在EMA55上方", "score": 8},
+            "VWAP上方": {"condition": "价格维持在日内VWAP上方", "score": 6},
+            "EMA21斜率向上": {"condition": "EMA21当前值≥3根前EMA21值", "score": 4}
+          }
+        },
+        
+        "dimension_3_volume": {
+          "name": "成交量",
+          "max_score": 20,
+          "weight": "20%",
+          "core_logic": "量价配合是趋势质量的直接体现",
+          "scoring_rules": {
+            "回调量比": {
+              "strong": {"ratio": "< 0.60", "score": 10, "description": "回调量不足上涨量60%，卖压惰性"},
+              "acceptable": {"ratio": "< 0.80", "score": 5, "description": "量比偏高，谨慎"},
+              "fail": {"ratio": "≥ 0.80", "score": 0, "description": "回调量过大，趋势质量存疑"}
+            },
+            "连续萎缩": {
+              "strong": {"condition": "连续3根1H K线量能逐根递减", "score": 6},
+              "weak": {"condition": "连续2根递减", "score": 3}
+            },
+            "绝对水平": {"condition": "当前1H K线量<量MA20", "score": 4}
+          }
+        },
+        
+        "dimension_4_candle": {
+          "name": "K线形态",
+          "max_score": 12,
+          "weight": "12%",
+          "core_logic": "辅助确认，单独使用噪声较大",
+          "scoring_rules": {
+            "下影线承接": {"condition": "下影线≥实体×1.5，且下影>上影", "score": 5},
+            "十字星/小实体": {"condition": "实体<ATR(14)×0.30", "score": 4},
+            "横盘收敛": {"condition": "连续≥2根小阴线，波动区间逐步收窄", "score": 3}
+          }
+        },
+        
+        "dimension_5_time": {
+          "name": "时间结构",
+          "max_score": 8,
+          "weight": "8%",
+          "core_logic": "过滤回调过短或过长两种极端",
+          "scoring_rules": {
+            "回调根数": {
+              "ideal": {"bars": "3~5根", "score": 4, "description": "较快，强势信号"},
+              "acceptable": {"bars": "6~8根", "score": 2, "description": "偏长，开始警惕"},
+              "fail": {"bars": "<3 或 >8", "score": 0, "description": "假信号或趋势变质"}
+            },
+            "低点结构": {"condition": "本次回调低点高于上一次回调低点", "score": 2},
+            "回调幅度": {
+              "healthy": {"depth": "< 50%", "score": 2, "description": "主趋势完整"},
+              "acceptable": {"depth": "50%~61.8%", "score": 1, "description": "黄金比例区间"},
+              "fail": {"depth": "> 61.8%", "score": 0, "description": "趋势完整性存疑"}
+            }
+          }
+        }
+      },
+      
+      "veto_system": {
+        "description": "否决项独立于分数之外，任一触发立即禁止入场",
+        "veto_conditions": {
+          "EMA55跌破": {"trigger": "1H收盘价 < 1H EMA55", "reason": "趋势结构破坏，非轻量回调"},
+          "MACD死叉": {"trigger": "柱子绝对值转负（翻绿）", "reason": "动能已确认反转"},
+          "大阴线出现": {"trigger": "1H单根阴线实体 > 2×ATR(14)", "reason": "主动抛售，非自然回调"},
+          "量能突放": {"trigger": "单根1H成交量 > MA20×200%", "reason": "恐慌性抛售信号"}
+        }
+      },
+      
+      "signal_levels": {
+        "A_grade": {
+          "score_range": "85~100",
+          "description": "强企稳，信号极强",
+          "position_pct": "40%",
+          "action": "全额首仓，快速进入加仓流程"
+        },
+        "B_grade": {
+          "score_range": "70~84",
+          "description": "标准企稳，信号良好",
+          "position_pct": "40%",
+          "action": "正常首仓，按系统流程执行"
+        },
+        "C_grade": {
+          "score_range": "55~69",
+          "description": "弱企稳，信号偏弱",
+          "position_pct": "20%",
+          "action": "减半首仓，等待加分项出现"
+        },
+        "D_grade": {
+          "score_range": "< 55",
+          "description": "未企稳，条件不足",
+          "position_pct": "0%",
+          "action": "禁止入场，继续等待信号"
+        }
+      },
+      
+      "dynamic_threshold": {
+        "strong_trend_market": {
+          "threshold": 65,
+          "trigger_conditions": [
+            "4H: EMA21 > EMA55 > EMA200（多头完美排列）",
+            "4H: MACD持续>0超过10根K线",
+            "价格: 距前期高点<5%"
+          ],
+          "rationale": "强趋势中回调质量普遍较低但不影响后续走势"
+        },
+        "normal_trend_market": {
+          "threshold": 70,
+          "trigger_conditions": ["4H: 方向明确（满足≥3/4条件）"]
+        },
+        "volatile_market": {
+          "threshold": 80,
+          "trigger_conditions": [
+            "4H: 条件仅满足3/4（边缘状态）",
+            "近期出现过虚假突破"
+          ],
+          "rationale": "方向存疑时，必须要求更高质量的企稳信号"
+        }
+      },
+      
+      "key_thresholds": {
+        "macd_decay_rate": {
+          "formula": "ratio = H(n) / H(n-1)",
+          "threshold": 0.5,
+          "meaning": "当前柱不足前柱50%，卖方力量真实耗竭",
+          "verification": "回测过去6个月BTC 1H数据，统计ratio<0.5后3根K线方向胜率"
+        },
+        "ema21_deviation_rate": {
+          "formula": "偏差率 = |收盘价-EMA21| / EMA21 × 100%",
+          "threshold": "0.5%",
+          "meaning": "量化回调是否轻量",
+          "btc_reference": "假设EMA21=95,000 USDT，满分区间: 94,525~95,475 (±475 USDT)"
+        },
+        "pullback_volume_ratio": {
+          "formula": "量比 = 回调段总量 / 前一上涨段总量",
+          "threshold": 0.6,
+          "meaning": "低于60%说明卖盘惰性，超过80%怀疑趋势反转",
+          "note": "建议统一使用USDT计价成交量"
+        }
+      },
+      
+      "checklist": {
+        "step_1_veto_scan": [
+          "[ ] 1H收盘价是否在EMA55上方？",
+          "[ ] MACD柱子是否仍为正值（红柱）？",
+          "[ ] 最近1H是否出现大阴线（实体>2×ATR）？",
+          "[ ] 成交量是否有突放（>MA20×200%）？"
+        ],
+        "step_2_scoring": [
+          "MACD动能（满分30）",
+          "  [ ] 连续≥2根柱子缩短 +8",
+          "  [ ] 最新柱/前柱<0.5 +10",
+          "  [ ] MACD线斜率趋平 +7",
+          "  [ ] 柱子仍为正值 +5",
+          "价格结构（满分30）",
+          "  [ ] 收盘价距EMA21偏差<0.5% +12",
+          "  [ ] 价格在EMA55上方 +8",
+          "  [ ] 价格在VWAP上方 +6",
+          "  [ ] EMA21斜率向上 +4",
+          "成交量（满分20）",
+          "  [ ] 回调量/上涨量<0.60 +10",
+          "  [ ] 最近3根1H K线量能连续萎缩 +6",
+          "  [ ] 当前量<量MA20 +4",
+          "K线形态（满分12）",
+          "  [ ] 出现下影线（影线≥实体1.5倍）+5",
+          "  [ ] 出现十字星或小实体（<ATR×0.3）+4",
+          "  [ ] 连续≥2根小阴线横盘收敛 +3",
+          "时间结构（满分8）",
+          "  [ ] 回调持续3~5根1H K线 +4",
+          "  [ ] 本次低点高于上次低点 +2",
+          "  [ ] 4H回调幅度<前段涨幅50% +2"
+        ],
+        "step_3_decision": [
+          "总分≥85 → A级：首仓40%，快速推进",
+          "总分≥70 → B级：首仓40%，正常执行",
+          "总分≥55 → C级：首仓20%，等待补分",
+          "总分<55 → D级：禁止入场，继续等待"
+        ]
+      }
+    },
+    
+    "v1_vs_v2_changes": {
+      "timeframe_layers": {"v1.0": "4H→15m→5m", "v2.0": "4H→1H→15m→5m"},
+      "main_operation": {"v1.0": "15m", "v2.0": "1H"},
+      "entry_prerequisite": {
+        "v1.0": "4H趋势 + 15m回踩",
+        "v2.0": "4H趋势 + 1H企稳 + 15m回踩"
+      },
+      "stop_loss_anchor": {"v1.0": "15m结构低点", "v2.0": "1H结构低点"},
+      "add_position_base": {"v1.0": "15m小高点突破", "v2.0": "1H结构突破"},
+      "trailing_stop": {"v1.0": "沿15m EMA21", "v2.0": "沿1H EMA21"},
+      "time_stop": {"v1.0": "3～5根15m", "v2.0": "3～5根1H"}
+    },
+    
+    "quick_reference_card": {
+      "long_three_steps": {
+        "entry": "4H多头 → 1H EMA21支撑 → 15m缩量回踩 → 5m金叉进场",
+        "add": "1H突破前高 + MACD放大 + 量能跟上",
+        "exit": "到1H前高减仓 → MACD缩红柱减仓 → 跌破1H EMA21清仓"
+      },
+      "short_three_steps": {
+        "entry": "4H空头 → 1H EMA21压制 → 15m缩量反弹 → 5m死叉进场",
+        "add": "1H跌破前低 + MACD放大 + 量能跟上",
+        "exit": "到1H前低减仓 → MACD缩绿柱减仓 → 突破1H EMA21清仓"
+      },
+      "golden_rule": "这不是预测系统，而是跟随系统。不是去猜下一根K线涨还是跌，而是等市场先告诉你方向，再用规则跟上去。"
+    },
+    
+    "extreme_market_handler": {
+      "description": "极端行情处理器 - 三级熔断 + 黑天鹅应对 + 单边加速处理",
+      
+      "circuit_breaker": {
+        "description": "三级熔断机制 - 把主观判断转化为客观触发条件",
+        
+        "level_1_yellow": {
+          "name": "一级熔断（黄色预警）",
+          "trigger_conditions": [
+            "连续3根1H K线涨跌幅均 > ATR×1.5",
+            "或 15m成交量连续3根放大超过MA20×300%"
+          ],
+          "auto_actions": {
+            "暂停15m回踩等待逻辑": true,
+            "切换为1H收盘确认入场": true,
+            "止损收紧": "从1H结构低点收紧为当根K线低点",
+            "仓位上限": "正常的70%"
+          },
+          "rationale": "技术面应对调整，系统继续运行"
+        },
+        
+        "level_2_red": {
+          "name": "二级熔断（红色预警）",
+          "trigger_conditions": [
+            "1H单根K线跌幅 > 5%",
+            "或 价格偏离EMA21超过5%",
+            "或 成交量单根超过MA20×500%"
+          ],
+          "auto_actions": {
+            "停止所有新开仓": true,
+            "持仓立即减至": "50%",
+            "剩余仓位止损上移": "最近15m低点",
+            "进入二级观察状态": true
+          },
+          "rationale": "风险控制收紧，等待判断是否升级"
+        },
+        
+        "level_3_black": {
+          "name": "三级熔断（黑色预警）",
+          "trigger_conditions": [
+            "4根以内1H K线累计跌幅 > 8%",
+            "AND 成交量 > MA20×500%",
+            "AND 存在明确的外部负面事件"
+          ],
+          "auto_actions": {
+            "全部持仓市价清仓": true,
+            "关闭系统": true,
+            "停止一切分析": true,
+            "进入纯观察模式": true
+          },
+          "rationale": "承认定价机制失效，保命优先"
+        }
+      },
+      
+      "acceleration_market": {
+        "description": "单边加速行情四阶段应对",
+        "definition": "价格在无明显回踩的情况下，连续4根以上1H K线单向运动，且每根涨跌幅均超过ATR的1.5倍",
+        
+        "stage_1_normal": {
+          "name": "阶段1：趋势确认",
+          "conditions": [
+            "连续上涨1~3根1H K线，每根涨幅 < ATR×1.5",
+            "1H价格 > EMA21 > EMA55，结构完整",
+            "成交量温和放大，MACD红柱稳步扩张"
+          ],
+          "action": "系统正常执行，可入场+可加仓，不做任何调整"
+        },
+        
+        "stage_2_acceleration": {
+          "name": "阶段2：加速识别",
+          "trigger_conditions": [
+            "连续4根以上1H K线无回踩",
+            "单根1H K线涨幅 > ATR×2",
+            "成交量出现阶梯式放大（每根均高于前根）",
+            "价格偏离1H EMA21超过3%"
+          ],
+          "entry_rules": {
+            "追涨入场方式": "不等15m回踩信号，在1H K线收盘时确认，以收盘价追入，仓位为正常首仓的50%",
+            "止损收紧": "设于当根1H K线低点下方0.3%",
+            "仓位上限": "≤正常仓位的70%",
+            "加仓条件": "需额外满足成交量继续阶梯放大，禁止在价格偏离EMA21超过4%后加仓"
+          }
+        },
+        
+        "stage_3_peak_warning": {
+          "name": "阶段3：峰值预警",
+          "trigger_conditions": [
+            "价格偏离1H EMA21超过5%",
+            "或 单根1H K线涨幅 > ATR×3",
+            "或 15m出现首根放量大阴线（上影线>实体×2）",
+            "或 MACD顶背离：价格新高，MACD红柱不创新高",
+            "或 成交量出现天量后骤然萎缩（量价背离）"
+          ],
+          "actions": [
+            "禁止新开任何多仓",
+            "持仓立即减至50%",
+            "剩余仓位止损上移至最近15m低点",
+            "准备全面撤退"
+          ]
+        },
+        
+        "stage_4_normal_return": {
+          "name": "阶段4：回归常态",
+          "conditions": [
+            "价格回踩至1H EMA21附近（偏差率<1%）",
+            "1H MACD红柱开始缩短，动能回归正常节奏",
+            "成交量恢复至MA20附近水平，不再阶梯放大",
+            "1H企稳打分≥70分（按标准流程重新评估）"
+          ],
+          "action": "系统重新激活，恢复标准1H企稳打分流程执行，不保留任何加速模式规则"
+        },
+        
+        "three_core_traps": {
+          "trap_1": {
+            "name": "追高后立即等回踩",
+            "reason": "加速行情的第一次回踩往往是主跌浪开始，而非正常调整机会",
+            "solution": "追高后不能套用标准的等15m回踩逻辑"
+          },
+          "trap_2": {
+            "name": "偏离过远仍然加仓",
+            "reason": "EMA21偏差>5%时加仓，均值回归的幅度足以把所有浮盈全部吐回",
+            "solution": "严禁在5%偏差后加仓，已有仓位应开始减仓"
+          },
+          "trap_3": {
+            "name": "止损不随行情收紧",
+            "reason": "加速段内继续使用正常宽幅止损，单笔亏损可能超过账户的5%",
+            "solution": "加速模式下必须收紧止损至当根K线低点"
+          }
+        }
+      },
+      
+      "black_swan_protocol": {
+        "description": "黑天鹅事件四阶段应对协议",
+        "definition": "在极短时间（<4根1H K线）内，价格单向移动超过8%，且伴随成交量爆量（>MA20×500%）",
+        
+        "phase_1_impact": {
+          "name": "第一阶段：冲击发生（0~30分钟）",
+          "goal": "唯一目标：止损",
+          "trigger_signals": [
+            "价格在1~2根1H K线内下跌超过5%",
+            "成交量 > MA20×500%",
+            "同时存在明确的外部负面事件"
+          ],
+          "execution_sequence": [
+            "Step1：不看任何技术指标",
+            "Step2：不等任何确认信号",
+            "Step3：全部多仓立即市价止损",
+            "Step4：空仓者禁止抄底，禁止做空"
+          ],
+          "golden_rule": "黑天鹅发生后的最初30分钟，市场流动性极不稳定，任何方向的交易都是赌博"
+        },
+        
+        "phase_2_digest": {
+          "name": "第二阶段：震荡消化（30分钟~4小时）",
+          "goal": "观察，不交易",
+          "observation_items": [
+            "1H收盘价是否开始稳定（连续2根1H K线振幅收窄）",
+            "成交量是否开始回落至MA20×200%以下",
+            "链上数据：交易所净流出是否停止",
+            "事件本身：是否有官方回应、政策澄清、机构表态"
+          ],
+          "forbidden_actions": [
+            "任何方向的新开仓",
+            "抄底（V型反转在黑天鹅后极少见）",
+            "做空（极端波动下空单滑点可能极大）",
+            "根据单根K线的反弹判断方向"
+          ],
+          "core_task": "判断事件性质——情绪性过度反应 vs 系统性结构破坏"
+        },
+        
+        "phase_3_rebuild": {
+          "name": "第三阶段：结构重建确认（4~48小时）",
+          "goal": "可选择性介入",
+          "entry_prerequisites": [
+            "4H级别出现连续2根阳线收盘，且第2根收盘价高于第1根",
+            "1H价格重新站回冲击前的关键支撑位上方",
+            "成交量回落至MA20×150%以下，情绪性抛售结束",
+            "基本面确认：事件负面影响可控，非系统性崩溃"
+          ],
+          "execution": {
+            "仓位": "20%试探仓（绝对不超过）",
+            "止损": "设于冲击最低点下方1%",
+            "止盈": "第一目标为冲击前最近支撑位，不贪心"
+          },
+          "rationale": "4项前提条件缺一不可，降低标准是黑天鹅事件中亏损的主要原因"
+        },
+        
+        "phase_4_restart": {
+          "name": "第四阶段：系统重启（48小时后）",
+          "goal": "全面评估后恢复",
+          "restart_prerequisites": [
+            "4H重新满足多头或空头条件≥3/4",
+            "1H EMA21/EMA55重新呈现方向性排列",
+            "成交量恢复正常，无持续爆量（连续6根1H K线在MA20×150%以下）",
+            "事件影响已被市场充分定价，不再出现相关负面消息冲击"
+          ],
+          "restart_adjustments": {
+            "仓位上限": "单笔最大20%（持续5笔交易）",
+            "1H企稳门槛": "临时提高至80分",
+            "止损宽度": "在标准基础上放宽20%（黑天鹅后波动率通常偏高2~4周）"
+          }
+        },
+        
+        "black_swan_types": {
+          "emotional_overreaction": {
+            "name": "类型一：情绪性过度反应",
+            "features": [
+              "事件本身对行业基本面影响有限",
+              "市场出现恐慌性踩踏，超调明显"
+            ],
+            "examples": ["交易所短暂宕机", "假新闻传播", "大户集中清仓", "误操作"],
+            "recovery_pattern": "通常24~72小时内结构修复，V型或W型反弹",
+            "phase_3_strategy": "满足条件后可积极布局反弹，20%试探仓可在确认后加至40%"
+          },
+          
+          "systemic_destruction": {
+            "name": "类型二：系统性结构破坏",
+            "features": [
+              "行业信任基础或监管框架发生实质性损伤",
+              "资金大规模、持续性撤离"
+            ],
+            "examples": ["FTX级别交易所崩盘", "主权国家全面禁令", "主要稳定币脱锚"],
+            "recovery_pattern": "数周至数月，期间持续下探，反弹均是逃顶机会",
+            "phase_3_strategy": "不介入，等待第四阶段系统重启后，以极小仓位（10%）谨慎评估"
+          }
+        }
+      },
+      
+      "recovery_standards": {
+        "description": "恢复标准对比",
+        
+        "acceleration_recovery": {
+          "conditions": [
+            "价格回踩至1H EMA21附近（偏差率<1%）",
+            "1H MACD红柱停止扩大并开始缩短",
+            "成交量恢复至MA20附近水平（不再阶梯放大）",
+            "1H企稳打分重新达到≥70分"
+          ],
+          "result": "系统立即恢复，无需等待，无仓位限制"
+        },
+        
+        "emotional_black_swan_recovery": {
+          "conditions": [
+            "4H连续2根阳线收盘确认",
+            "1H价格重新站回冲击前支撑位上方",
+            "成交量回落至MA20×150%以下",
+            "事件负面影响已被市场充分定价"
+          ],
+          "result": "48小时后可重启，前5笔仓位上限20%，打分门槛80分"
+        },
+        
+        "systemic_black_swan_recovery": {
+          "conditions": [
+            "4H重新建立完整趋势排列（EMA顺序、MACD方向）",
+            "链上资金流出已停止，交易所余额趋于稳定",
+            "主要机构恢复正常运营或明确表态",
+            "至少经过2周以上的结构震荡，确认底部区域"
+          ],
+          "result": "极谨慎重启，前5笔上限10%，打分门槛85分，止损放宽30%"
+        }
+      },
+      
+      "key_thresholds_summary": {
+        "acceleration_detection": {
+          "consecutive_bars": 4,
+          "atr_multiplier": 1.5,
+          "ema_deviation_trigger": "3%",
+          "ema_deviation_warning": "5%"
+        },
+        "circuit_breaker_triggers": {
+          "level1_atr_multiplier": 1.5,
+          "level1_consecutive_bars": 3,
+          "level2_single_bar_drop": "5%",
+          "level2_ema_deviation": "5%",
+          "level2_volume_spike": "500%",
+          "level3_cumulative_drop": "8%",
+          "level3_volume_spike": "500%"
+        },
+        "black_swan_triggers": {
+          "drop_threshold": "8%",
+          "bars_limit": 4,
+          "volume_spike": "500%"
+        }
+      },
+      
+      "decision_tree": {
+        "description": "实战中30秒内完成判断",
+        "steps": [
+          "价格出现异常波动",
+          "Q1：是否有明确的外部事件？",
+          "  是 → Q2：4根内跌幅是否>8%且成交量>MA20×500%？",
+          "    是 → 黑天鹅三级熔断 → 全面清仓",
+          "    否 → 黑天鹅二级熔断 → 停止新仓，减持50%",
+          "  否 → Q3：连续无回踩是否≥4根且每根>ATR×1.5？",
+          "    是 → 单边加速，切换加速模式规则",
+          "    否 → 正常行情，系统标准执行"
+        ]
+      },
+      
+      "checklist": {
+        "step_1_nature_judgment": {
+          "description": "30秒内完成",
+          "items": [
+            "[ ] 是否有明确的外部负面事件？",
+            "[ ] 4根内跌幅是否>8%？",
+            "[ ] 成交量是否>MA20×500%？"
+          ],
+          "decision": {
+            "全部是": "黑天鹅三级熔断",
+            "前两是后一否": "黑天鹅二级熔断",
+            "无外部事件但连续无回踩≥4根": "单边加速切换规则"
+          }
+        },
+        
+        "step_2_circuit_level": {
+          "items": [
+            "[ ] 一级预警：系统切换（改规则，继续运行）",
+            "[ ] 二级预警：停止新仓+减持50%",
+            "[ ] 三级预警：全面清仓+系统暂停"
+          ]
+        },
+        
+        "step_3_recovery_assessment": {
+          "description": "48小时后",
+          "items": [
+            "[ ] 是否满足对应类型的全部恢复标准？",
+            "[ ] 是否经过足够的等待时间？",
+            "[ ] 是否以降低仓位和提高打分门槛为前提重启？"
+          ]
+        }
+      }
+    },
+    
+    "dynamic_stop_loss": {
+      "description": "1H结构止损动态调整系统 - 基于ATR的三层动态止损体系",
+      "core_principle": "固定风险金额，反推合理仓位，而非固定仓位调整止损",
+      
+      "atr_framework": {
+        "parameter": "ATR(14) 基于1H K线",
+        "advantages": [
+          "自动反映当前市场的真实波动幅度",
+          "对异常K线具有平滑效果",
+          "在各平台均可直接调用"
+        ],
+        "stop_distance_formula": "止损距离 = ATR(14) × 系数K",
+        "coefficient_ranges": {
+          "bull_market": "1.0 ~ 1.5",
+          "range_market": "0.8 ~ 1.2",
+          "bear_market": "1.5 ~ 2.5",
+          "extreme_volatility": "2.5 ~ 3.5"
+        },
+        "btc_atr_reference": {
+          "ultra_low_volatility": {"range": "200-400 USDT", "pct": "0.2%~0.4%"},
+          "normal_volatility": {"range": "400-800 USDT", "pct": "0.4%~0.8%"},
+          "high_volatility": {"range": "800-1500 USDT", "pct": "0.8%~1.5%"},
+          "extreme_volatility": {"range": ">1500 USDT", "pct": ">1.5%"}
+        }
+      },
+      
+      "market_state_detection": {
+        "description": "止损动态调整的前提是准确识别当前市场状态",
+        
+        "bull_market_conditions": {
+          "threshold": "满足≥4/5",
+          "conditions": [
+            "4H: 价格 > EMA21 > EMA55 > EMA200",
+            "4H: MACD持续>0超过10根K线",
+            "1H ATR(14)高于过去20根ATR均值的120%",
+            "近5根4H K线中阳线数量≥4",
+            "Anchored VWAP斜率向上"
+          ],
+          "atr_feature": "数值偏高，且呈现阶梯式抬升趋势"
+        },
+        
+        "range_market_conditions": {
+          "threshold": "满足≥3/4",
+          "conditions": [
+            "4H: 价格在EMA21与EMA55之间反复穿插",
+            "4H: MACD在零轴附近长时间钝化",
+            "1H ATR(14)低于过去20根ATR均值的90%",
+            "近10根4H K线无法形成方向性序列"
+          ],
+          "atr_feature": "数值偏低，且横向走平或持续收缩"
+        },
+        
+        "bear_market_conditions": {
+          "threshold": "满足≥4/5",
+          "conditions": [
+            "4H: 价格 < EMA21 < EMA55 < EMA200",
+            "4H: MACD持续<0超过10根K线",
+            "1H ATR(14)高于过去20根ATR均值的150%",
+            "近5根4H K线中阴线数量≥4",
+            "Anchored VWAP斜率向下"
+          ],
+          "atr_feature": "数值明显偏高，且在下跌过程中持续扩大"
+        },
+        
+        "priority_order": [
+          "4H MACD方向（最高权重）",
+          "4H均线排列顺序",
+          "1H ATR水平",
+          "近期K线阴阳分布",
+          "VWAP斜率"
+        ]
+      },
+      
+      "stop_coefficient_matrix": {
+        "description": "止损系数K根据市场状态和入场位置确定",
+        
+        "bull_market": {
+          "standard_entry": 1.5,
+          "deviated_2_3_entry": 1.0,
+          "acceleration_entry": 1.0,
+          "special_rules": [
+            "止损距离最小值：ATR×1.0",
+            "止损距离最大值：ATR×2.0",
+            "EMA21偏差>3%时入场，止损收紧至ATR×1.0"
+          ]
+        },
+        
+        "range_market": {
+          "standard_entry": 0.8,
+          "deviated_2_3_entry": 0.6,
+          "acceleration_entry": 0.6,
+          "special_rules": [
+            "止损必须放在区间下轨之外",
+            "ATR系数取值范围：0.6~1.2",
+            "时间止损权重增加：5根1H K线内不启动减仓"
+          ]
+        },
+        
+        "bear_market_short": {
+          "standard_entry": 1.5,
+          "deviated_2_3_entry": 1.2,
+          "acceleration_entry": 1.0,
+          "special_rules": [
+            "止损距离上限：ATR×2.5",
+            "ATR急剧扩大时(>均值200%)，仓位自动减半",
+            "熊市中做多仓位严格禁止"
+          ]
+        }
+      },
+      
+      "vaf_adjustment": {
+        "description": "波动率修正系数 - 当ATR出现极端变化时调整止损系数",
+        "formula": "VAF = 当前ATR(14) / ATR(14)过去20根均值",
+        "adjustment_rules": {
+          "vaf_below_0.7": {"adjustment": "K×0.8", "reason": "波动率异常低，止损收紧"},
+          "vaf_0.7_to_1.3": {"adjustment": "K不变", "reason": "正常范围"},
+          "vaf_1.3_to_2.0": {"adjustment": "K×1.2", "reason": "波动率偏高，止损放宽"},
+          "vaf_above_2.0": {"adjustment": "触发熔断", "reason": "极端波动"}
+        }
+      },
+      
+      "position_calculation": {
+        "formula": "仓位 = (账户总资金 × 单笔风险比例) / 止损距离",
+        "standard_risk_pct": "1.0%",
+        "max_risk_pct": "1.5%",
+        "three_position_stops": {
+          "first_position_40%": {
+            "stop_anchor": "1H结构低点 - ATR×K",
+            "stop_type": "最宽，给趋势呼吸空间"
+          },
+          "confirm_position_30%": {
+            "stop_anchor": "止损提至开仓价附近",
+            "stop_type": "首仓浮盈后保本"
+          },
+          "accelerate_position_30%": {
+            "stop_anchor": "跟随1H EMA21动态移动",
+            "stop_type": "最紧，紧贴趋势"
+          }
+        }
+      },
+      
+      "trailing_stop_rules": {
+        "description": "三阶段移动止损",
+        
+        "stage_1_breakeven": {
+          "trigger": "浮盈 ≥ ATR×1.0",
+          "action": "止损上移至开仓价",
+          "purpose": "保本，消除风险敞口"
+        },
+        
+        "stage_2_lock_profit": {
+          "trigger": "浮盈 ≥ ATR×2.0",
+          "action": "止损上移至开仓价 + ATR×0.3",
+          "purpose": "锁定部分利润"
+        },
+        
+        "stage_3_trailing": {
+          "trigger": "浮盈 ≥ ATR×3.0",
+          "action": "跟随1H EMA21动态上移",
+          "method": "EMA21 - ATR×0.5",
+          "update_frequency": "每根1H K线收盘"
+        },
+        
+        "special_adjustments": {
+          "price_deviation_above_3ATR": "收紧止损至最近15m结构低点",
+          "consecutive_3_bullish_bars": "止损上移至第一根上涨K线低点",
+          "range_market_100pct_profit": "立即保本止损"
+        }
+      },
+      
+      "stop_loss_circuit_breaker": {
+        "description": "极端波动的止损熔断",
+        
+        "trigger_conditions": [
+          "ATR(14) > 过去20根ATR均值×2.5",
+          "或 单根1H K线实体 > ATR(14)×3.0"
+        ],
+        
+        "existing_position_rules": {
+          "step_1": "止损收紧至最近1H低点（不用ATR系数）",
+          "step_2": "仓位减至50%",
+          "step_3": "剩余仓位使用跟踪止损，每根1H K线更新"
+        },
+        
+        "new_entry_rules": {
+          "step_1": "禁止使用标准ATR系数",
+          "step_2": "改用固定百分比止损：入场价×1.5%",
+          "step_3": "仓位压缩至正常仓位的30%"
+        },
+        
+        "release_conditions": [
+          "ATR(14)回落至过去20根均值的150%以下",
+          "连续5根1H K线ATR持续回落",
+          "最大单根K线振幅 < ATR×2.0"
+        ]
+      },
+      
+      "validation_rules": {
+        "stop_distance_limits": {
+          "min_multiplier": 0.6,
+          "max_multiplier": 3.0,
+          "reason": "低于ATR×0.6必然被触发，超过ATR×3.0单笔亏损超限"
+        },
+        "risk_control": {
+          "max_loss_per_trade": "账户×1.5%",
+          "position_adjustment": "若超出，仓位=(账户×1.5%)/止损距离"
+        }
+      },
+      
+      "calculation_checklist": {
+        "step_1_market_state": [
+          "[ ] 识别当前市场状态（牛市/震荡/熊市）",
+          "[ ] 查看1H ATR(14)数值",
+          "[ ] 计算VAF = 当前ATR/过去20根ATR均值",
+          "[ ] 确认VAF是否触发熔断(>2.5)"
+        ],
+        "step_2_coefficient": [
+          "[ ] 根据市场状态×入场位置确定基础系数K",
+          "[ ] 应用VAF修正系数"
+        ],
+        "step_3_stop_price": [
+          "[ ] 确认1H结构低点/高点",
+          "[ ] 止损价 = 结构位 ± ATR×K",
+          "[ ] 校验：ATR×0.6 ≤ 距离 ≤ ATR×3.0"
+        ],
+        "step_4_position": [
+          "[ ] 最大亏损金额 = 账户×1.0%",
+          "[ ] 首仓仓位 = 最大亏损金额/止损距离",
+          "[ ] 检查仓位是否超过合理比例"
+        ],
+        "step_5_trailing_plan": [
+          "[ ] 确认三个移动止损阶段的触发价格",
+          "[ ] 记录当前ATR数值用于后续更新"
+        ]
+      },
+      
+      "example_calculations": {
+        "bull_market_example": {
+          "btc_price": 95000,
+          "atr_14": 750,
+          "vaf": 1.15,
+          "entry_price": 95000,
+          "structure_low": 94200,
+          "coefficient_k": 1.5,
+          "stop_price": 93075,
+          "stop_distance": 1925,
+          "position_10k_account": "0.052 BTC",
+          "risk_amount": "100 USDT"
+        },
+        "range_market_example": {
+          "btc_price": 95000,
+          "atr_14": 320,
+          "vaf": 0.89,
+          "range_support": 94500,
+          "coefficient_k": 0.64,
+          "stop_price": 94295,
+          "stop_distance": 705,
+          "position_10k_account": "0.142 BTC"
+        },
+        "bear_market_short_example": {
+          "btc_price": 95000,
+          "atr_14": 1100,
+          "vaf": 1.29,
+          "structure_high": 95800,
+          "coefficient_k": 1.8,
+          "stop_price": 97780,
+          "stop_distance": 2780,
+          "position_10k_account": "0.036 BTC"
+        }
+      }
+    }
+  }
+}

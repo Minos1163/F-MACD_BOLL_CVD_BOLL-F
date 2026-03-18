@@ -2,6 +2,11 @@
 
 The active runtime implementation is ``src.app.fund_flow_bot.TradingBot``.
 Legacy launchers should route here instead of carrying their own runtime copy.
+
+v3.0 增强:
+- 集成动态止损系统 (ATR-based dynamic stop loss)
+- 支持市场状态识别 (牛市/震荡/熊市)
+- VAF波动率修正与止损熔断机制
 """
 
 from __future__ import annotations
@@ -16,6 +21,9 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from src.app.fund_flow_bot import TradingBot
+
+# 动态止损系统已集成到 fund_flow_bot.py 中
+# 无需在此处单独导入
 
 DEFAULT_CONFIG_REL = "config/trading_config_fund_flow.json"
 
