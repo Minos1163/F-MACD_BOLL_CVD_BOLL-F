@@ -46,3 +46,27 @@ def test_soften_conflict_exit_for_small_mae_keeps_circuit_exit_on_deep_break():
 
     assert out["softened"] is False
     assert out["risk_state"] == "CIRCUIT_EXIT"
+
+
+def test_symbols_for_current_cycle_prioritizes_positions_without_truncation():
+    bot = TradingBot.__new__(TradingBot)
+    bot.config = {
+        "schedule": {
+            "symbols_per_cycle": 7,
+            "symbols_per_cycle_prioritize_positions": True,
+        }
+    }
+
+    symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "DOGEUSDT"]
+    ordered = bot._symbols_for_current_cycle(symbols, {"SOLUSDT"})
+
+    assert ordered == ["SOLUSDT", "BTCUSDT", "ETHUSDT", "DOGEUSDT"]
+
+
+def test_diff_counter_dict_only_keeps_positive_deltas():
+    delta = TradingBot._diff_counter_dict(
+        after={"200": 12, "429": 3, "500": 1},
+        before={"200": 10, "429": 3, "418": 2},
+    )
+
+    assert delta == {"200": 2, "500": 1}

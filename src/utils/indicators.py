@@ -60,7 +60,7 @@ def calculate_macd(prices: pd.Series, fast: int = 12, slow: int = 26, signal: in
         return (
             float(macd_line.iloc[-1]),
             float(signal_line.iloc[-1]),
-            float(histogram.iloc.iloc[-1]),
+            float(histogram.iloc[-1]),
         )
     except BaseException:
         return None, None, None

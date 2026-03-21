@@ -400,12 +400,26 @@ class MarketDataManager:
                     "ignore",
                 ],
             )
-            for col in ("high", "low", "close", "open"):
+            for col in ("high", "low", "close", "open", "volume"):
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 
             close = df["close"]
             high = df["high"]
             low = df["low"]
+            volume = df["volume"]
+
+            ema21_series = close.ewm(span=21, adjust=False).mean()
+            ema55_series = close.ewm(span=55, adjust=False).mean()
+            ema200_series = close.ewm(span=200, adjust=False).mean()
+            ema12_series = close.ewm(span=12, adjust=False).mean()
+            ema26_series = close.ewm(span=26, adjust=False).mean()
+            macd_line_series = ema12_series - ema26_series
+            signal_line_series = macd_line_series.ewm(span=9, adjust=False).mean()
+            hist_series = macd_line_series - signal_line_series
+            typical_price = (high + low + close) / 3.0
+            cumulative_volume = volume.cumsum().replace(0, pd.NA)
+            vwap_series = (typical_price * volume).cumsum() / cumulative_volume
+            history_tail = min(len(close), 60)
 
             # 基础指标
             ema_attack = calculate_ema(close, period=10)
@@ -434,6 +448,17 @@ class MarketDataManager:
             ema_fast_value = float(ema_fast) if ema_fast is not None else 0.0
             ema_mid_value = float(ema_mid) if ema_mid is not None else 0.0
             ema30_slope_value = float(ema30_slope) if ema30_slope is not None else 0.0
+            latest_volume = float(volume.iloc[-1]) if len(volume) > 0 and not pd.isna(volume.iloc[-1]) else 0.0
+            avg_volume = float(volume.rolling(window=20, min_periods=1).mean().iloc[-1]) if len(volume) > 0 else 0.0
+            atr_value = float(atr) if atr is not None else 0.0
+            vwap_value = float(vwap_series.iloc[-1]) if len(vwap_series) > 0 and not pd.isna(vwap_series.iloc[-1]) else 0.0
+
+            def _series_tail(series: pd.Series) -> List[float]:
+                clean = series.dropna()
+                if clean.empty:
+                    return []
+                return [float(v) for v in clean.iloc[-history_tail:].tolist()]
+
             result = {
                 "ema_attack": ema_attack_value,
                 "ema_10": ema_attack_value,
@@ -445,8 +470,22 @@ class MarketDataManager:
                 "ema_slow": float(ema_slow),
                 "adx": float(adx),
                 "atr_pct": float(atr_pct),
+                "atr": atr_value,
+                "close": last_close,
                 "last_close": last_close,
                 "last_open": last_open,
+                "volume": latest_volume,
+                "avg_volume": avg_volume,
+                "vwap": vwap_value,
+                "ema21": float(ema21_series.iloc[-1]) if len(ema21_series) > 0 else 0.0,
+                "ema55": float(ema55_series.iloc[-1]) if len(ema55_series) > 0 else 0.0,
+                "ema200": float(ema200_series.iloc[-1]) if len(ema200_series) > 0 else 0.0,
+                "close_array": _series_tail(close),
+                "close_series": _series_tail(close),
+                "vwap_array": _series_tail(vwap_series),
+                "vwap_series": _series_tail(vwap_series),
+                "macd_hist_array": _series_tail(hist_series),
+                "macd_hist_series": _series_tail(hist_series),
                 "ema30_slope": ema30_slope_value,
                 "ema30_slope_pct": (ema30_slope_value / ema_mid_value) if abs(ema_mid_value) > 1e-9 else 0.0,
             }
@@ -479,14 +518,17 @@ class MarketDataManager:
 
             if macd_hist is not None:
                 result["macd_hist"] = float(macd_hist)
+                hist_tail = hist_series.dropna()
+                if len(hist_tail) >= 2:
+                    result["macd_hist_prev"] = float(hist_tail.iloc[-2])
+                macd_line_tail = macd_line_series.dropna()
+                signal_tail = signal_line_series.dropna()
+                if len(macd_line_tail) >= 2:
+                    result["macd_prev"] = float(macd_line_tail.iloc[-2])
+                if len(signal_tail) >= 2:
+                    result["macd_signal_prev"] = float(signal_tail.iloc[-2])
                 # MACD hist 归一化
                 if len(close) >= 30:
-                    # 计算 hist 滚动标准差
-                    ema12 = close.ewm(span=12, adjust=False).mean()
-                    ema26 = close.ewm(span=26, adjust=False).mean()
-                    macd_line = ema12 - ema26
-                    signal_line = macd_line.ewm(span=9, adjust=False).mean()
-                    hist_series = macd_line - signal_line
                     hist_std = hist_series.rolling(window=20).std()
                     result["macd_hist_norm"] = _normalize(float(macd_hist), hist_std)
                     if len(hist_series) >= 3:
@@ -499,8 +541,8 @@ class MarketDataManager:
                             result["macd_hist_expand"] = bool(abs(h0) > abs(h1) > abs(h2))
                             result["macd_hist_expand_up"] = bool(h0 > h1 > h2)
                             result["macd_hist_expand_down"] = bool(h0 < h1 < h2)
-                    macd_line_tail = macd_line.dropna()
-                    signal_tail = signal_line.dropna()
+                    macd_line_tail = macd_line_series.dropna()
+                    signal_tail = signal_line_series.dropna()
                     if len(macd_line_tail) >= 2 and len(signal_tail) >= 2:
                         m1 = float(macd_line_tail.iloc[-2])
                         m0 = float(macd_line_tail.iloc[-1])

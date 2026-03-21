@@ -12,44 +12,34 @@
   },
   "trading": {
     "symbols": [
-      "XRPUSDT",  
       "SOLUSDT",
-      "TRXUSDT",
-      "DOGEUSDT",
+      "XRPUSDT",
       "ADAUSDT",
-      "HYPEUSDT",
-      "BCHUSDT",
-      "LINKUSDT",
-      "XLMUSDT",
       "AVAXUSDT",
+      "TRXUSDT",
       "DOTUSDT",
       "LTCUSDT",
-      "ZECUSDT",
-      "SUIUSDT",
-      "TONUSDT",
-      "TAOUSDT",
-      "AAVEUSDT",
+      "BCHUSDT",
+      "NEARUSDT",
       "ATOMUSDT",
       "ICPUSDT",
-      "ETCUSDT",
-      "ONDOUSDT",
-      "PUMPUSDT",
-      "KASUSDT",
-      "POLUSDT",
-      "WLDUSDT",
-      "MORPHOUSDT",
-      "ENAUSDT",
-      "RENDERUSDT",
-      "TRUMPUSDT",
-      "ALGOUSDT",
-      "APTUSDT",
-      "FILUSDT",
       "VETUSDT",
+      "OPUSDT",
       "ARBUSDT",
-      "JUPUSDT",
-      "ZROUSDT",
-      "JSTUSDT",
-      "FETUSDT"
+      "MKRUSDT",
+      "INJUSDT",
+      "TIAUSDT",
+      "AAVEUSDT",
+      "GRTUSDT",
+      "RUNEUSDT",
+      "STXUSDT",
+      "ALGOUSDT",
+      "MINAUSDT",
+      "ENSUSDT",
+      "THETAUSDT",
+      "FETUSDT",
+      "AGIXUSDT",
+      "WOOUSDT"
     ],
     "min_leverage": 2,
     "default_leverage": 3,
@@ -273,15 +263,6 @@
     "reverse_close_min_gap": 0.08,
     "reverse_close_no_trade_extra_bars": 1,
     "reverse_close_require_direction_lock": false,
-    "symbol_blacklist": [
-      "QNTUSDT",
-      "UNIUSDT",
-      "NEARUSDT",
-      "HBARUSDT",
-      "XMRUSDT",
-      "TRXUSDT",
-      "ENAUSDT"
-    ],
     "take_profit_pct": 0.0,
     "breakeven_enabled": true,
     "breakeven_trigger_pnl_ratio": 0.003,
@@ -321,10 +302,10 @@
       "macd_15m_signal": 9,
       "min_entry_score": 0.3,
       "min_signal_score": 0.45,
-      "weight_1h_direction": 0.50,
-      "weight_4h_enhancement": 0.10,
-      "weight_15m_entry": 0.10,
-      "weight_volume": 0.30
+      "weight_1h_direction": 0.4,
+      "weight_4h_enhancement": 0.2,
+      "weight_15m_entry": 0.25,
+      "weight_volume": 0.15
     },
     "macd_mtf_strategy_v2": {
       "macd_config": {
@@ -339,96 +320,65 @@
         "macd_15m_signal": 9,
         "macd_threshold": 5e-05
       },
-      "boll_config": {
-        "period": 20,
-        "std_dev": 2.0,
-        "multiplier_strong": 1.2,
-        "multiplier_normal": 1.0,
-        "multiplier_weak": 0.6,
-        "middle_hard_block": true,
-        "strong_trend_leverage_mult": 0.8
+      "ema_config": {
+        "ema_1h_periods": [
+          21,
+          55
+        ],
+        "ema_4h_periods": [
+          21,
+          55,
+          200
+        ],
+        "ema_15m_periods": [
+          21
+        ],
+        "ema_multiplier_strong": 1.2,
+        "ema_multiplier_normal": 1.0,
+        "ema_multiplier_weak": 0.6,
+        "ema_55_1h_hard_block": true,
+        "ema_strong_trend_leverage_mult": 0.8
       },
       "vwap_config": {
         "vwap_anchor": "daily_utc0",
-        "structural_vwap_mode": "anchored_weekly",
-        "structural_vwap_rolling_window": 20,
-        "vwap_retest_tolerance": 0.003,
         "vwap_deviation_optimal": 0.005,
         "vwap_deviation_warning": 0.015,
         "vwap_deviation_hard_block": 0.03
       },
       "scoring_weights": {
-        "weight_1h_direction": 0.00,
-        "weight_4h_direction": 0.50,
-        "weight_4h_enhancement": 0.00,
-        "weight_vwap": 0.20,
-        "weight_15m_entry": 0.15,
+        "weight_1h_direction": 0.35,
+        "weight_4h_enhancement": 0.15,
+        "weight_vwap": 0.15,
+        "weight_15m_entry": 0.2,
         "weight_volume": 0.15
       },
       "entry_thresholds": {
-        "default": 0.850,
         "min_entry_score": 0.25,
-        "min_signal_score": 0.850,
-        "red_bar_growing": 0.870,
-        "flip_bearish": 0.840,
-        "flip_bullish": 0.840
+        "min_signal_score": 0.85
       },
       "entry_filters": {
-        "primary_direction_timeframe": "4h",
-        "require_1h_confirmation_when_4h_primary": true,
-        "allow_neutral_1h_confirmation": false,
-        "light_1h_confirmation_when_4h_primary": true,
-        "enable_green_bar_growing_short_adx_1h_range_filter": true,
-        "green_bar_growing_short_min_adx_1h": 25.0,
-        "green_bar_growing_short_max_adx_1h": 30.0,
-        "enable_4h_preflip_trial_entries": true,
-        "preflip_trial_min_shrink_pct_long": 0.75,
-        "preflip_trial_min_shrink_pct_short": 0.30,
-        "preflip_trial_min_signal_score": 0.77,
-        "preflip_trial_min_vwap_score": 0.06,
-        "preflip_trial_entry_scale": 0.35,
-        "preflip_trial_max_leverage": 2,
         "enable_flip_bullish_strict_filter": true,
         "disable_flip_bullish_entries": true,
         "flip_bullish_min_vwap_score": 0.12,
         "flip_bullish_require_pullback_bounce": true,
         "flip_bullish_require_15m_growing": true,
-        "enable_flip_bullish_cvd_context_filter": true,
-        "flip_bullish_max_cvd_upper_wick_ratio": 0.20,
-        "flip_bullish_min_cvd_1h_delta_ratio": 0.03,
-        "flip_bearish_min_boll_multiplier": 0.0,
-        "flip_bearish_normal_boll_min_signal_score": 0.0,
-        "flip_bearish_normal_boll_max_leverage": 2,
-        "flip_bearish_min_adx_1h": 16.5,
-        "flip_bearish_retest_reject_min_vwap_score": 0.25,
-        "flip_bearish_max_bb_middle_slope_1h": 0.0,
-        "flip_bearish_max_bb_middle_slope_4h": 0.0005,
-        "bb_slope_lookback_1h": 3,
-        "bb_slope_lookback_4h": 2,
-        "disable_red_bar_growing_long_entries": true,
         "disable_green_bar_growing_entries": true,
-        "min_signal_score": 0.850,
-        "min_vwap_score_for_entry": 0.12,
+        "min_signal_score": 0.85,
         "symbol_signal_overrides": []
       },
       "penalty_config": {
         "overheat_growing_penalty": 0.12,
-        "overheat_boll_multiplier_threshold": 1.2,
-        "overheat_vwap_score_threshold": 0.1,
-        "min_vwap_score_for_entry": 0.12
+        "overheat_ema_multiplier_threshold": 1.2,
+        "overheat_vwap_score_threshold": 0.1
       },
       "stop_loss_config": {
         "use_dynamic_stop": true,
-        "boll_stop_atr_multiplier": 0.5,
+        "ema_stop_atr_multiplier": 0.5,
         "max_stop_loss_pct": 0.025,
-        "vwap_alert_deviation": 0.005,
-        "enable_4h_shrink_exit": true,
-        "exit_4h_shrink_bars": 2,
-        "exit_4h_min_shrink_pct": 0.20,
-        "exit_4h_require_profit": true
+        "vwap_alert_deviation": 0.005
       },
       "short_quality_filter": {
-        "enabled": false,
+        "enabled": true,
         "min_funding_rate": 0.0005,
         "max_oi_delta_ratio": 0.0,
         "min_vwap_deviation": 0.005
@@ -437,53 +387,7 @@
         "score_0.75_plus": 5,
         "score_0.60_plus": 4,
         "score_0.50_plus": 3,
-        "below_threshold": 0,
-        "dual_pressure_target_portion_bonus": 0.08,
-        "dual_pressure_max_symbol_position_portion": 0.68,
-        "use_cvd_bonus_filter": false,
-        "cvd_1h_slope_lookback": 3,
-        "cvd_15m_slope_lookback": 3,
-        "cvd_positive_delta_ratio_threshold": 0.05,
-        "cvd_negative_delta_ratio_threshold": -0.05,
-        "cvd_bullish_bonus_multiplier": 0.0,
-        "cvd_neutral_bonus_multiplier": 0.7,
-        "cvd_bearish_bonus_multiplier": 1.0
-      },
-      "cvd_filter_config": {
-        "enabled": true,
-        "session_reset": "daily_utc0",
-        "lookback_15m": 3,
-        "positive_delta_ratio_threshold": 0.10,
-        "positive_pressure_threshold": 0.0,
-        "session_ratio_change_threshold": -0.003,
-        "session_price_change_threshold": -0.005,
-        "strong_close_pos_threshold": 0.72,
-        "upper_wick_ratio_max": 0.25,
-        "absorption_delta_ratio_threshold": 0.05,
-        "absorption_close_pos_threshold": 0.45,
-        "absorption_upper_wick_ratio_threshold": 0.35,
-        "absorption_structure_gap_threshold": 0.002,
-        "divergence_price_change_threshold": 0.003,
-        "divergence_session_change_threshold": -0.005
-      },
-      "session_risk_control": {
-        "enabled": true,
-        "high_risk_sessions": [
-          {
-            "utc_start": "03:00",
-            "utc_end": "05:30",
-            "position_scale": 0.70
-          },
-          {
-            "utc_start": "14:30",
-            "utc_end": "16:00",
-            "position_scale": 0.65
-          }
-        ],
-        "apply_to_states": [
-          "short_dual_pressure",
-          "flip_bullish"
-        ]
+        "below_threshold": 0
       }
     },
     "rule_strategy": {
@@ -1144,491 +1048,6 @@
           },
           "notes": "Backtest-only profile: keep MACD V2 short quality filter fully enabled for A/B comparison against the relaxed profile."
         },
-        "macd_v2_pure_4h_confirm_1h": {
-          "config_overrides": {
-            "fund_flow": {
-              "macd_mtf_strategy_v2": {
-                "entry_filters": {
-                  "primary_direction_timeframe": "4h",
-                  "require_1h_confirmation_when_4h_primary": true,
-                  "allow_neutral_1h_confirmation": false
-                },
-                "short_quality_filter": {
-                  "enabled": false
-                }
-              }
-            }
-          },
-          "notes": "A/B profile: 4H decides trade direction, 1H is downgraded to same-side confirmation only, keeping the relaxed short-quality baseline consistent."
-        },
-        "macd_v2_pure_4h_light_confirm_1h": {
-          "config_overrides": {
-            "fund_flow": {
-              "macd_mtf_strategy_v2": {
-                "entry_filters": {
-                  "primary_direction_timeframe": "4h",
-                  "require_1h_confirmation_when_4h_primary": true,
-                  "allow_neutral_1h_confirmation": false,
-                  "light_1h_confirmation_when_4h_primary": true
-                },
-                "short_quality_filter": {
-                  "enabled": false
-                }
-              }
-            }
-          },
-          "notes": "A/B profile: keep only 1H same-side confirmation plus BOLL structure guard; skip 1H-specific flip and quality vetoes under 4H-primary mode."
-        },
-        "macd_v2_4h_preflip_trial_exit": {
-          "config_overrides": {
-            "fund_flow": {
-              "macd_mtf_strategy_v2": {
-                "entry_filters": {
-                  "primary_direction_timeframe": "4h",
-                  "require_1h_confirmation_when_4h_primary": true,
-                  "allow_neutral_1h_confirmation": false,
-                  "light_1h_confirmation_when_4h_primary": true,
-                  "enable_4h_preflip_trial_entries": true,
-                  "preflip_trial_min_shrink_pct_long": 0.75,
-                  "preflip_trial_min_shrink_pct_short": 0.30,
-                  "preflip_trial_min_signal_score": 0.77,
-                  "preflip_trial_min_vwap_score": 0.06,
-                  "preflip_trial_entry_scale": 0.35,
-                  "preflip_trial_max_leverage": 2
-                },
-                "stop_loss_config": {
-                  "enable_4h_shrink_exit": true,
-                  "exit_4h_shrink_bars": 2,
-                  "exit_4h_min_shrink_pct": 0.20,
-                  "exit_4h_require_profit": true
-                },
-                "short_quality_filter": {
-                  "enabled": false
-                }
-              }
-            }
-          },
-          "notes": "A/B profile: 4H-primary with 1H light confirmation, early pre-flip trial entries on 4H shrinking bars, and profit-protected 4H shrink exits."
-        },
-        "macd_v2_4h_preflip_trial_exit_filter_a": {
-          "config_overrides": {
-            "fund_flow": {
-              "macd_mtf_strategy_v2": {
-                "entry_filters": {
-                  "primary_direction_timeframe": "4h",
-                  "require_1h_confirmation_when_4h_primary": true,
-                  "allow_neutral_1h_confirmation": false,
-                  "light_1h_confirmation_when_4h_primary": true,
-                  "enable_4h_preflip_trial_entries": true,
-                  "preflip_trial_min_shrink_pct_long": 0.75,
-                  "preflip_trial_min_shrink_pct_short": 0.30,
-                  "preflip_trial_min_signal_score": 0.77,
-                  "preflip_trial_min_vwap_score": 0.06,
-                  "preflip_trial_entry_scale": 0.35,
-                  "preflip_trial_max_leverage": 2,
-                  "enable_green_bar_growing_short_adx_1h_range_filter": true,
-                  "green_bar_growing_short_min_adx_1h": 25.0,
-                  "green_bar_growing_short_max_adx_1h": 30.0,
-                  "enable_flip_bullish_cvd_context_filter": true,
-                  "flip_bullish_max_cvd_upper_wick_ratio": 0.20,
-                  "flip_bullish_min_cvd_1h_delta_ratio": 0.03
-                },
-                "stop_loss_config": {
-                  "enable_4h_shrink_exit": true,
-                  "exit_4h_shrink_bars": 2,
-                  "exit_4h_min_shrink_pct": 0.20,
-                  "exit_4h_require_profit": true
-                },
-                "short_quality_filter": {
-                  "enabled": false
-                }
-              }
-            }
-          },
-          "notes": "Profile A: conservative loss-pocket filter on top of the 4H pre-flip trial baseline. Blocks full-size short green_bar_growing entries in the 1H ADX 25-30 chop band, and blocks full-size long flip_bullish entries only when both the 15M upper-wick context is poor and the 1H CVD delta ratio fails to confirm."
-        },
-        "macd_v2_4h_preflip_trial_exit_filter_b": {
-          "config_overrides": {
-            "fund_flow": {
-              "macd_mtf_strategy_v2": {
-                "entry_filters": {
-                  "primary_direction_timeframe": "4h",
-                  "require_1h_confirmation_when_4h_primary": true,
-                  "allow_neutral_1h_confirmation": false,
-                  "light_1h_confirmation_when_4h_primary": true,
-                  "enable_4h_preflip_trial_entries": true,
-                  "preflip_trial_min_shrink_pct_long": 0.75,
-                  "preflip_trial_min_shrink_pct_short": 0.30,
-                  "preflip_trial_min_signal_score": 0.77,
-                  "preflip_trial_min_vwap_score": 0.06,
-                  "preflip_trial_entry_scale": 0.35,
-                  "preflip_trial_max_leverage": 2,
-                  "enable_green_bar_growing_short_adx_1h_range_filter": true,
-                  "green_bar_growing_short_min_adx_1h": 20.0,
-                  "green_bar_growing_short_max_adx_1h": 30.0,
-                  "enable_flip_bullish_cvd_context_filter": true,
-                  "flip_bullish_max_cvd_upper_wick_ratio": 0.20,
-                  "flip_bullish_min_cvd_1h_delta_ratio": 0.0
-                },
-                "stop_loss_config": {
-                  "enable_4h_shrink_exit": true,
-                  "exit_4h_shrink_bars": 2,
-                  "exit_4h_min_shrink_pct": 0.20,
-                  "exit_4h_require_profit": true
-                },
-                "short_quality_filter": {
-                  "enabled": false
-                }
-              }
-            }
-          },
-          "notes": "Profile B: broader loss-pocket filter on top of the 4H pre-flip trial baseline. Blocks full-size short green_bar_growing entries across the 1H ADX 20-30 zone, and blocks all full-size long flip_bullish entries whenever the 15M upper-wick ratio reaches 0.20 or higher."
-        },
-        "macd_v2_4h_preflip_trial_exit_filter_a_v9": {
-          "config_overrides": {
-            "risk": {
-              "max_consecutive_losses": 2,
-              "consecutive_loss_cooldown_seconds": 5400
-            },
-            "fund_flow": {
-              "macd_mtf_strategy_v2": {
-                "entry_filters": {
-                  "primary_direction_timeframe": "4h",
-                  "require_1h_confirmation_when_4h_primary": true,
-                  "allow_neutral_1h_confirmation": false,
-                  "light_1h_confirmation_when_4h_primary": true,
-                  "enable_4h_preflip_trial_entries": true,
-                  "preflip_trial_min_shrink_pct_long": 0.75,
-                  "preflip_trial_min_shrink_pct_short": 0.30,
-                  "preflip_trial_min_signal_score": 0.77,
-                  "preflip_trial_min_vwap_score": 0.06,
-                  "preflip_trial_entry_scale": 0.35,
-                  "preflip_trial_max_leverage": 2,
-                  "enable_green_bar_growing_short_adx_1h_range_filter": true,
-                  "green_bar_growing_short_min_adx_1h": 25.0,
-                  "green_bar_growing_short_max_adx_1h": 30.0,
-                  "enable_flip_bullish_cvd_context_filter": true,
-                  "flip_bullish_max_cvd_upper_wick_ratio": 0.20,
-                  "flip_bullish_min_cvd_1h_delta_ratio": 0.03
-                },
-                "stop_loss_config": {
-                  "enable_4h_shrink_exit": true,
-                  "exit_4h_shrink_bars": 2,
-                  "exit_4h_min_shrink_pct": 0.30,
-                  "exit_4h_require_profit": false,
-                  "exit_4h_weak_loss_threshold": -0.001
-                },
-                "session_risk_control": {
-                  "enabled": true,
-                  "high_risk_sessions": [
-                    {
-                      "utc_start": "14:30",
-                      "utc_end": "16:00",
-                      "position_scale": 0.65
-                    }
-                  ],
-                  "apply_to_states": [
-                    "short_dual_pressure",
-                    "flip_bullish"
-                  ]
-                },
-                "short_quality_filter": {
-                  "enabled": false
-                }
-              }
-            }
-          },
-          "notes": "Profile V9: keep V8/A targeted filters, add 14:30-16:00 UTC lightweight session de-risking for short_dual_pressure and flip_bullish, expand 4H shrink exit to allow weak-loss early exits at -0.10%, and align consecutive-loss cooldown to 90 minutes."
-        },
-        "macd_v2_4h_preflip_trial_exit_filter_a_v9_1_session_only": {
-          "config_overrides": {
-            "risk": {
-              "max_consecutive_losses": 2,
-              "consecutive_loss_cooldown_seconds": 1800
-            },
-            "fund_flow": {
-              "macd_mtf_strategy_v2": {
-                "entry_filters": {
-                  "primary_direction_timeframe": "4h",
-                  "require_1h_confirmation_when_4h_primary": true,
-                  "allow_neutral_1h_confirmation": false,
-                  "light_1h_confirmation_when_4h_primary": true,
-                  "enable_4h_preflip_trial_entries": true,
-                  "preflip_trial_min_shrink_pct_long": 0.75,
-                  "preflip_trial_min_shrink_pct_short": 0.30,
-                  "preflip_trial_min_signal_score": 0.77,
-                  "preflip_trial_min_vwap_score": 0.06,
-                  "preflip_trial_entry_scale": 0.35,
-                  "preflip_trial_max_leverage": 2,
-                  "enable_green_bar_growing_short_adx_1h_range_filter": true,
-                  "green_bar_growing_short_min_adx_1h": 25.0,
-                  "green_bar_growing_short_max_adx_1h": 30.0,
-                  "enable_flip_bullish_cvd_context_filter": true,
-                  "flip_bullish_max_cvd_upper_wick_ratio": 0.20,
-                  "flip_bullish_min_cvd_1h_delta_ratio": 0.03
-                },
-                "stop_loss_config": {
-                  "enable_4h_shrink_exit": true,
-                  "exit_4h_shrink_bars": 2,
-                  "exit_4h_min_shrink_pct": 0.20,
-                  "exit_4h_require_profit": true
-                },
-                "session_risk_control": {
-                  "enabled": true,
-                  "high_risk_sessions": [
-                    {
-                      "utc_start": "14:30",
-                      "utc_end": "16:00",
-                      "position_scale": 0.65
-                    }
-                  ],
-                  "apply_to_states": [
-                    "short_dual_pressure",
-                    "flip_bullish"
-                  ]
-                },
-                "short_quality_filter": {
-                  "enabled": false
-                }
-              }
-            }
-          },
-          "notes": "Profile V9.1 session-only: keep V8/A entry and exit structure unchanged, add only 14:30-16:00 UTC session de-risking for short_dual_pressure and flip_bullish, and keep the original 30-minute consecutive-loss cooldown."
-        },
-        "macd_v2_4h_preflip_trial_exit_filter_a_v9_2_asia_session": {
-          "config_overrides": {
-            "risk": {
-              "max_consecutive_losses": 2,
-              "consecutive_loss_cooldown_seconds": 1800
-            },
-            "fund_flow": {
-              "macd_mtf_strategy_v2": {
-                "entry_filters": {
-                  "primary_direction_timeframe": "4h",
-                  "require_1h_confirmation_when_4h_primary": true,
-                  "allow_neutral_1h_confirmation": false,
-                  "light_1h_confirmation_when_4h_primary": true,
-                  "enable_4h_preflip_trial_entries": true,
-                  "preflip_trial_min_shrink_pct_long": 0.75,
-                  "preflip_trial_min_shrink_pct_short": 0.30,
-                  "preflip_trial_min_signal_score": 0.77,
-                  "preflip_trial_min_vwap_score": 0.06,
-                  "preflip_trial_entry_scale": 0.35,
-                  "preflip_trial_max_leverage": 2,
-                  "enable_green_bar_growing_short_adx_1h_range_filter": true,
-                  "green_bar_growing_short_min_adx_1h": 25.0,
-                  "green_bar_growing_short_max_adx_1h": 30.0,
-                  "enable_flip_bullish_cvd_context_filter": true,
-                  "flip_bullish_max_cvd_upper_wick_ratio": 0.20,
-                  "flip_bullish_min_cvd_1h_delta_ratio": 0.03
-                },
-                "stop_loss_config": {
-                  "enable_4h_shrink_exit": true,
-                  "exit_4h_shrink_bars": 2,
-                  "exit_4h_min_shrink_pct": 0.20,
-                  "exit_4h_require_profit": true
-                },
-                "session_risk_control": {
-                  "enabled": true,
-                  "high_risk_sessions": [
-                    {
-                      "utc_start": "03:00",
-                      "utc_end": "05:30",
-                      "position_scale": 0.70
-                    },
-                    {
-                      "utc_start": "14:30",
-                      "utc_end": "16:00",
-                      "position_scale": 0.65
-                    }
-                  ],
-                  "apply_to_states": [
-                    "short_dual_pressure",
-                    "flip_bullish"
-                  ]
-                },
-                "short_quality_filter": {
-                  "enabled": false
-                }
-              }
-            }
-          },
-          "notes": "Profile V9.2A: keep V9.1 session-only structure, and add a second low-liquidity Asia session de-risk window at 03:00-05:30 UTC with 0.70 position scale."
-        },
-        "macd_v2_4h_preflip_trial_exit_filter_a_v9_2_short_pressure_focus": {
-          "config_overrides": {
-            "risk": {
-              "max_consecutive_losses": 2,
-              "consecutive_loss_cooldown_seconds": 1800
-            },
-            "fund_flow": {
-              "macd_mtf_strategy_v2": {
-                "entry_filters": {
-                  "primary_direction_timeframe": "4h",
-                  "require_1h_confirmation_when_4h_primary": true,
-                  "allow_neutral_1h_confirmation": false,
-                  "light_1h_confirmation_when_4h_primary": true,
-                  "enable_4h_preflip_trial_entries": true,
-                  "preflip_trial_min_shrink_pct_long": 0.75,
-                  "preflip_trial_min_shrink_pct_short": 0.30,
-                  "preflip_trial_min_signal_score": 0.77,
-                  "preflip_trial_min_vwap_score": 0.06,
-                  "preflip_trial_entry_scale": 0.35,
-                  "preflip_trial_max_leverage": 2,
-                  "enable_green_bar_growing_short_adx_1h_range_filter": true,
-                  "green_bar_growing_short_min_adx_1h": 25.0,
-                  "green_bar_growing_short_max_adx_1h": 30.0,
-                  "enable_flip_bullish_cvd_context_filter": true,
-                  "flip_bullish_max_cvd_upper_wick_ratio": 0.20,
-                  "flip_bullish_min_cvd_1h_delta_ratio": 0.03
-                },
-                "stop_loss_config": {
-                  "enable_4h_shrink_exit": true,
-                  "exit_4h_shrink_bars": 2,
-                  "exit_4h_min_shrink_pct": 0.20,
-                  "exit_4h_require_profit": true
-                },
-                "session_risk_control": {
-                  "enabled": true,
-                  "high_risk_sessions": [
-                    {
-                      "utc_start": "03:00",
-                      "utc_end": "05:30",
-                      "position_scale": 0.70
-                    },
-                    {
-                      "utc_start": "14:30",
-                      "utc_end": "16:00",
-                      "position_scale": 0.65
-                    }
-                  ],
-                  "apply_to_states": [
-                    "short_dual_pressure"
-                  ]
-                },
-                "short_quality_filter": {
-                  "enabled": false
-                }
-              }
-            }
-          },
-          "notes": "Profile V9.2B: same two-session risk windows as V9.2A, but only de-risk short_dual_pressure so the session control stays focused on the main loss pocket."
-        },
-        "macd_v2_v11_watchlist_throttle": {
-          "config_overrides": {
-            "fund_flow": {
-              "macd_mtf_strategy_v2": {
-                "symbol_risk_tiers": {
-                  "watchlist_symbols": [
-                    "LINKUSDT",
-                    "ONDOUSDT",
-                    "LTCUSDT",
-                    "MORPHOUSDT",
-                    "TRUMPUSDT"
-                  ],
-                  "watchlist_max_position_portion": 0.40,
-                  "watchlist_max_leverage": 2,
-                  "watchlist_apply_session_scale_double": true,
-                  "watchlist_session_scale_multiplier": 0.80
-                }
-              }
-            }
-          },
-          "notes": "Profile V11/F1: keep V10 structure unchanged, but throttle the five attribution watchlist symbols with 40% max position, 2x max leverage, and extra 0.8x session scaling inside high-risk windows."
-        },
-        "macd_v2_v11_watchlist_session_only": {
-          "config_overrides": {
-            "fund_flow": {
-              "macd_mtf_strategy_v2": {
-                "symbol_risk_tiers": {
-                  "watchlist_symbols": [
-                    "LINKUSDT",
-                    "ONDOUSDT",
-                    "LTCUSDT",
-                    "MORPHOUSDT",
-                    "TRUMPUSDT"
-                  ],
-                  "watchlist_max_position_portion": 0.0,
-                  "watchlist_max_leverage": 0,
-                  "watchlist_apply_session_scale_double": true,
-                  "watchlist_session_scale_multiplier": 0.80
-                }
-              }
-            }
-          },
-          "notes": "Profile V11/F1a: do not globally cap watchlist symbols; only apply an extra 0.8x scale when those symbols also fall inside the existing high-risk session windows."
-        },
-        "macd_v2_v11_vwap_score_tiers": {
-          "config_overrides": {
-            "fund_flow": {
-              "macd_mtf_strategy_v2": {
-                "vwap_score_position_tiers": {
-                  "apply_to_states": [
-                    "short_dual_pressure",
-                    "flip_bullish"
-                  ],
-                  "tiers": [
-                    {
-                      "min": 0.12,
-                      "max": 0.20,
-                      "position_mult": 0.80
-                    },
-                    {
-                      "min": 0.20,
-                      "max": 0.30,
-                      "position_mult": 1.00
-                    },
-                    {
-                      "min": 0.30,
-                      "max": 1.00,
-                      "position_mult": 1.15
-                    }
-                  ]
-                }
-              }
-            }
-          },
-          "notes": "Profile V11/C1: keep V10 structure unchanged, but apply VWAP-score-based position scaling to short_dual_pressure and flip_bullish so weak VWAP locations use 0.8x, middle stays 1.0x, and strong VWAP locations can scale to 1.15x within symbol caps."
-        },
-        "macd_v2_v11_preflip_symmetric_only": {
-          "config_overrides": {
-            "fund_flow": {
-              "macd_mtf_strategy_v2": {
-                "entry_filters": {
-                  "preflip_trial_min_shrink_pct_long": 0.60,
-                  "preflip_trial_min_shrink_pct_short": 0.40
-                }
-              }
-            }
-          },
-          "notes": "Profile V11/B1: keep V10 unchanged except rebalance pre-flip shrink symmetry to long=0.60 and short=0.40, without any watchlist throttle."
-        },
-        "macd_v2_v11_watchlist_throttle_preflip_symmetric": {
-          "config_overrides": {
-            "fund_flow": {
-              "macd_mtf_strategy_v2": {
-                "entry_filters": {
-                  "preflip_trial_min_shrink_pct_long": 0.60,
-                  "preflip_trial_min_shrink_pct_short": 0.40
-                },
-                "symbol_risk_tiers": {
-                  "watchlist_symbols": [
-                    "LINKUSDT",
-                    "ONDOUSDT",
-                    "LTCUSDT",
-                    "MORPHOUSDT",
-                    "TRUMPUSDT"
-                  ],
-                  "watchlist_max_position_portion": 0.40,
-                  "watchlist_max_leverage": 2,
-                  "watchlist_apply_session_scale_double": true,
-                  "watchlist_session_scale_multiplier": 0.80
-                }
-              }
-            }
-          },
-          "notes": "Profile V11/F1+B1: apply the watchlist throttle on top of V10, and rebalance pre-flip shrink symmetry to long=0.60 / short=0.40."
-        },
         "top100_binance_rot_20260319": {
           "symbols": [
             "BTCUSDT",
@@ -1837,6 +1256,78 @@
           },
           "rule_overrides": {},
           "notes": "BTC+ETH tuned 30-day profile: +5.45% return, -3.12% max drawdown, PF 1.85 after excluding weak entry hours and tightening trend/volatility gates."
+        },
+        "top100_binance_raw_intersection_20260319": {
+          "symbols": [
+            "BTCUSDT",
+            "ETHUSDT",
+            "XRPUSDT",
+            "BNBUSDT",
+            "USDCUSDT",
+            "SOLUSDT",
+            "TRXUSDT",
+            "DOGEUSDT",
+            "ADAUSDT",
+            "HYPEUSDT",
+            "BCHUSDT",
+            "LINKUSDT",
+            "XMRUSDT",
+            "XLMUSDT",
+            "CCUSDT",
+            "LTCUSDT",
+            "AVAXUSDT",
+            "ZECUSDT",
+            "HBARUSDT",
+            "SUIUSDT",
+            "MUSDT",
+            "TONUSDT",
+            "WLFIUSDT",
+            "DOTUSDT",
+            "TAOUSDT",
+            "PAXGUSDT",
+            "UNIUSDT",
+            "NEARUSDT",
+            "AAVEUSDT",
+            "ASTERUSDT",
+            "SKYUSDT",
+            "ICPUSDT",
+            "ETCUSDT",
+            "ONDOUSDT",
+            "PUMPUSDT",
+            "QNTUSDT",
+            "KASUSDT",
+            "POLUSDT",
+            "WLDUSDT",
+            "MORPHOUSDT",
+            "ATOMUSDT",
+            "ENAUSDT",
+            "RENDERUSDT",
+            "TRUMPUSDT",
+            "ALGOUSDT",
+            "APTUSDT",
+            "NIGHTUSDT",
+            "FILUSDT",
+            "VETUSDT",
+            "ARBUSDT",
+            "SIRENUSDT",
+            "STABLEUSDT",
+            "JUPUSDT",
+            "RIVERUSDT",
+            "ZROUSDT",
+            "JSTUSDT",
+            "FETUSDT"
+          ],
+          "max_active_symbols": 3,
+          "config_overrides": {
+            "fund_flow": {
+              "macd_mtf_strategy_v2": {
+                "short_quality_filter": {
+                  "enabled": false
+                }
+              }
+            }
+          },
+          "notes": "2026-03-19 raw control profile: full CoinGecko top-100 market-cap intersection with Binance USDT perpetuals, without manual asset exclusions. Keeps max_active_symbols=3 and the relaxed short-filter baseline so the only comparison variable is universe composition."
         }
       }
     }
@@ -1873,5 +1364,10 @@
     "preload_trend_kline_limit": 120,
     "preload_request_sleep_ms": 0,
     "preload_market_kline_bars": 80
+  },
+  "_meta": {
+    "generated_for": "backtest",
+    "generated_from": "config\\trading_config_fund_flow.json",
+    "generated_at_utc": "2026-03-19T10:52:31Z"
   }
 }

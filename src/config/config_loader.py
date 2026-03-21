@@ -12,6 +12,22 @@ class ConfigLoader:
     """配置加载器（支持 JSONC 带注释的 JSON 格式）"""
 
     @staticmethod
+    def _normalize_symbol_list(raw_symbols: Any) -> list:
+        """标准化交易对列表：大写、去空、去重、保序。"""
+        if not isinstance(raw_symbols, (list, tuple, set)):
+            return []
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for symbol in raw_symbols:
+            symbol_up = str(symbol or "").strip().upper()
+            if not symbol_up or symbol_up in seen:
+                continue
+            deduped.append(symbol_up)
+            seen.add(symbol_up)
+        return deduped
+
+    @staticmethod
     def _strip_jsonc_comments(content: str) -> str:
         """
         移除 JSONC 格式的注释（支持 // 单行注释和 /* */ 多行注释）
@@ -173,7 +189,26 @@ class ConfigLoader:
         if "symbols" not in trading or not trading["symbols"]:
             raise ValueError("配置中必须指定至少一个交易币种")
 
+        filtered_symbols = ConfigLoader.get_trading_symbols(config)
+        if not filtered_symbols:
+            raise ValueError("配置中的交易币种在应用 symbol_blacklist 后为空")
+
         return True
+
+    @staticmethod
+    def get_symbol_blacklist(config: Dict[str, Any]) -> list:
+        """获取黑名单交易对列表。"""
+        fund_flow = config.get("fund_flow", {}) if isinstance(config.get("fund_flow"), dict) else {}
+        return ConfigLoader._normalize_symbol_list(fund_flow.get("symbol_blacklist", []))
+
+    @staticmethod
+    def filter_symbols_with_blacklist(symbols: Any, config: Dict[str, Any]) -> list:
+        """按 fund_flow.symbol_blacklist 过滤交易对列表。"""
+        normalized = ConfigLoader._normalize_symbol_list(symbols)
+        blacklist = set(ConfigLoader.get_symbol_blacklist(config))
+        if not blacklist:
+            return normalized
+        return [symbol for symbol in normalized if symbol not in blacklist]
 
     @staticmethod
     def get_trading_symbols(config: Dict[str, Any]) -> list:
@@ -181,8 +216,8 @@ class ConfigLoader:
         获取交易币种列表
 
         """
-        symbols = config.get("trading", {}).get("symbols", [])
-        return symbols
+        trading = config.get("trading", {}) if isinstance(config.get("trading"), dict) else {}
+        return ConfigLoader.filter_symbols_with_blacklist(trading.get("symbols", []), config)
 
     @staticmethod
     def get_default_leverage(config: Dict[str, Any]) -> int:

@@ -33,10 +33,23 @@ class FundFlowRiskEngine:
         )
         self.symbol_whitelist = {s.upper() for s in symbol_whitelist or []}
 
-    def validate_symbol(self, symbol: str) -> None:
+    def validate_symbol(
+        self,
+        symbol: str,
+        operation: Optional[Operation] = None,
+        position: Optional[Dict[str, Any]] = None,
+    ) -> None:
         if not symbol or not isinstance(symbol, str):
             raise ValueError("symbol 为空或非法")
         if self.symbol_whitelist and symbol.upper() not in self.symbol_whitelist:
+            if operation == Operation.CLOSE and isinstance(position, dict):
+                amount = 0.0
+                try:
+                    amount = abs(float(position.get("amount", 0.0) or 0.0))
+                except Exception:
+                    amount = 0.0
+                if amount > 0 or bool(position.get("hedge_conflict")):
+                    return
             raise ValueError(f"symbol 不在白名单: {symbol}")
 
     def validate_operation(self, operation: Operation) -> None:
@@ -109,9 +122,13 @@ class FundFlowRiskEngine:
             return current_price * 1.0005
         return close_price
 
-    def validate_decision(self, decision: FundFlowDecision) -> FundFlowDecision:
+    def validate_decision(
+        self,
+        decision: FundFlowDecision,
+        position: Optional[Dict[str, Any]] = None,
+    ) -> FundFlowDecision:
         self.validate_operation(decision.operation)
-        self.validate_symbol(decision.symbol)
+        self.validate_symbol(decision.symbol, decision.operation, position)
         decision.leverage = self.clamp_leverage(decision.leverage)
         decision.target_portion_of_balance = self.validate_target_portion(
             decision.target_portion_of_balance,

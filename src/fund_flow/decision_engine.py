@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import copy
 from collections import deque
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Deque, Dict, Optional, Sequence, Tuple
 
@@ -8,8 +10,13 @@ from src.config.config_loader import ConfigLoader
 from src.fund_flow.models import ExecutionMode, FundFlowDecision, Operation, TimeInForce
 from src.fund_flow.deepseek_weight_router import DeepSeekWeightRouter, WeightMap
 from src.fund_flow.weight_router import WeightRouter
-# 新MACD多时间框架策略
+# MACD多时间框架策略 V1.0
 from src.fund_flow.macd_strategy import MACDStrategyEngine, MACDStrategyConfig, MACDSignal
+# MACD多时间框架策略 V2.0 (VWAP + BOLL 增强版)
+from src.fund_flow.macd_strategy_v2 import MACDStrategyV2Engine, MACDStrategyV2Config, MACDSignalV2, VetoType
+from src.fund_flow.filters.symbol_signal_override import SymbolSignalOverrideRegistry
+from src.fund_flow.filters.time_window_filter import TimeWindowFilter, TimeWindowFilterConfig
+from src.fund_flow.v3_filter_integration import V3FilterManager
 
 
 class FundFlowDecisionEngine:
@@ -352,6 +359,18 @@ class FundFlowDecisionEngine:
             min(1.0, self._to_float(trend_capture_cfg.get("trend_both_trial_loose_min_regime_score"), 0.06)),
         )
         self.symbol_side_overrides = self._parse_symbol_side_overrides(ff)
+        allowed_entry_hours = ff.get("allowed_entry_hours_utc", [])
+        self.time_window_filter = TimeWindowFilter(
+            TimeWindowFilterConfig.from_dict(
+                {
+                    "enabled": isinstance(allowed_entry_hours, list) and len(allowed_entry_hours) > 0,
+                    "allowed_hours_utc": allowed_entry_hours if isinstance(allowed_entry_hours, list) else [],
+                }
+            )
+        )
+        self.v3_filter_manager = V3FilterManager(self.config)
+        self.symbol_signal_override_registry = SymbolSignalOverrideRegistry(overrides=[], global_config={})
+        self.symbol_signal_overrides: Dict[str, Dict[str, Any]] = {}
 
         self.strategy_mode = str(ff.get("strategy_mode", "legacy_score_fusion") or "legacy_score_fusion").strip().lower()
         rule_cfg = ff.get("rule_strategy", {}) if isinstance(ff.get("rule_strategy"), dict) else {}
@@ -437,6 +456,183 @@ class FundFlowDecisionEngine:
         self.macd_strategy_engine = MACDStrategyEngine(self.macd_mtf_strategy_config)
         logger.info("[MACD_MTF] 新MACD策略 enabled=%s, min_signal_score=%.2f",
                     self.macd_mtf_strategy_enabled, self.macd_mtf_strategy_config.min_signal_score)
+        
+        # ========== MACD V2.0策略（VWAP + BOLL 增强版） ==========
+        self.strategy_mode = str(ff.get("strategy_mode", "macd_mtf_strategy"))
+        self.macd_v2_enabled = self.strategy_mode == "macd_mtf_strategy_v2"
+        
+        if self.macd_v2_enabled:
+            v2_cfg = ff.get("macd_mtf_strategy_v2", {}) if isinstance(ff.get("macd_mtf_strategy_v2"), dict) else {}
+            boll_cfg = v2_cfg.get("boll_config", {}) if isinstance(v2_cfg.get("boll_config"), dict) else {}
+            ema_cfg = v2_cfg.get("ema_config", {})
+            leverage_cfg = v2_cfg.get("leverage_config", {}) if isinstance(v2_cfg.get("leverage_config"), dict) else {}
+            vwap_cfg = v2_cfg.get("vwap_config", {})
+            weights_cfg = v2_cfg.get("scoring_weights", {})
+            thresholds_cfg = v2_cfg.get("entry_thresholds", {})
+            stop_cfg = v2_cfg.get("stop_loss_config", {})
+            macd_cfg = v2_cfg.get("macd_config", {})
+            filter_cfg = v2_cfg.get("entry_filters", {}) if isinstance(v2_cfg.get("entry_filters"), dict) else {}
+            penalty_cfg = v2_cfg.get("penalty_config", {}) if isinstance(v2_cfg.get("penalty_config"), dict) else {}
+            session_risk_cfg = v2_cfg.get("session_risk_control", {}) if isinstance(v2_cfg.get("session_risk_control"), dict) else {}
+            vwap_score_tier_cfg = v2_cfg.get("vwap_score_position_tiers", {}) if isinstance(v2_cfg.get("vwap_score_position_tiers"), dict) else {}
+            symbol_risk_cfg = v2_cfg.get("symbol_risk_tiers", {}) if isinstance(v2_cfg.get("symbol_risk_tiers"), dict) else {}
+            default_signal_threshold = self._to_float(
+                thresholds_cfg.get("default", thresholds_cfg.get("min_signal_score")),
+                0.825,
+            )
+            override_global_config = dict(filter_cfg)
+            override_global_config.setdefault(
+                "min_signal_score",
+                default_signal_threshold,
+            )
+            self.symbol_signal_override_registry = SymbolSignalOverrideRegistry(
+                overrides=self._collect_symbol_signal_override_items(ff),
+                global_config=override_global_config,
+            )
+            self.symbol_signal_overrides = {
+                symbol: self._override_to_dict(self.symbol_signal_override_registry.get_override(symbol))
+                for symbol in self.symbol_signal_override_registry.list_overrides()
+            }
+            self.macd_v2_config = MACDStrategyV2Config(
+                # MACD参数
+                macd_1h_fast=int(macd_cfg.get("macd_1h_fast", 12)),
+                macd_1h_slow=int(macd_cfg.get("macd_1h_slow", 26)),
+                macd_1h_signal=int(macd_cfg.get("macd_1h_signal", 9)),
+                macd_4h_fast=int(macd_cfg.get("macd_4h_fast", 12)),
+                macd_4h_slow=int(macd_cfg.get("macd_4h_slow", 26)),
+                macd_4h_signal=int(macd_cfg.get("macd_4h_signal", 9)),
+                macd_15m_fast=int(macd_cfg.get("macd_15m_fast", 12)),
+                macd_15m_slow=int(macd_cfg.get("macd_15m_slow", 26)),
+                macd_15m_signal=int(macd_cfg.get("macd_15m_signal", 9)),
+                macd_threshold=self._to_float(macd_cfg.get("macd_threshold"), 0.00005),
+                # BOLL参数
+                boll_period=int(self._to_float(boll_cfg.get("period"), 20)),
+                boll_std_dev=self._to_float(boll_cfg.get("std_dev"), 2.0),
+                ema_multiplier_strong=self._to_float(boll_cfg.get("multiplier_strong", ema_cfg.get("ema_multiplier_strong")), 1.2),
+                ema_multiplier_normal=self._to_float(boll_cfg.get("multiplier_normal", ema_cfg.get("ema_multiplier_normal")), 1.0),
+                ema_multiplier_weak=self._to_float(boll_cfg.get("multiplier_weak", ema_cfg.get("ema_multiplier_weak")), 0.6),
+                ema_55_1h_hard_block=bool(boll_cfg.get("middle_hard_block", ema_cfg.get("ema_55_1h_hard_block", True))),
+                ema_strong_trend_leverage_mult=self._to_float(boll_cfg.get("strong_trend_leverage_mult", ema_cfg.get("ema_strong_trend_leverage_mult")), 0.8),
+                # VWAP参数
+                vwap_deviation_optimal=self._to_float(vwap_cfg.get("vwap_deviation_optimal"), 0.005),
+                vwap_deviation_warning=self._to_float(vwap_cfg.get("vwap_deviation_warning"), 0.015),
+                vwap_deviation_hard_block=self._to_float(vwap_cfg.get("vwap_deviation_hard_block"), 0.030),
+                structural_vwap_mode=str(vwap_cfg.get("structural_vwap_mode", "anchored_weekly")),
+                structural_vwap_rolling_window=int(self._to_float(vwap_cfg.get("structural_vwap_rolling_window"), 20)),
+                vwap_retest_tolerance=self._to_float(vwap_cfg.get("vwap_retest_tolerance"), 0.003),
+                # 评分权重
+                weight_1h_direction=self._to_float(weights_cfg.get("weight_1h_direction"), 0.50),
+                weight_4h_direction=self._to_float(weights_cfg.get("weight_4h_direction", weights_cfg.get("weight_1h_direction")), 0.50),
+                weight_4h_enhancement=self._to_float(weights_cfg.get("weight_4h_enhancement"), 0.10),
+                weight_vwap=self._to_float(weights_cfg.get("weight_vwap"), 0.15),
+                weight_15m_entry=self._to_float(weights_cfg.get("weight_15m_entry"), 0.10),
+                weight_volume=self._to_float(weights_cfg.get("weight_volume"), 0.15),
+                # 入场阈值
+                min_entry_score=self._to_float(thresholds_cfg.get("min_entry_score"), 0.25),
+                min_signal_score=default_signal_threshold,
+                red_bar_growing_min_signal_score=self._to_float(thresholds_cfg.get("red_bar_growing"), default_signal_threshold),
+                flip_bearish_min_signal_score=self._to_float(thresholds_cfg.get("flip_bearish"), default_signal_threshold),
+                flip_bullish_min_signal_score=self._to_float(thresholds_cfg.get("flip_bullish"), default_signal_threshold),
+                enable_flip_bullish_strict_filter=bool(filter_cfg.get("enable_flip_bullish_strict_filter", True)),
+                disable_flip_bullish_entries=bool(filter_cfg.get("disable_flip_bullish_entries", False)),
+                flip_bullish_min_vwap_score=self._to_float(filter_cfg.get("flip_bullish_min_vwap_score"), 0.12),
+                flip_bullish_require_pullback_bounce=bool(filter_cfg.get("flip_bullish_require_pullback_bounce", True)),
+                flip_bullish_require_15m_growing=bool(filter_cfg.get("flip_bullish_require_15m_growing", True)),
+                enable_flip_bullish_cvd_context_filter=bool(filter_cfg.get("enable_flip_bullish_cvd_context_filter", False)),
+                flip_bullish_max_cvd_upper_wick_ratio=self._to_float(filter_cfg.get("flip_bullish_max_cvd_upper_wick_ratio"), 0.0),
+                flip_bullish_min_cvd_1h_delta_ratio=self._to_float(filter_cfg.get("flip_bullish_min_cvd_1h_delta_ratio"), 0.0),
+                flip_bearish_min_ema_multiplier=self._to_float(filter_cfg.get("flip_bearish_min_boll_multiplier", filter_cfg.get("flip_bearish_min_ema_multiplier")), 0.0),
+                flip_bearish_normal_ema_min_signal_score=self._to_float(filter_cfg.get("flip_bearish_normal_boll_min_signal_score", filter_cfg.get("flip_bearish_normal_ema_min_signal_score")), 0.0),
+                flip_bearish_normal_ema_max_leverage=int(self._to_float(filter_cfg.get("flip_bearish_normal_boll_max_leverage", filter_cfg.get("flip_bearish_normal_ema_max_leverage")), 0.0)),
+                flip_bearish_min_adx_1h=self._to_float(filter_cfg.get("flip_bearish_min_adx_1h"), 18.0),
+                flip_bearish_retest_reject_min_vwap_score=self._to_float(
+                    filter_cfg.get("flip_bearish_retest_reject_min_vwap_score"),
+                    0.0,
+                ),
+                flip_bearish_max_ema21_slope_1h=self._to_float(filter_cfg.get("flip_bearish_max_bb_middle_slope_1h", filter_cfg.get("flip_bearish_max_ema21_slope_1h")), 0.0),
+                flip_bearish_max_ema21_slope_4h=self._to_float(filter_cfg.get("flip_bearish_max_bb_middle_slope_4h", filter_cfg.get("flip_bearish_max_ema21_slope_4h")), 0.0001),
+                ema_slope_lookback_1h=int(self._to_float(filter_cfg.get("bb_slope_lookback_1h", filter_cfg.get("ema_slope_lookback_1h")), 3)),
+                ema_slope_lookback_4h=int(self._to_float(filter_cfg.get("bb_slope_lookback_4h", filter_cfg.get("ema_slope_lookback_4h")), 2)),
+                disable_red_bar_growing_long_entries=bool(filter_cfg.get("disable_red_bar_growing_long_entries", False)),
+                disable_green_bar_growing_entries=bool(filter_cfg.get("disable_green_bar_growing_entries", True)),
+                primary_direction_timeframe=str(filter_cfg.get("primary_direction_timeframe", "1h")),
+                require_1h_confirmation_when_4h_primary=bool(filter_cfg.get("require_1h_confirmation_when_4h_primary", False)),
+                allow_neutral_1h_confirmation=bool(filter_cfg.get("allow_neutral_1h_confirmation", False)),
+                light_1h_confirmation_when_4h_primary=bool(filter_cfg.get("light_1h_confirmation_when_4h_primary", False)),
+                enable_green_bar_growing_short_adx_1h_range_filter=bool(filter_cfg.get("enable_green_bar_growing_short_adx_1h_range_filter", False)),
+                green_bar_growing_short_min_adx_1h=self._to_float(filter_cfg.get("green_bar_growing_short_min_adx_1h"), 0.0),
+                green_bar_growing_short_max_adx_1h=self._to_float(filter_cfg.get("green_bar_growing_short_max_adx_1h"), 0.0),
+                enable_4h_preflip_trial_entries=bool(filter_cfg.get("enable_4h_preflip_trial_entries", False)),
+                preflip_trial_min_shrink_pct_long=self._to_float(filter_cfg.get("preflip_trial_min_shrink_pct_long"), 0.75),
+                preflip_trial_min_shrink_pct_short=self._to_float(filter_cfg.get("preflip_trial_min_shrink_pct_short"), 0.30),
+                preflip_trial_min_signal_score=self._to_float(filter_cfg.get("preflip_trial_min_signal_score"), 0.78),
+                preflip_trial_min_vwap_score=self._to_float(filter_cfg.get("preflip_trial_min_vwap_score"), 0.06),
+                preflip_trial_entry_scale=self._to_float(filter_cfg.get("preflip_trial_entry_scale"), 0.35),
+                preflip_trial_max_leverage=int(self._to_float(filter_cfg.get("preflip_trial_max_leverage"), 2)),
+                overheat_growing_penalty=self._to_float(penalty_cfg.get("overheat_growing_penalty"), 0.12),
+                overheat_ema_multiplier_threshold=self._to_float(penalty_cfg.get("overheat_boll_multiplier_threshold", penalty_cfg.get("overheat_ema_multiplier_threshold")), 1.2),
+                overheat_vwap_score_threshold=self._to_float(penalty_cfg.get("overheat_vwap_score_threshold"), 0.10),
+                min_vwap_score_for_entry=self._to_float(
+                    filter_cfg.get("min_vwap_score_for_entry", penalty_cfg.get("min_vwap_score_for_entry")),
+                    0.0,
+                ),
+                # 止损配置
+                use_dynamic_stop=bool(stop_cfg.get("use_dynamic_stop", True)),
+                ema_stop_atr_multiplier=self._to_float(stop_cfg.get("boll_stop_atr_multiplier", stop_cfg.get("ema_stop_atr_multiplier")), 0.5),
+                max_stop_loss_pct=self._to_float(stop_cfg.get("max_stop_loss_pct"), 0.03),
+                vwap_alert_deviation=self._to_float(stop_cfg.get("vwap_alert_deviation"), 0.005),
+                enable_4h_shrink_exit=bool(stop_cfg.get("enable_4h_shrink_exit", False)),
+                exit_4h_shrink_bars=int(self._to_float(stop_cfg.get("exit_4h_shrink_bars"), 2)),
+                exit_4h_min_shrink_pct=self._to_float(stop_cfg.get("exit_4h_min_shrink_pct"), 0.20),
+                exit_4h_require_profit=bool(stop_cfg.get("exit_4h_require_profit", True)),
+                exit_4h_weak_loss_threshold=self._to_float(stop_cfg.get("exit_4h_weak_loss_threshold"), -1.0),
+                session_risk_control_enabled=bool(session_risk_cfg.get("enabled", False)),
+                session_risk_high_risk_sessions=copy.deepcopy(session_risk_cfg.get("high_risk_sessions", [])) if isinstance(session_risk_cfg.get("high_risk_sessions"), list) else [],
+                session_risk_apply_to_states=[
+                    str(x).strip() for x in (session_risk_cfg.get("apply_to_states", []) or []) if str(x).strip()
+                ] if isinstance(session_risk_cfg.get("apply_to_states"), list) else [],
+                vwap_score_tier_apply_to_states=[
+                    str(x).strip() for x in (vwap_score_tier_cfg.get("apply_to_states", []) or []) if str(x).strip()
+                ] if isinstance(vwap_score_tier_cfg.get("apply_to_states"), list) else [],
+                vwap_score_position_tiers=copy.deepcopy(vwap_score_tier_cfg.get("tiers", [])) if isinstance(vwap_score_tier_cfg.get("tiers"), list) else [],
+                symbol_risk_watchlist_symbols=[
+                    str(x).strip().upper() for x in (symbol_risk_cfg.get("watchlist_symbols", []) or []) if str(x).strip()
+                ] if isinstance(symbol_risk_cfg.get("watchlist_symbols"), list) else [],
+                symbol_risk_watchlist_max_position_portion=self._to_float(
+                    symbol_risk_cfg.get("watchlist_max_position_portion"),
+                    0.0,
+                ),
+                symbol_risk_watchlist_max_leverage=max(
+                    0,
+                    int(self._to_float(symbol_risk_cfg.get("watchlist_max_leverage"), 0)),
+                ),
+                symbol_risk_watchlist_apply_session_scale_double=bool(
+                    symbol_risk_cfg.get("watchlist_apply_session_scale_double", False)
+                ),
+                symbol_risk_watchlist_session_scale_multiplier=self._to_float(
+                    symbol_risk_cfg.get("watchlist_session_scale_multiplier"),
+                    0.80,
+                ),
+                dual_pressure_target_portion_bonus=self._to_float(
+                    leverage_cfg.get("dual_pressure_target_portion_bonus"),
+                    0.0,
+                ),
+                dual_pressure_max_symbol_position_portion=self._to_float(
+                    leverage_cfg.get("dual_pressure_max_symbol_position_portion"),
+                    0.0,
+                ),
+                # 空头质量过滤器（V3专家组建议）
+                enable_short_quality_filter=bool(v2_cfg.get("short_quality_filter", {}).get("enabled", True)),
+                short_filter_min_funding_rate=self._to_float(v2_cfg.get("short_quality_filter", {}).get("min_funding_rate"), 0.0005),
+                short_filter_max_oi_delta_ratio=self._to_float(v2_cfg.get("short_quality_filter", {}).get("max_oi_delta_ratio"), 0.0),
+                short_filter_min_vwap_deviation=self._to_float(v2_cfg.get("short_quality_filter", {}).get("min_vwap_deviation"), 0.005),
+            )
+            self.macd_v2_engine = MACDStrategyV2Engine(self.macd_v2_config)
+            logger.info("[MACD_MTF_V2] V2.0策略启用 min_signal_score=%.2f, BOLL中轨硬性否决=%s",
+                        self.macd_v2_config.min_signal_score, self.macd_v2_config.ema_55_1h_hard_block)
+        else:
+            self.macd_v2_config = None
+            self.macd_v2_engine = None
     
     def _parse_default_weights(self, dw_cfg: Dict[str, Any], prefix: str) -> Dict[str, float]:
         """
@@ -685,8 +881,93 @@ class FundFlowDecisionEngine:
 
         return overrides
 
+    def _collect_symbol_signal_override_items(self, ff_cfg: Dict[str, Any]) -> list[Dict[str, Any]]:
+        items: list[Dict[str, Any]] = []
+        raw_sources: list[Any] = [ff_cfg.get("symbol_signal_overrides")]
+
+        v2_cfg = ff_cfg.get("macd_mtf_strategy_v2", {})
+        if isinstance(v2_cfg, dict):
+            entry_filters = v2_cfg.get("entry_filters", {})
+            if isinstance(entry_filters, dict):
+                raw_sources.append(entry_filters.get("symbol_signal_overrides"))
+
+        for raw in raw_sources:
+            if isinstance(raw, dict):
+                for symbol, raw_cfg in raw.items():
+                    if not isinstance(raw_cfg, dict):
+                        continue
+                    items.append({"symbol": symbol, **raw_cfg})
+                continue
+            if isinstance(raw, list):
+                for item in raw:
+                    if not isinstance(item, dict):
+                        continue
+                    symbol = str(item.get("symbol", "")).strip().upper()
+                    if not symbol:
+                        continue
+                    normalized = dict(item)
+                    normalized["symbol"] = symbol
+                    items.append(normalized)
+        return items
+
+    @staticmethod
+    def _override_to_dict(override: Any) -> Dict[str, Any]:
+        if override is None:
+            return {}
+        result: Dict[str, Any] = {}
+        for field_name in (
+            "disable_flip_bullish",
+            "disable_green_bar_growing",
+            "min_signal_score_override",
+            "min_vwap_score_override",
+        ):
+            value = getattr(override, field_name, None)
+            if value is not None:
+                result[field_name] = value
+        return result
+
     def _get_symbol_side_override(self, symbol: str) -> str:
         return self.symbol_side_overrides.get(str(symbol or "").strip().upper(), "BOTH")
+
+    def _get_symbol_signal_override(self, symbol: str) -> Dict[str, Any]:
+        override = self.symbol_signal_override_registry.get_override(symbol)
+        return self._override_to_dict(override)
+
+    def _macd_v2_engine_for_symbol(self, symbol: str) -> Tuple[MACDStrategyV2Engine, Dict[str, Any]]:
+        override = self._get_symbol_signal_override(symbol)
+        if not override or self.macd_v2_engine is None or self.macd_v2_config is None:
+            return self.macd_v2_engine, {}
+
+        local_config = self.macd_v2_config
+        override_updates: Dict[str, Any] = {}
+        if "disable_flip_bullish" in override:
+            disable_flip_bullish = bool(override.get("disable_flip_bullish"))
+            if disable_flip_bullish != self.macd_v2_config.disable_flip_bullish_entries:
+                override_updates["disable_flip_bullish_entries"] = disable_flip_bullish
+        if "disable_green_bar_growing" in override:
+            disable_green_bar_growing = bool(override.get("disable_green_bar_growing"))
+            if disable_green_bar_growing != self.macd_v2_config.disable_green_bar_growing_entries:
+                override_updates["disable_green_bar_growing_entries"] = disable_green_bar_growing
+        if "min_signal_score_override" in override:
+            min_signal_score = self._to_float(
+                override.get("min_signal_score_override"),
+                self.macd_v2_config.min_signal_score,
+            )
+            if min_signal_score != self.macd_v2_config.min_signal_score:
+                override_updates["min_signal_score"] = min_signal_score
+        if "min_vwap_score_override" in override:
+            min_vwap_score = self._to_float(
+                override.get("min_vwap_score_override"),
+                self.macd_v2_config.flip_bullish_min_vwap_score,
+            )
+            if min_vwap_score != self.macd_v2_config.flip_bullish_min_vwap_score:
+                override_updates["flip_bullish_min_vwap_score"] = min_vwap_score
+
+        if not override_updates:
+            return self.macd_v2_engine, override
+
+        local_config = replace(local_config, **override_updates)
+        return MACDStrategyV2Engine(local_config), override
 
     def _apply_symbol_side_override(self, decision: FundFlowDecision) -> FundFlowDecision:
         if decision.operation not in (Operation.BUY, Operation.SELL):
@@ -737,6 +1018,61 @@ class FundFlowDecisionEngine:
             reason=reason,
             metadata=metadata,
         )
+
+    def check_winner_pyramiding(
+        self,
+        *,
+        symbol: str,
+        unrealized_pnl_pct: float,
+        signal_type_1h: str,
+        ema_structure: str,
+        vwap_score: float,
+        signal_score: float,
+        position_side: str,
+        current_position_size: float,
+        max_allowed_size: float,
+        initial_size: float,
+    ) -> Dict[str, Any]:
+        result = self.v3_filter_manager.check_addition(
+            symbol=symbol,
+            unrealized_pnl_pct=unrealized_pnl_pct,
+            signal_type_1h=signal_type_1h,
+            ema_structure=ema_structure,
+            vwap_score=vwap_score,
+            signal_score=signal_score,
+            position_side=position_side,
+            current_position_size=current_position_size,
+            max_allowed_size=max_allowed_size,
+            initial_size=initial_size,
+        )
+        return {
+            "allowed": result.allowed,
+            "filter_name": result.filter_name,
+            "reason": result.reason,
+            "details": dict(result.details or {}),
+        }
+
+    def record_winner_pyramiding_addition(
+        self,
+        *,
+        symbol: str,
+        size: float,
+        price: float,
+        signal_score: float,
+        vwap_score: float,
+        unrealized_pnl_pct: float,
+    ) -> None:
+        self.v3_filter_manager.record_addition(
+            symbol=symbol,
+            size=size,
+            price=price,
+            signal_score=signal_score,
+            vwap_score=vwap_score,
+            unrealized_pnl_pct=unrealized_pnl_pct,
+        )
+
+    def reset_v3_filter_state(self, symbol: str) -> None:
+        self.v3_filter_manager.reset_symbol_state(symbol)
 
     def get_direction_guide_snapshot(self) -> Dict[str, Any]:
         model_map = {
@@ -2597,6 +2933,436 @@ class FundFlowDecisionEngine:
             "macd_triggered": bool(macd_triggered),
         }
     
+    def _decide_macd_v2_strategy(
+        self,
+        symbol: str,
+        portfolio: Dict[str, Any],
+        price: float,
+        market_flow_context: Dict[str, Any],
+        regime_info: Dict[str, Any],
+    ) -> FundFlowDecision:
+        """
+        MACD多时间框架策略V2.0决策（VWAP + BOLL 增强版）
+        
+        策略架构：
+        - BOLL结构层（4H + 1H）→ 过滤逆势交易
+        - MACD_1H 定方向（权重35%）
+        - MACD_4H 确认增强（权重15%）
+        - VWAP 价值中枢层（权重15%）
+        - MACD_15M 跟随入场（权重20%）
+        - 成交量确认（权重15%）
+        """
+        import logging
+        import numpy as np
+        logger = logging.getLogger(__name__)
+        
+        current_pos = (portfolio.get("positions") or {}).get(symbol)
+        pos_side = str((current_pos or {}).get("side", "")).upper()
+        
+        # 提取多时间框架数据
+        timeframes = market_flow_context.get("timeframes") if isinstance(market_flow_context, dict) else {}
+        if not isinstance(timeframes, dict):
+            return FundFlowDecision(
+                operation=Operation.HOLD,
+                symbol=symbol,
+                reason="macd_v2_missing_timeframes",
+                metadata={"error": "missing timeframes data"}
+            )
+        
+        # 获取15M、1H、4H数据
+        tf_15m = timeframes.get("15m", {})
+        tf_1h = timeframes.get("1h", {})
+        tf_4h = timeframes.get("4h", {})
+        
+        if not tf_15m or not tf_1h or not tf_4h:
+            return FundFlowDecision(
+                operation=Operation.HOLD,
+                symbol=symbol,
+                reason="macd_v2_missing_tf_data",
+                metadata={"error": "missing 15m/1h/4h data"}
+            )
+
+        current_time = tf_15m.get("timestamp", tf_1h.get("timestamp"))
+        allowed_entry, time_window_reason = self.time_window_filter.should_allow_entry(
+            timestamp=current_time,
+            symbol=symbol,
+        )
+        if not allowed_entry:
+            return FundFlowDecision(
+                operation=Operation.HOLD,
+                symbol=symbol,
+                reason="macd_v2_time_window_block",
+                metadata={
+                    "strategy_mode": "macd_mtf_strategy_v2",
+                    "filter_name": "time_window_filter",
+                    "filter_reason": time_window_reason,
+                },
+            )
+        
+        # 获取MACD柱状图历史数据
+        macd_hist_15m = tf_15m.get("macd_hist_series") or tf_15m.get("macd_hist_array") or []
+        macd_hist_1h = tf_1h.get("macd_hist_series") or tf_1h.get("macd_hist_array") or []
+        macd_hist_4h = tf_4h.get("macd_hist_series") or tf_4h.get("macd_hist_array") or []
+        
+        if not macd_hist_15m:
+            hist_15m_val = self._to_float(tf_15m.get("macd_hist"), 0.0)
+            hist_15m_prev = self._to_float(tf_15m.get("macd_hist_prev"), hist_15m_val)
+            macd_hist_15m = [hist_15m_prev, hist_15m_val]
+        
+        if not macd_hist_1h:
+            hist_1h_val = self._to_float(tf_1h.get("macd_hist"), 0.0)
+            hist_1h_prev = self._to_float(tf_1h.get("macd_hist_prev"), hist_1h_val)
+            macd_hist_1h = [hist_1h_prev, hist_1h_val]
+        
+        if not macd_hist_4h:
+            hist_4h_val = self._to_float(tf_4h.get("macd_hist"), 0.0)
+            hist_4h_prev = self._to_float(tf_4h.get("macd_hist_prev"), hist_4h_val)
+            macd_hist_4h = [hist_4h_prev, hist_4h_val]
+        
+        macd_hist_15m = np.array(macd_hist_15m) if macd_hist_15m else np.array([0.0])
+        macd_hist_1h = np.array(macd_hist_1h) if macd_hist_1h else np.array([0.0])
+        macd_hist_4h = np.array(macd_hist_4h) if macd_hist_4h else np.array([0.0])
+        
+        # 成交量比率
+        volume = self._to_float(tf_15m.get("volume"), 0.0)
+        avg_volume = self._to_float(tf_15m.get("avg_volume"), volume) or volume
+        volume_ratio = volume / avg_volume if avg_volume > 0 else 1.0
+        
+        # VWAP数据
+        vwap = self._to_float(tf_1h.get("vwap"), 0.0)
+        structural_vwap = self._to_float(
+            tf_1h.get("structural_vwap"),
+            self._to_float(
+                tf_1h.get("anchored_vwap"),
+                self._to_float(tf_1h.get("rolling_vwap"), 0.0),
+            ),
+        )
+        close_price = self._to_float(tf_1h.get("close"), price)
+        
+        # BOLL数据
+        bb_middle_1h = self._to_float(tf_1h.get("bb_middle"), 0.0)
+        bb_upper_1h = self._to_float(tf_1h.get("bb_upper"), 0.0)
+        bb_lower_1h = self._to_float(tf_1h.get("bb_lower"), 0.0)
+        bb_middle_4h = self._to_float(tf_4h.get("bb_middle"), 0.0)
+        bb_upper_4h = self._to_float(tf_4h.get("bb_upper"), 0.0)
+        bb_lower_4h = self._to_float(tf_4h.get("bb_lower"), 0.0)
+        bb_middle_15m = self._to_float(tf_15m.get("bb_middle"), 0.0)
+        bb_upper_15m = self._to_float(tf_15m.get("bb_upper"), 0.0)
+        bb_lower_15m = self._to_float(tf_15m.get("bb_lower"), 0.0)
+        close_15m = self._to_float(tf_15m.get("close"), close_price)
+        
+        # ATR数据
+        atr_1h = self._to_float(tf_1h.get("atr"), 0.0)
+        funding_rate = self._to_float(
+            tf_1h.get("funding_rate"),
+            self._to_float(tf_15m.get("funding_rate"), self._to_float(market_flow_context.get("funding_rate"), 0.0)),
+        )
+        oi_delta_ratio = self._to_float(
+            tf_1h.get("oi_delta_ratio"),
+            self._to_float(tf_15m.get("oi_delta_ratio"), self._to_float(market_flow_context.get("oi_delta_ratio"), 0.0)),
+        )
+        close_1h_series = tf_1h.get("close_series")
+        if close_1h_series is None:
+            close_1h_series = tf_1h.get("close_array")
+        close_4h_series = tf_4h.get("close_series")
+        if close_4h_series is None:
+            close_4h_series = tf_4h.get("close_array")
+        vwap_1h_series = tf_1h.get("vwap_series")
+        if vwap_1h_series is None:
+            vwap_1h_series = tf_1h.get("vwap_array")
+        structural_vwap_1h_series = tf_1h.get("structural_vwap_series")
+        if structural_vwap_1h_series is None:
+            structural_vwap_1h_series = tf_1h.get("anchored_vwap_series")
+        if structural_vwap_1h_series is None:
+            structural_vwap_1h_series = tf_1h.get("rolling_vwap_series")
+        adx_1h = self._to_float(tf_1h.get("adx"), self._to_float(regime_info.get("adx"), 0.0))
+        adx_4h = self._to_float(tf_4h.get("adx"), 0.0)
+
+        macd_v2_engine, symbol_signal_override = self._macd_v2_engine_for_symbol(symbol)
+
+        # 调用V2.0策略引擎
+        signal = macd_v2_engine.analyze(
+            macd_hist_15m=macd_hist_15m,
+            macd_hist_1h=macd_hist_1h,
+            macd_hist_4h=macd_hist_4h,
+            idx_15m=len(macd_hist_15m) - 1,
+            idx_1h=len(macd_hist_1h) - 1,
+            idx_4h=len(macd_hist_4h) - 1,
+            volume_ratio=volume_ratio,
+            vwap=vwap,
+            structural_vwap=structural_vwap,
+            close_price=close_price,
+            bb_middle_1h=bb_middle_1h,
+            bb_upper_1h=bb_upper_1h,
+            bb_lower_1h=bb_lower_1h,
+            bb_middle_4h=bb_middle_4h,
+            bb_upper_4h=bb_upper_4h,
+            bb_lower_4h=bb_lower_4h,
+            bb_middle_15m=bb_middle_15m,
+            bb_upper_15m=bb_upper_15m,
+            bb_lower_15m=bb_lower_15m,
+            close_15m=close_15m,
+            close_1h_series=close_1h_series,
+            close_4h_series=close_4h_series,
+            vwap_1h_series=vwap_1h_series,
+            structural_vwap_1h_series=structural_vwap_1h_series,
+            adx_1h=adx_1h,
+            adx_4h=adx_4h,
+            cvd_upper_wick_ratio=self._to_float(tf_15m.get("upper_wick_ratio"), None),
+            cvd_1h_delta_ratio=self._to_float(tf_1h.get("cvd_delta_ratio"), None),
+            atr_1h=atr_1h,
+            funding_rate=funding_rate,
+            oi_delta_ratio=oi_delta_ratio,
+        )
+        
+        # 构建元数据
+        metadata = {
+            "strategy_mode": "macd_mtf_strategy_v2",
+            "signal_direction": signal.direction,
+            "signal_score": signal.signal_score,
+            "signal_type_1h": signal.signal_type_1h,
+            "is_trial_entry": bool(signal.is_trial_entry),
+            "entry_scale": float(signal.entry_scale or 1.0),
+            "is_4h_enhanced": signal.is_4h_enhanced,
+            "entry_type_15m": signal.entry_type_15m,
+            "vwap_score": signal.vwap_score,
+            "vwap_deviation": signal.vwap_deviation,
+            "vwap_state": signal.vwap_state,
+            "vwap_location_score": signal.vwap_location_score,
+            "structural_vwap": structural_vwap,
+            "bb_middle_1h": bb_middle_1h,
+            "bb_upper_1h": bb_upper_1h,
+            "bb_lower_1h": bb_lower_1h,
+            "boll_structure_status": signal.ema_structure_status,
+            "ema_multiplier": signal.ema_multiplier,
+            "ema_structure_status": signal.ema_structure_status,
+            "adx_1h": adx_1h,
+            "adx_4h": adx_4h,
+            "veto_type": signal.veto_type.value if signal.veto_type else "none",
+            "suggested_stop_price": signal.suggested_stop_price,
+            "stop_loss_pct": signal.stop_loss_pct,
+            "funding_rate": funding_rate,
+            "oi_delta_ratio": oi_delta_ratio,
+            "regime": regime_info.get("regime"),
+            "regime_adx": regime_info.get("adx"),
+            "regime_atr_pct": regime_info.get("atr_pct"),
+            "direction_lock": regime_info.get("direction", "BOTH"),
+            "last_open": regime_info.get("last_open", 0.0),
+            "last_close": regime_info.get("last_close", 0.0),
+            "macd_v2_debug": signal.details if isinstance(signal.details, dict) else {},
+        }
+        if symbol_signal_override:
+            metadata["symbol_signal_override"] = symbol_signal_override
+        take_profit_pct = self.take_profit_pct
+        stop_loss_pct = self._normalize_pct_ratio(signal.stop_loss_pct, self.stop_loss_pct)
+        
+        # 无明确信号
+        if signal.direction == 'neutral':
+            shrink_exit_direction = str((signal.details or {}).get("shrink_exit_direction", "") or "").upper()
+            shrink_exit_ready = bool((signal.details or {}).get("shrink_exit_ready", False))
+            if (
+                pos_side
+                and self.macd_v2_config
+                and self.macd_v2_config.enable_4h_shrink_exit
+                and shrink_exit_ready
+                and shrink_exit_direction == pos_side
+            ):
+                pnl_ratio = self._rule_position_pnl_ratio(pos_side, current_pos, price)
+                if self.macd_v2_config.exit_4h_require_profit:
+                    shrink_exit_ok = pnl_ratio > 0
+                else:
+                    shrink_exit_ok = pnl_ratio >= float(self.macd_v2_config.exit_4h_weak_loss_threshold)
+                if shrink_exit_ok:
+                    metadata["shrink_exit"] = {
+                        "direction": shrink_exit_direction,
+                        "ready": True,
+                        "pnl_ratio": pnl_ratio,
+                    }
+                    return FundFlowDecision(
+                        operation=Operation.CLOSE,
+                        symbol=symbol,
+                        target_portion_of_balance=1.0,
+                        reason=f"macd_v2_4h_shrink_exit_{pos_side.lower()}",
+                        metadata=metadata,
+                    )
+            hold_reason = ""
+            if isinstance(signal.details, dict):
+                hold_reason = str(signal.details.get("reason", "") or "")
+            if hold_reason:
+                logger.info(
+                    "[MACD_V2_HOLD] %s | type=%s dir=%s score=%.4f vwap=%.3f reason=%s",
+                    symbol,
+                    signal.signal_type_1h or "",
+                    signal.direction,
+                    signal.signal_score,
+                    signal.vwap_score,
+                    hold_reason,
+                )
+            return FundFlowDecision(
+                operation=Operation.HOLD,
+                symbol=symbol,
+                reason=f"macd_v2_hold_{signal.veto_type.value if signal.veto_type else 'no_signal'}_score_{signal.signal_score:.2f}",
+                metadata=metadata
+            )
+        
+        # 根据信号方向决定操作
+        if signal.direction == 'long':
+            # 检查是否有反向持仓需要平仓
+            if pos_side == "SHORT":
+                return FundFlowDecision(
+                    operation=Operation.CLOSE,
+                    symbol=symbol,
+                    target_portion_of_balance=1.0,
+                    reason=f"macd_v2_close_short_1h_{signal.signal_type_1h}",
+                    metadata=metadata
+                )
+            
+            # 开多仓
+            leverage = macd_v2_engine.calculate_leverage(
+                signal.signal_score,
+                signal.ema_multiplier,
+                signal.signal_type_1h,
+                symbol=symbol,
+                is_trial_entry=bool(signal.is_trial_entry),
+            )
+            session_position_scale = macd_v2_engine.resolve_session_position_scale(
+                current_time,
+                signal.signal_type_1h,
+                signal.vwap_state,
+            )
+            portion = macd_v2_engine.calculate_position_portion(
+                score=signal.signal_score,
+                base_default_portion=self.default_portion,
+                base_max_symbol_position_portion=self.max_symbol_position_portion,
+                symbol=symbol,
+                signal_type_1h=signal.signal_type_1h,
+                vwap_score=signal.vwap_score,
+                vwap_state=signal.vwap_state,
+                is_trial_entry=bool(signal.is_trial_entry),
+                entry_scale=float(signal.entry_scale or 1.0),
+                session_scale=session_position_scale,
+            )
+            metadata["session_risk"] = {
+                "position_scale": float(session_position_scale),
+                "state": str(signal.vwap_state or signal.signal_type_1h or ""),
+            }
+            metadata["symbol_risk"] = {
+                "watchlist_throttle_applied": bool(macd_v2_engine.is_watchlist_symbol(symbol)),
+                "effective_session_scale": float(
+                    macd_v2_engine.resolve_symbol_risk_session_scale(symbol, session_position_scale)
+                ),
+            }
+            suggested_stop = self._to_optional_float(signal.suggested_stop_price)
+            stop_loss_price = suggested_stop
+            if stop_loss_price is None or stop_loss_price <= 0 or stop_loss_price >= price:
+                stop_loss_price = price * (1.0 - stop_loss_pct) if stop_loss_pct > 0 else None
+            take_profit_price = price * (1.0 + take_profit_pct) if take_profit_pct > 0 else None
+            metadata["tp_sl"] = {
+                "tp_pct": take_profit_pct,
+                "sl_pct": stop_loss_pct,
+                "tp_enabled": take_profit_price is not None,
+                "sl_enabled": stop_loss_price is not None,
+            }
+
+            return self._apply_symbol_side_override(
+                FundFlowDecision(
+                    operation=Operation.BUY,
+                    symbol=symbol,
+                    target_portion_of_balance=portion,
+                    leverage=max(self.min_leverage, min(self.max_leverage, leverage)),
+                    max_price=price * (1.0 + self.entry_slippage),
+                    take_profit_price=take_profit_price,
+                    stop_loss_price=stop_loss_price,
+                    time_in_force=TimeInForce.IOC,
+                    tp_execution=ExecutionMode.LIMIT,
+                    sl_execution=ExecutionMode.LIMIT,
+                    reason=f"macd_v2_long_1h_{signal.signal_type_1h}_15m_{signal.entry_type_15m}_vwap_{signal.vwap_score:.2f}",
+                    metadata=metadata
+                )
+            )
+
+        elif signal.direction == 'short':
+            # 检查是否有反向持仓需要平仓
+            if pos_side == "LONG":
+                return FundFlowDecision(
+                    operation=Operation.CLOSE,
+                    symbol=symbol,
+                    target_portion_of_balance=1.0,
+                    reason=f"macd_v2_close_long_1h_{signal.signal_type_1h}",
+                    metadata=metadata
+                )
+            
+            # 开空仓
+            leverage = macd_v2_engine.calculate_leverage(
+                signal.signal_score,
+                signal.ema_multiplier,
+                signal.signal_type_1h,
+                symbol=symbol,
+                is_trial_entry=bool(signal.is_trial_entry),
+            )
+            session_position_scale = macd_v2_engine.resolve_session_position_scale(
+                current_time,
+                signal.signal_type_1h,
+                signal.vwap_state,
+            )
+            portion = macd_v2_engine.calculate_position_portion(
+                score=signal.signal_score,
+                base_default_portion=self.default_portion,
+                base_max_symbol_position_portion=self.max_symbol_position_portion,
+                symbol=symbol,
+                signal_type_1h=signal.signal_type_1h,
+                vwap_score=signal.vwap_score,
+                vwap_state=signal.vwap_state,
+                is_trial_entry=bool(signal.is_trial_entry),
+                entry_scale=float(signal.entry_scale or 1.0),
+                session_scale=session_position_scale,
+            )
+            metadata["session_risk"] = {
+                "position_scale": float(session_position_scale),
+                "state": str(signal.vwap_state or signal.signal_type_1h or ""),
+            }
+            metadata["symbol_risk"] = {
+                "watchlist_throttle_applied": bool(macd_v2_engine.is_watchlist_symbol(symbol)),
+                "effective_session_scale": float(
+                    macd_v2_engine.resolve_symbol_risk_session_scale(symbol, session_position_scale)
+                ),
+            }
+            suggested_stop = self._to_optional_float(signal.suggested_stop_price)
+            stop_loss_price = suggested_stop
+            if stop_loss_price is None or stop_loss_price <= 0 or stop_loss_price <= price:
+                stop_loss_price = price * (1.0 + stop_loss_pct) if stop_loss_pct > 0 else None
+            take_profit_price = price * (1.0 - take_profit_pct) if take_profit_pct > 0 else None
+            metadata["tp_sl"] = {
+                "tp_pct": take_profit_pct,
+                "sl_pct": stop_loss_pct,
+                "tp_enabled": take_profit_price is not None,
+                "sl_enabled": stop_loss_price is not None,
+            }
+
+            return self._apply_symbol_side_override(
+                FundFlowDecision(
+                    operation=Operation.SELL,
+                    symbol=symbol,
+                    target_portion_of_balance=portion,
+                    leverage=max(self.min_leverage, min(self.max_leverage, leverage)),
+                    min_price=price * (1.0 - self.entry_slippage),
+                    take_profit_price=take_profit_price,
+                    stop_loss_price=stop_loss_price,
+                    time_in_force=TimeInForce.IOC,
+                    tp_execution=ExecutionMode.LIMIT,
+                    sl_execution=ExecutionMode.LIMIT,
+                    reason=f"macd_v2_short_1h_{signal.signal_type_1h}_15m_{signal.entry_type_15m}_vwap_{signal.vwap_score:.2f}",
+                    metadata=metadata
+                )
+            )
+        
+        return FundFlowDecision(
+            operation=Operation.HOLD,
+            symbol=symbol,
+            reason="macd_v2_hold_unknown",
+            metadata=metadata
+        )
+    
     def _decide_macd_strategy(
         self,
         symbol: str,
@@ -2704,15 +3470,17 @@ class FundFlowDecisionEngine:
             "regime": regime_info.get("regime"),
             "direction_lock": regime_info.get("direction", "BOTH"),
         }
+        take_profit_pct = self.take_profit_pct
+        stop_loss_pct = self.stop_loss_pct
         
         # 根据信号方向决定操作
         if signal.direction == 'long' and signal.signal_score >= self.macd_mtf_strategy_config.min_signal_score:
             # 检查是否有反向持仓需要平仓
             if pos_side == "SHORT":
                 return FundFlowDecision(
-                    operation=Operation.CLOSE_SHORT,
+                    operation=Operation.CLOSE,
                     symbol=symbol,
-                    portion=1.0,
+                    target_portion_of_balance=1.0,
                     reason=f"macd_mtf_close_short_1h_{signal.signal_type_1h}",
                     metadata=metadata
                 )
@@ -2720,23 +3488,37 @@ class FundFlowDecisionEngine:
             # 开多仓
             leverage = self._calculate_leverage_from_score(signal.signal_score)
             portion = self._calculate_portion_from_score(signal.signal_score)
-            
-            return FundFlowDecision(
-                operation=Operation.OPEN_LONG,
-                symbol=symbol,
-                portion=portion,
-                leverage=leverage,
-                reason=f"macd_mtf_long_1h_{signal.signal_type_1h}_15m_{signal.entry_type_15m}",
-                metadata=metadata
+            metadata["tp_sl"] = {
+                "tp_pct": take_profit_pct,
+                "sl_pct": stop_loss_pct,
+                "tp_enabled": take_profit_pct > 0,
+                "sl_enabled": stop_loss_pct > 0,
+            }
+
+            return self._apply_symbol_side_override(
+                FundFlowDecision(
+                    operation=Operation.BUY,
+                    symbol=symbol,
+                    target_portion_of_balance=portion,
+                    leverage=leverage,
+                    max_price=price * (1.0 + self.entry_slippage),
+                    take_profit_price=(price * (1.0 + take_profit_pct)) if take_profit_pct > 0 else None,
+                    stop_loss_price=(price * (1.0 - stop_loss_pct)) if stop_loss_pct > 0 else None,
+                    time_in_force=TimeInForce.IOC,
+                    tp_execution=ExecutionMode.LIMIT,
+                    sl_execution=ExecutionMode.LIMIT,
+                    reason=f"macd_mtf_long_1h_{signal.signal_type_1h}_15m_{signal.entry_type_15m}",
+                    metadata=metadata
+                )
             )
             
         elif signal.direction == 'short' and signal.signal_score >= self.macd_mtf_strategy_config.min_signal_score:
             # 检查是否有反向持仓需要平仓
             if pos_side == "LONG":
                 return FundFlowDecision(
-                    operation=Operation.CLOSE_LONG,
+                    operation=Operation.CLOSE,
                     symbol=symbol,
-                    portion=1.0,
+                    target_portion_of_balance=1.0,
                     reason=f"macd_mtf_close_long_1h_{signal.signal_type_1h}",
                     metadata=metadata
                 )
@@ -2744,14 +3526,28 @@ class FundFlowDecisionEngine:
             # 开空仓
             leverage = self._calculate_leverage_from_score(signal.signal_score)
             portion = self._calculate_portion_from_score(signal.signal_score)
-            
-            return FundFlowDecision(
-                operation=Operation.OPEN_SHORT,
-                symbol=symbol,
-                portion=portion,
-                leverage=leverage,
-                reason=f"macd_mtf_short_1h_{signal.signal_type_1h}_15m_{signal.entry_type_15m}",
-                metadata=metadata
+            metadata["tp_sl"] = {
+                "tp_pct": take_profit_pct,
+                "sl_pct": stop_loss_pct,
+                "tp_enabled": take_profit_pct > 0,
+                "sl_enabled": stop_loss_pct > 0,
+            }
+
+            return self._apply_symbol_side_override(
+                FundFlowDecision(
+                    operation=Operation.SELL,
+                    symbol=symbol,
+                    target_portion_of_balance=portion,
+                    leverage=leverage,
+                    min_price=price * (1.0 - self.entry_slippage),
+                    take_profit_price=(price * (1.0 - take_profit_pct)) if take_profit_pct > 0 else None,
+                    stop_loss_price=(price * (1.0 + stop_loss_pct)) if stop_loss_pct > 0 else None,
+                    time_in_force=TimeInForce.IOC,
+                    tp_execution=ExecutionMode.LIMIT,
+                    sl_execution=ExecutionMode.LIMIT,
+                    reason=f"macd_mtf_short_1h_{signal.signal_type_1h}_15m_{signal.entry_type_15m}",
+                    metadata=metadata
+                )
             )
         
         # 无明确信号
@@ -4194,6 +4990,10 @@ class FundFlowDecisionEngine:
             return self._decide_rule_strategy(symbol, portfolio, price, market_flow_context or {}, regime_info)
         
         # 新MACD多时间框架策略（优先级高于默认策略）
+        # V2.0策略优先（VWAP + BOLL 增强版）
+        if self.macd_v2_enabled and self.macd_v2_engine:
+            return self._decide_macd_v2_strategy(symbol, portfolio, price, market_flow_context or {}, regime_info)
+        
         if self.macd_mtf_strategy_enabled:
             return self._decide_macd_strategy(symbol, portfolio, price, market_flow_context or {}, regime_info)
         

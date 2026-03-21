@@ -53,3 +53,6 @@ user/skills/
 # PDF files
 *.pdf
 .gitnexus
+
+# Backtest output
+output/

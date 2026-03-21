@@ -1,5 +1,7 @@
 from typing import Any, Dict, List, Optional, Tuple
 
+import copy
+
 import requests  # type: ignore
 
 from requests.adapters import HTTPAdapter
@@ -80,6 +82,7 @@ class BinanceBroker:
         self._close_use_proxy = os.getenv("BINANCE_CLOSE_USE_PROXY") == "1"
         self._close_proxy = os.getenv("BINANCE_CLOSE_PROXY")
         self._close_proxy_warned = False
+        self._request_status_counts: Dict[str, int] = {}
         self._session.trust_env = (not self._disable_env_proxy) and (not self._force_direct)
         self._fapi_endpoints = self._load_fapi_endpoints()
         self._fapi_endpoint_index = 0
@@ -98,6 +101,13 @@ class BinanceBroker:
 
         # 初始化时间偏移（避免 -1021 时间戳超前/滞后）
         self._sync_time_offset(force=True)
+
+    def _record_request_status(self, key: str) -> None:
+        key_str = str(key or "unknown")
+        self._request_status_counts[key_str] = self._request_status_counts.get(key_str, 0) + 1
+
+    def get_request_stats_snapshot(self) -> Dict[str, int]:
+        return copy.deepcopy(self._request_status_counts)
 
     def get_symbol_info(self, symbol: str) -> Optional[Dict[str, Any]]:
         if self.market is None:
@@ -431,6 +441,7 @@ class BinanceBroker:
                         params=payload,
                         **request_kwargs,
                     )
+                self._record_request_status(str(int(getattr(resp, "status_code", 0) or 0)))
 
                 if not allow_error:
                     if self._is_html_error(resp):
@@ -488,6 +499,7 @@ class BinanceBroker:
                 requests.exceptions.SSLError,
                 requests.exceptions.ProxyError,
             ) as e:
+                self._record_request_status(f"EXC_{type(e).__name__}")
                 last_exception = e
                 if self._proxy_fallback and not fallback_used and self._is_proxy_related_error(e):
                     fallback_used = True
@@ -515,6 +527,7 @@ class BinanceBroker:
                                 params=payload,
                                 **fallback_kwargs,
                             )
+                        self._record_request_status(str(int(getattr(resp, "status_code", 0) or 0)))
 
                         if not allow_error:
                             if resp.status_code >= 400:
@@ -954,6 +967,9 @@ class BinanceClient:
 
     def get_open_orders(self, symbol: Optional[str] = None):
         return self._order_gateway.query_open_orders(symbol)
+
+    def get_request_stats_snapshot(self) -> Dict[str, int]:
+        return self.broker.get_request_stats_snapshot()
 
     def get_open_conditional_orders(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
         """

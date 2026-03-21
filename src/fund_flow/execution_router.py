@@ -787,7 +787,7 @@ class FundFlowExecutionRouter:
     ) -> Dict[str, Any]:
         trigger_context = trigger_context or {}
         try:
-            decision = self.risk.validate_decision(decision)
+            decision = self.risk.validate_decision(decision, position=position)
         except Exception as e:
             result = {"status": "error", "message": f"decision 校验失败: {e}"}
             self.attribution.log_execution(decision, result)
