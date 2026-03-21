@@ -1,2 +1,0 @@
-﻿fold,train_start,train_end,test_start,test_end,selected_profile,selected_mode,selected_train_score,selected_test_return_pct,selected_test_drawdown_pct,selected_test_profit_factor,baseline_mode,baseline_test_return_pct,baseline_test_drawdown_pct,baseline_test_profit_factor
-fold_01,2026-01-16T05:45:00,2026-02-15T05:45:00,2026-02-15T05:45:00,2026-03-17T05:45:00,baseline,strict,2.75996,-12.3908,-13.2568,0.617192,strict,-12.3908,-13.2568,0.617192
