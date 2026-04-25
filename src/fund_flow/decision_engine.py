@@ -435,7 +435,9 @@ class FundFlowDecisionEngine:
         
         # ========== 新MACD多时间框架策略 ==========
         macd_cfg = ff.get("macd_mtf_strategy", {}) if isinstance(ff.get("macd_mtf_strategy"), dict) else {}
-        self.macd_mtf_strategy_enabled = bool(macd_cfg.get("enabled", True))  # 默认启用新策略
+        self.macd_mtf_strategy_enabled = bool(
+            macd_cfg.get("enabled", self.strategy_mode == "macd_mtf_strategy")
+        )
         self.macd_mtf_strategy_config = MACDStrategyConfig(
             macd_1h_fast=int(macd_cfg.get("macd_1h_fast", 12)),
             macd_1h_slow=int(macd_cfg.get("macd_1h_slow", 26)),
@@ -449,7 +451,7 @@ class FundFlowDecisionEngine:
             min_entry_score=max(0.0, min(1.0, self._to_float(macd_cfg.get("min_entry_score"), 0.3))),
             min_signal_score=max(0.0, min(1.0, self._to_float(macd_cfg.get("min_signal_score"), 0.45))),
             weight_1h_direction=max(0.0, min(1.0, self._to_float(macd_cfg.get("weight_1h_direction"), 0.40))),
-            weight_4h_enhancement=max(0.0, min(1.0, self._to_float(macd_cfg.get("weight_4h_enhancement"), 0.20))),
+            weight_4h_enhancement=max(0.0, min(1.0, self._to_float(macd_cfg.get("weight_4h_enhancement"), 0.10))),
             weight_15m_entry=max(0.0, min(1.0, self._to_float(macd_cfg.get("weight_15m_entry"), 0.25))),
             weight_volume=max(0.0, min(1.0, self._to_float(macd_cfg.get("weight_volume"), 0.15))),
         )
@@ -458,7 +460,6 @@ class FundFlowDecisionEngine:
                     self.macd_mtf_strategy_enabled, self.macd_mtf_strategy_config.min_signal_score)
         
         # ========== MACD V2.0策略（VWAP + BOLL 增强版） ==========
-        self.strategy_mode = str(ff.get("strategy_mode", "macd_mtf_strategy"))
         self.macd_v2_enabled = self.strategy_mode == "macd_mtf_strategy_v2"
         
         if self.macd_v2_enabled:
@@ -478,7 +479,7 @@ class FundFlowDecisionEngine:
             symbol_risk_cfg = v2_cfg.get("symbol_risk_tiers", {}) if isinstance(v2_cfg.get("symbol_risk_tiers"), dict) else {}
             default_signal_threshold = self._to_float(
                 thresholds_cfg.get("default", thresholds_cfg.get("min_signal_score")),
-                0.825,
+                0.850,
             )
             override_global_config = dict(filter_cfg)
             override_global_config.setdefault(
@@ -521,12 +522,12 @@ class FundFlowDecisionEngine:
                 structural_vwap_rolling_window=int(self._to_float(vwap_cfg.get("structural_vwap_rolling_window"), 20)),
                 vwap_retest_tolerance=self._to_float(vwap_cfg.get("vwap_retest_tolerance"), 0.003),
                 # 评分权重
-                weight_1h_direction=self._to_float(weights_cfg.get("weight_1h_direction"), 0.50),
-                weight_4h_direction=self._to_float(weights_cfg.get("weight_4h_direction", weights_cfg.get("weight_1h_direction")), 0.50),
+                weight_1h_direction=self._to_float(weights_cfg.get("weight_1h_direction"), 0.00),
+                weight_4h_direction=self._to_float(weights_cfg.get("weight_4h_direction", weights_cfg.get("weight_1h_direction")), 0.55),
                 weight_4h_enhancement=self._to_float(weights_cfg.get("weight_4h_enhancement"), 0.10),
-                weight_vwap=self._to_float(weights_cfg.get("weight_vwap"), 0.15),
-                weight_15m_entry=self._to_float(weights_cfg.get("weight_15m_entry"), 0.10),
-                weight_volume=self._to_float(weights_cfg.get("weight_volume"), 0.15),
+                weight_vwap=self._to_float(weights_cfg.get("weight_vwap"), 0.20),
+                weight_15m_entry=self._to_float(weights_cfg.get("weight_15m_entry"), 0.05),
+                weight_volume=self._to_float(weights_cfg.get("weight_volume"), 0.20),
                 # 入场阈值
                 min_entry_score=self._to_float(thresholds_cfg.get("min_entry_score"), 0.25),
                 min_signal_score=default_signal_threshold,
@@ -555,10 +556,22 @@ class FundFlowDecisionEngine:
                 ema_slope_lookback_4h=int(self._to_float(filter_cfg.get("bb_slope_lookback_4h", filter_cfg.get("ema_slope_lookback_4h")), 2)),
                 disable_red_bar_growing_long_entries=bool(filter_cfg.get("disable_red_bar_growing_long_entries", False)),
                 disable_green_bar_growing_entries=bool(filter_cfg.get("disable_green_bar_growing_entries", True)),
-                primary_direction_timeframe=str(filter_cfg.get("primary_direction_timeframe", "1h")),
+                primary_direction_timeframe=str(filter_cfg.get("primary_direction_timeframe", "4h")),
                 require_1h_confirmation_when_4h_primary=bool(filter_cfg.get("require_1h_confirmation_when_4h_primary", False)),
                 allow_neutral_1h_confirmation=bool(filter_cfg.get("allow_neutral_1h_confirmation", False)),
                 light_1h_confirmation_when_4h_primary=bool(filter_cfg.get("light_1h_confirmation_when_4h_primary", False)),
+                enable_soft_15m_confirmation_when_4h_primary=bool(
+                    filter_cfg.get("enable_soft_15m_confirmation_when_4h_primary", True)
+                ),
+                soft_15m_entry_score=self._to_float(filter_cfg.get("soft_15m_entry_score"), 0.28),
+                soft_15m_neutral_hist_multiple=self._to_float(
+                    filter_cfg.get("soft_15m_neutral_hist_multiple"),
+                    3.0,
+                ),
+                soft_15m_max_adverse_hist_multiple=self._to_float(
+                    filter_cfg.get("soft_15m_max_adverse_hist_multiple"),
+                    8.0,
+                ),
                 enable_green_bar_growing_short_adx_1h_range_filter=bool(filter_cfg.get("enable_green_bar_growing_short_adx_1h_range_filter", False)),
                 green_bar_growing_short_min_adx_1h=self._to_float(filter_cfg.get("green_bar_growing_short_min_adx_1h"), 0.0),
                 green_bar_growing_short_max_adx_1h=self._to_float(filter_cfg.get("green_bar_growing_short_max_adx_1h"), 0.0),
@@ -569,12 +582,91 @@ class FundFlowDecisionEngine:
                 preflip_trial_min_vwap_score=self._to_float(filter_cfg.get("preflip_trial_min_vwap_score"), 0.06),
                 preflip_trial_entry_scale=self._to_float(filter_cfg.get("preflip_trial_entry_scale"), 0.35),
                 preflip_trial_max_leverage=int(self._to_float(filter_cfg.get("preflip_trial_max_leverage"), 2)),
+                enable_trial_short_below_structure_continuation_promotion=bool(
+                    filter_cfg.get("enable_trial_short_below_structure_continuation_promotion", False)
+                ),
+                trial_short_below_structure_promotion_min_signal_score=self._to_float(
+                    filter_cfg.get("trial_short_below_structure_promotion_min_signal_score"),
+                    0.82,
+                ),
+                trial_short_below_structure_promotion_min_vwap_score=self._to_float(
+                    filter_cfg.get("trial_short_below_structure_promotion_min_vwap_score"),
+                    0.075,
+                ),
+                trial_short_below_structure_promotion_min_adx_1h=self._to_float(
+                    filter_cfg.get("trial_short_below_structure_promotion_min_adx_1h"),
+                    25.0,
+                ),
+                trial_short_below_structure_promotion_min_4h_shrink_pct=self._to_float(
+                    filter_cfg.get("trial_short_below_structure_promotion_min_4h_shrink_pct"),
+                    0.80,
+                ),
+                trial_short_below_structure_promotion_min_4h_shrink_bars=max(
+                    1,
+                    int(
+                        self._to_float(
+                            filter_cfg.get("trial_short_below_structure_promotion_min_4h_shrink_bars"),
+                            6,
+                        )
+                    ),
+                ),
+                enable_stable_bear_continuation=bool(filter_cfg.get("enable_stable_bear_continuation", True)),
+                stable_bear_continuation_min_signal_score=self._to_float(
+                    thresholds_cfg.get(
+                        "stable_bear_continuation_min_signal_score",
+                        filter_cfg.get("stable_bear_continuation_min_signal_score"),
+                    ),
+                    0.82,
+                ),
+                stable_bear_continuation_min_vwap_score=self._to_float(
+                    filter_cfg.get("stable_bear_continuation_min_vwap_score"),
+                    0.10,
+                ),
+                stable_bear_continuation_min_adx_1h=self._to_float(
+                    filter_cfg.get("stable_bear_continuation_min_adx_1h"),
+                    20.0,
+                ),
+                stable_bear_continuation_min_4h_bars=max(
+                    1,
+                    int(self._to_float(filter_cfg.get("stable_bear_continuation_min_4h_bars"), 2)),
+                ),
+                enable_stable_bull_continuation=bool(filter_cfg.get("enable_stable_bull_continuation", False)),
+                stable_bull_continuation_min_signal_score=self._to_float(
+                    thresholds_cfg.get(
+                        "stable_bull_continuation_min_signal_score",
+                        filter_cfg.get("stable_bull_continuation_min_signal_score"),
+                    ),
+                    0.82,
+                ),
+                stable_bull_continuation_min_vwap_score=self._to_float(
+                    filter_cfg.get("stable_bull_continuation_min_vwap_score"),
+                    0.10,
+                ),
+                stable_bull_continuation_min_adx_1h=self._to_float(
+                    filter_cfg.get("stable_bull_continuation_min_adx_1h"),
+                    20.0,
+                ),
+                stable_bull_continuation_min_4h_bars=max(
+                    1,
+                    int(self._to_float(filter_cfg.get("stable_bull_continuation_min_4h_bars"), 2)),
+                ),
+                enable_stable_continuation_slow_4h_shrink_exit=bool(
+                    stop_cfg.get("enable_stable_continuation_slow_4h_shrink_exit", True)
+                ),
+                stable_continuation_exit_4h_shrink_bars=max(
+                    1,
+                    int(self._to_float(stop_cfg.get("stable_continuation_exit_4h_shrink_bars"), 3)),
+                ),
+                stable_continuation_exit_4h_min_shrink_pct=self._to_float(
+                    stop_cfg.get("stable_continuation_exit_4h_min_shrink_pct"),
+                    0.35,
+                ),
                 overheat_growing_penalty=self._to_float(penalty_cfg.get("overheat_growing_penalty"), 0.12),
                 overheat_ema_multiplier_threshold=self._to_float(penalty_cfg.get("overheat_boll_multiplier_threshold", penalty_cfg.get("overheat_ema_multiplier_threshold")), 1.2),
                 overheat_vwap_score_threshold=self._to_float(penalty_cfg.get("overheat_vwap_score_threshold"), 0.10),
                 min_vwap_score_for_entry=self._to_float(
                     filter_cfg.get("min_vwap_score_for_entry", penalty_cfg.get("min_vwap_score_for_entry")),
-                    0.0,
+                    0.12,
                 ),
                 # 止损配置
                 use_dynamic_stop=bool(stop_cfg.get("use_dynamic_stop", True)),
@@ -628,11 +720,59 @@ class FundFlowDecisionEngine:
                 short_filter_min_vwap_deviation=self._to_float(v2_cfg.get("short_quality_filter", {}).get("min_vwap_deviation"), 0.005),
             )
             self.macd_v2_engine = MACDStrategyV2Engine(self.macd_v2_config)
+            regime_state_cfg = v2_cfg.get("regime_state_machine", {}) if isinstance(v2_cfg.get("regime_state_machine"), dict) else {}
+            self.macd_4h_regime_state_cfg = {
+                "enabled": bool(regime_state_cfg.get("enabled", False)),
+                "dynamic_side_override": bool(regime_state_cfg.get("dynamic_side_override", True)),
+                "close_on_reverse": bool(regime_state_cfg.get("close_on_reverse", True)),
+                "allow_transition_entry": bool(regime_state_cfg.get("allow_transition_entry", True)),
+                "allow_confirmed_entry_without_15m": bool(
+                    regime_state_cfg.get("allow_confirmed_entry_without_15m", True)
+                ),
+                "transition_entry_score": self._to_float(regime_state_cfg.get("transition_entry_score"), 0.72),
+                "transition_entry_scale": self._to_float(regime_state_cfg.get("transition_entry_scale"), 0.35),
+                "transition_max_leverage": max(
+                    1,
+                    int(self._to_float(regime_state_cfg.get("transition_max_leverage"), 2)),
+                ),
+                "transition_min_shrink_pct_long": self._to_float(
+                    regime_state_cfg.get("transition_min_shrink_pct_long"),
+                    0.55,
+                ),
+                "transition_min_shrink_pct_short": self._to_float(
+                    regime_state_cfg.get("transition_min_shrink_pct_short"),
+                    0.55,
+                ),
+                "transition_min_vwap_score_long": self._to_float(
+                    regime_state_cfg.get("transition_min_vwap_score_long"),
+                    0.01,
+                ),
+                "transition_min_vwap_score_short": self._to_float(
+                    regime_state_cfg.get("transition_min_vwap_score_short"),
+                    0.08,
+                ),
+                "confirmed_min_4h_bars": max(
+                    1,
+                    int(self._to_float(regime_state_cfg.get("confirmed_min_4h_bars"), 1)),
+                ),
+                "confirmed_entry_score": self._to_float(regime_state_cfg.get("confirmed_entry_score"), 0.84),
+                "confirmed_entry_scale": self._to_float(regime_state_cfg.get("confirmed_entry_scale"), 0.50),
+                "confirmed_max_leverage": max(
+                    1,
+                    int(self._to_float(regime_state_cfg.get("confirmed_max_leverage"), 3)),
+                ),
+                "confirmed_min_vwap_score": self._to_float(
+                    regime_state_cfg.get("confirmed_min_vwap_score"),
+                    0.08,
+                ),
+                "same_side_bonus": self._to_float(regime_state_cfg.get("same_side_bonus"), 0.03),
+            }
             logger.info("[MACD_MTF_V2] V2.0策略启用 min_signal_score=%.2f, BOLL中轨硬性否决=%s",
                         self.macd_v2_config.min_signal_score, self.macd_v2_config.ema_55_1h_hard_block)
         else:
             self.macd_v2_config = None
             self.macd_v2_engine = None
+            self.macd_4h_regime_state_cfg = {"enabled": False}
     
     def _parse_default_weights(self, dw_cfg: Dict[str, Any], prefix: str) -> Dict[str, float]:
         """
@@ -969,11 +1109,351 @@ class FundFlowDecisionEngine:
         local_config = replace(local_config, **override_updates)
         return MACDStrategyV2Engine(local_config), override
 
-    def _apply_symbol_side_override(self, decision: FundFlowDecision) -> FundFlowDecision:
+    @staticmethod
+    def _normalize_signal_side(value: Any) -> str:
+        raw = str(value or "").strip().lower()
+        if raw in {"long", "buy", "bull", "bullish"}:
+            return "long"
+        if raw in {"short", "sell", "bear", "bearish"}:
+            return "short"
+        return "neutral"
+
+    @staticmethod
+    def _signal_type_matches_side(side: str, signal_type: Any) -> bool:
+        raw = str(signal_type or "").strip().lower()
+        if side == "long":
+            return raw in {"red_bar_growing", "red_bar_shrinking", "flip_bullish"}
+        if side == "short":
+            return raw in {"green_bar_growing", "green_bar_shrinking", "flip_bearish"}
+        return False
+
+    def _build_macd_v2_4h_regime_state(
+        self,
+        *,
+        signal: MACDSignalV2,
+        tf_1h: Dict[str, Any],
+        tf_4h: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        cfg = self.macd_4h_regime_state_cfg or {}
+        state: Dict[str, Any] = {
+            "enabled": bool(cfg.get("enabled", False)),
+            "state": "neutral",
+            "phase": "neutral",
+            "side": "neutral",
+            "reason": "",
+            "score": 0.0,
+            "entry_allowed": False,
+            "entry_mode": "",
+            "entry_scale": 1.0,
+            "max_leverage": max(1, self.default_leverage),
+            "min_vwap_score": 0.0,
+            "close_on_reverse": False,
+            "side_override_mode": "BOTH",
+        }
+        if not state["enabled"]:
+            return state
+
+        details = signal.details if isinstance(signal.details, dict) else {}
+        direction_1h = self._normalize_signal_side(details.get("direction_1h"))
+        direction_4h = self._normalize_signal_side(details.get("direction_4h"))
+        signal_type_1h = str(signal.signal_type_1h or details.get("signal_type_1h") or "").strip().lower()
+        signal_type_4h = str(details.get("signal_type_4h") or "").strip().lower()
+        preflip_direction = self._normalize_signal_side(details.get("macd_4h_preflip_direction"))
+        preflip_status = str(details.get("preflip_confirmation_status") or "").strip().lower()
+        shrink_pct = max(0.0, self._to_float(details.get("macd_4h_shrink_pct"), 0.0))
+        positive_bars = max(0, int(self._to_float(details.get("stable_4h_positive_bars"), 0)))
+        negative_bars = max(0, int(self._to_float(details.get("stable_4h_negative_bars"), 0)))
+        bull_active = bool(details.get("stable_4h_bull_active", False))
+        bear_active = bool(details.get("stable_4h_bear_active", False))
+        hist_current = self._to_float(
+            details.get("macd_4h_hist_current"),
+            self._to_float(tf_4h.get("macd_hist"), 0.0),
+        )
+        hist_prev = self._to_float(
+            details.get("macd_4h_hist_prev"),
+            self._to_float(tf_4h.get("macd_hist_prev"), hist_current),
+        )
+        vwap_score = max(0.0, self._to_float(signal.vwap_score, 0.0))
+        confirm_bars = max(1, int(cfg.get("confirmed_min_4h_bars", 1)))
+        same_side_bonus = max(0.0, self._to_float(cfg.get("same_side_bonus"), 0.03))
+        dynamic_side_override = bool(cfg.get("dynamic_side_override", True))
+
+        long_same_side = direction_1h == "long" or self._signal_type_matches_side("long", signal_type_1h)
+        short_same_side = direction_1h == "short" or self._signal_type_matches_side("short", signal_type_1h)
+        long_non_opposite = direction_1h != "short" and not self._signal_type_matches_side("short", signal_type_1h)
+        short_non_opposite = direction_1h != "long" and not self._signal_type_matches_side("long", signal_type_1h)
+
+        bull_confirmed = (
+            (hist_current > 0 and hist_prev <= 0)
+            or (
+                direction_4h == "long"
+                and (
+                    signal_type_4h in {"red_bar_growing", "flip_bullish"}
+                    or bull_active
+                    or positive_bars >= confirm_bars
+                )
+            )
+        )
+        bear_confirmed = (
+            (hist_current < 0 and hist_prev >= 0)
+            or (
+                direction_4h == "short"
+                and (
+                    signal_type_4h in {"green_bar_growing", "flip_bearish"}
+                    or bear_active
+                    or negative_bars >= confirm_bars
+                )
+            )
+        )
+        bull_transition = (
+            not bull_confirmed
+            and preflip_direction == "long"
+            and preflip_status == "aligned"
+            and shrink_pct >= self._to_float(cfg.get("transition_min_shrink_pct_long"), 0.55)
+            and long_non_opposite
+        )
+        bear_transition = (
+            not bear_confirmed
+            and preflip_direction == "short"
+            and preflip_status == "aligned"
+            and shrink_pct >= self._to_float(cfg.get("transition_min_shrink_pct_short"), 0.55)
+            and short_non_opposite
+        )
+
+        if bull_confirmed:
+            score = max(
+                self._to_float(cfg.get("confirmed_entry_score"), 0.84),
+                self._to_float(signal.signal_score, 0.0),
+            )
+            if long_same_side:
+                score += same_side_bonus
+            state.update(
+                {
+                    "state": "bull_confirmed",
+                    "phase": "confirmed",
+                    "side": "long",
+                    "reason": f"4h_bull_confirmed:{signal_type_4h or direction_4h}",
+                    "score": min(1.0, score),
+                    "entry_allowed": bool(cfg.get("allow_confirmed_entry_without_15m", True))
+                    and long_non_opposite
+                    and vwap_score >= self._to_float(cfg.get("confirmed_min_vwap_score"), 0.08),
+                    "entry_mode": "confirmed",
+                    "entry_scale": self._to_float(cfg.get("confirmed_entry_scale"), 0.50),
+                    "max_leverage": max(1, int(cfg.get("confirmed_max_leverage", 3))),
+                    "min_vwap_score": self._to_float(cfg.get("confirmed_min_vwap_score"), 0.08),
+                    "close_on_reverse": bool(cfg.get("close_on_reverse", True)),
+                    "side_override_mode": "LONG_ONLY" if dynamic_side_override else "BOTH",
+                }
+            )
+            return state
+
+        if bear_confirmed:
+            score = max(
+                self._to_float(cfg.get("confirmed_entry_score"), 0.84),
+                self._to_float(signal.signal_score, 0.0),
+            )
+            if short_same_side:
+                score += same_side_bonus
+            state.update(
+                {
+                    "state": "bear_confirmed",
+                    "phase": "confirmed",
+                    "side": "short",
+                    "reason": f"4h_bear_confirmed:{signal_type_4h or direction_4h}",
+                    "score": min(1.0, score),
+                    "entry_allowed": bool(cfg.get("allow_confirmed_entry_without_15m", True))
+                    and short_non_opposite
+                    and vwap_score >= self._to_float(cfg.get("confirmed_min_vwap_score"), 0.08),
+                    "entry_mode": "confirmed",
+                    "entry_scale": self._to_float(cfg.get("confirmed_entry_scale"), 0.50),
+                    "max_leverage": max(1, int(cfg.get("confirmed_max_leverage", 3))),
+                    "min_vwap_score": self._to_float(cfg.get("confirmed_min_vwap_score"), 0.08),
+                    "close_on_reverse": bool(cfg.get("close_on_reverse", True)),
+                    "side_override_mode": "SHORT_ONLY" if dynamic_side_override else "BOTH",
+                }
+            )
+            return state
+
+        if bull_transition:
+            score = self._to_float(cfg.get("transition_entry_score"), 0.72)
+            if long_same_side:
+                score += same_side_bonus
+            state.update(
+                {
+                    "state": "bull_transition",
+                    "phase": "transition",
+                    "side": "long",
+                    "reason": f"4h_bull_transition:aligned_shrink={shrink_pct:.2f}",
+                    "score": min(1.0, score),
+                    "entry_allowed": bool(cfg.get("allow_transition_entry", True))
+                    and vwap_score >= self._to_float(cfg.get("transition_min_vwap_score_long"), 0.01),
+                    "entry_mode": "transition",
+                    "entry_scale": self._to_float(cfg.get("transition_entry_scale"), 0.35),
+                    "max_leverage": max(1, int(cfg.get("transition_max_leverage", 2))),
+                    "min_vwap_score": self._to_float(cfg.get("transition_min_vwap_score_long"), 0.01),
+                    "close_on_reverse": bool(cfg.get("close_on_reverse", True)),
+                    "side_override_mode": "LONG_ONLY" if dynamic_side_override else "BOTH",
+                }
+            )
+            return state
+
+        if bear_transition:
+            score = self._to_float(cfg.get("transition_entry_score"), 0.72)
+            if short_same_side:
+                score += same_side_bonus
+            state.update(
+                {
+                    "state": "bear_transition",
+                    "phase": "transition",
+                    "side": "short",
+                    "reason": f"4h_bear_transition:aligned_shrink={shrink_pct:.2f}",
+                    "score": min(1.0, score),
+                    "entry_allowed": bool(cfg.get("allow_transition_entry", True))
+                    and vwap_score >= self._to_float(cfg.get("transition_min_vwap_score_short"), 0.08),
+                    "entry_mode": "transition",
+                    "entry_scale": self._to_float(cfg.get("transition_entry_scale"), 0.35),
+                    "max_leverage": max(1, int(cfg.get("transition_max_leverage", 2))),
+                    "min_vwap_score": self._to_float(cfg.get("transition_min_vwap_score_short"), 0.08),
+                    "close_on_reverse": bool(cfg.get("close_on_reverse", True)),
+                    "side_override_mode": "SHORT_ONLY" if dynamic_side_override else "BOTH",
+                }
+            )
+            return state
+
+        return state
+
+    def _build_macd_v2_regime_entry_decision(
+        self,
+        *,
+        symbol: str,
+        price: float,
+        current_time: Any,
+        signal: MACDSignalV2,
+        regime_state: Dict[str, Any],
+        metadata: Dict[str, Any],
+        macd_v2_engine: MACDStrategyV2Engine,
+    ) -> Optional[FundFlowDecision]:
+        if not regime_state.get("entry_allowed", False):
+            return None
+
+        side = str(regime_state.get("side", "neutral") or "neutral")
+        if side not in {"long", "short"}:
+            return None
+
+        score = max(0.0, min(1.0, self._to_float(regime_state.get("score"), 0.0)))
+        entry_scale = max(0.0, self._to_float(regime_state.get("entry_scale"), 1.0))
+        is_trial_entry = str(regime_state.get("entry_mode", "")) == "transition"
+        session_position_scale = macd_v2_engine.resolve_session_position_scale(
+            current_time,
+            signal.signal_type_1h,
+            signal.vwap_state,
+        )
+        portion = macd_v2_engine.calculate_position_portion(
+            score=score,
+            base_default_portion=self.default_portion,
+            base_max_symbol_position_portion=self.max_symbol_position_portion,
+            symbol=symbol,
+            signal_type_1h=signal.signal_type_1h,
+            vwap_score=max(signal.vwap_score, self._to_float(regime_state.get("min_vwap_score"), 0.0)),
+            vwap_state=signal.vwap_state,
+            is_trial_entry=is_trial_entry,
+            entry_scale=entry_scale,
+            session_scale=session_position_scale,
+        )
+        leverage = macd_v2_engine.calculate_leverage(
+            score,
+            signal.ema_multiplier,
+            signal.signal_type_1h,
+            symbol=symbol,
+            is_trial_entry=is_trial_entry,
+        )
+        leverage = min(leverage, max(1, int(regime_state.get("max_leverage", leverage))))
+        leverage = max(self.min_leverage, min(self.max_leverage, leverage))
+
+        local_metadata = dict(metadata)
+        local_metadata["signal_direction"] = side
+        local_metadata["signal_score"] = score
+        local_metadata["is_trial_entry"] = is_trial_entry
+        local_metadata["entry_scale"] = entry_scale
+        local_metadata["entry_type_15m"] = local_metadata.get("entry_type_15m") or f"regime_{regime_state.get('phase', 'neutral')}"
+        local_metadata["macd_4h_regime_entry"] = True
+        local_metadata["macd_4h_regime_entry_mode"] = regime_state.get("entry_mode", "")
+        local_metadata["session_risk"] = {
+            "position_scale": float(session_position_scale),
+            "state": str(signal.vwap_state or signal.signal_type_1h or ""),
+        }
+        local_metadata["symbol_risk"] = {
+            "watchlist_throttle_applied": bool(macd_v2_engine.is_watchlist_symbol(symbol)),
+            "effective_session_scale": float(
+                macd_v2_engine.resolve_symbol_risk_session_scale(symbol, session_position_scale)
+            ),
+        }
+
+        stop_loss_pct = self._normalize_pct_ratio(signal.stop_loss_pct, self.stop_loss_pct)
+        suggested_stop = self._to_optional_float(signal.suggested_stop_price)
+
+        if side == "long":
+            stop_loss_price = suggested_stop
+            if stop_loss_price is None or stop_loss_price <= 0 or stop_loss_price >= price:
+                stop_loss_price = price * (1.0 - stop_loss_pct) if stop_loss_pct > 0 else None
+            take_profit_price = price * (1.0 + self.take_profit_pct) if self.take_profit_pct > 0 else None
+            local_metadata["tp_sl"] = {
+                "tp_pct": self.take_profit_pct,
+                "sl_pct": stop_loss_pct,
+                "tp_enabled": take_profit_price is not None,
+                "sl_enabled": stop_loss_price is not None,
+            }
+            return FundFlowDecision(
+                operation=Operation.BUY,
+                symbol=symbol,
+                target_portion_of_balance=portion,
+                leverage=leverage,
+                max_price=price * (1.0 + self.entry_slippage),
+                take_profit_price=take_profit_price,
+                stop_loss_price=stop_loss_price,
+                time_in_force=TimeInForce.IOC,
+                tp_execution=ExecutionMode.LIMIT,
+                sl_execution=ExecutionMode.LIMIT,
+                reason=f"macd_v2_regime_long_{regime_state.get('state')}_vwap_{signal.vwap_score:.2f}",
+                metadata=local_metadata,
+            )
+
+        stop_loss_price = suggested_stop
+        if stop_loss_price is None or stop_loss_price <= 0 or stop_loss_price <= price:
+            stop_loss_price = price * (1.0 + stop_loss_pct) if stop_loss_pct > 0 else None
+        take_profit_price = price * (1.0 - self.take_profit_pct) if self.take_profit_pct > 0 else None
+        local_metadata["tp_sl"] = {
+            "tp_pct": self.take_profit_pct,
+            "sl_pct": stop_loss_pct,
+            "tp_enabled": take_profit_price is not None,
+            "sl_enabled": stop_loss_price is not None,
+        }
+        return FundFlowDecision(
+            operation=Operation.SELL,
+            symbol=symbol,
+            target_portion_of_balance=portion,
+            leverage=leverage,
+            min_price=price * (1.0 - self.entry_slippage),
+            take_profit_price=take_profit_price,
+            stop_loss_price=stop_loss_price,
+            time_in_force=TimeInForce.IOC,
+            tp_execution=ExecutionMode.LIMIT,
+            sl_execution=ExecutionMode.LIMIT,
+            reason=f"macd_v2_regime_short_{regime_state.get('state')}_vwap_{signal.vwap_score:.2f}",
+            metadata=local_metadata,
+        )
+
+    def _apply_symbol_side_override(
+        self,
+        decision: FundFlowDecision,
+        runtime_override_mode: Optional[str] = None,
+    ) -> FundFlowDecision:
         if decision.operation not in (Operation.BUY, Operation.SELL):
             return decision
 
-        override_mode = self._get_symbol_side_override(decision.symbol)
+        base_override_mode = self._get_symbol_side_override(decision.symbol)
+        runtime_mode = self._normalize_symbol_side_override_mode(runtime_override_mode)
+        override_mode = base_override_mode if base_override_mode != "BOTH" else runtime_mode
         if override_mode == "BOTH":
             return decision
 
@@ -984,6 +1464,8 @@ class FundFlowDecisionEngine:
         )
         metadata = dict(decision.metadata or {})
         metadata["symbol_side_override_mode"] = override_mode
+        metadata["symbol_side_override_base_mode"] = base_override_mode
+        metadata["symbol_side_override_runtime_mode"] = runtime_mode
         metadata["symbol_side_override_side"] = side
         metadata["symbol_side_override_allowed"] = allowed
 
@@ -1459,19 +1941,7 @@ class FundFlowDecisionEngine:
         default_leverage: int,
         allowed_levels: Optional[Sequence[int]] = None,
     ) -> int:
-        """
-        选择杠杆倍数（优化版 - 高信号分时降低杠杆）
-        
-        逻辑说明：
-        - 信号分刚好超过门槛时：使用较高杠杆（抓住机会）
-        - 信号分过高时（>0.85）：降低杠杆（防止过度拟合/趋势末端）
-        - 信号分极高时（>0.95）：使用最低杠杆（警惕陷阱）
-        
-        这是因为：
-        1. 高分信号可能出现在趋势末端（过度拟合风险）
-        2. 高分信号的止损可能被放大
-        3. 中等信号分反而是更稳定的机会
-        """
+        """按信号强度在离散杠杆档位中单调选档。"""
         min_lev = max(1, int(min_leverage))
         max_lev = max(min_lev, int(max_leverage))
         default_lev = min(max_lev, max(min_lev, int(default_leverage)))
@@ -1491,23 +1961,8 @@ class FundFlowDecisionEngine:
         denom = max(1e-6, 1.0 - th)
         strength = max(0.0, min(1.0, (s - th) / denom))
         
-        # 新增：高分反向调整
-        # 当信号强度过高时，反向降低杠杆
-        if strength > 0.85:
-            # 高分信号：降低杠杆
-            # strength=0.85 -> idx=中高
-            # strength=0.95 -> idx=低
-            # strength=1.0 -> idx=最低
-            reverse_strength = (strength - 0.85) / 0.15  # 0~1
-            adjusted_strength = 0.5 * (1 - reverse_strength)  # 0.5 -> 0
-            idx = min(len(levels) - 1, int(adjusted_strength * len(levels)))
-        elif strength > 0.6:
-            # 中高分信号：使用默认杠杆
-            idx = min(len(levels) - 1, len(levels) // 2)
-        else:
-            # 正常分数：标准逻辑
-            idx = min(len(levels) - 1, int(strength * len(levels)))
-        
+        idx = min(len(levels) - 1, int(strength * len(levels)))
+
         lev = levels[idx]
         if lev <= 0:
             return default_lev
@@ -3129,6 +3584,9 @@ class FundFlowDecisionEngine:
             "vwap_deviation": signal.vwap_deviation,
             "vwap_state": signal.vwap_state,
             "vwap_location_score": signal.vwap_location_score,
+            "stable_continuation_active": bool((signal.details or {}).get("stable_continuation_active", False)),
+            "stable_continuation_side": (signal.details or {}).get("stable_continuation_side"),
+            "stable_continuation_reason": (signal.details or {}).get("stable_continuation_reason"),
             "structural_vwap": structural_vwap,
             "bb_middle_1h": bb_middle_1h,
             "bb_upper_1h": bb_upper_1h,
@@ -3153,19 +3611,53 @@ class FundFlowDecisionEngine:
         }
         if symbol_signal_override:
             metadata["symbol_signal_override"] = symbol_signal_override
+        regime_state = self._build_macd_v2_4h_regime_state(
+            signal=signal,
+            tf_1h=tf_1h,
+            tf_4h=tf_4h,
+        )
+        metadata["macd_4h_regime_state"] = regime_state
+        regime_runtime_mode = str(regime_state.get("side_override_mode", "BOTH") or "BOTH")
+        regime_side = str(regime_state.get("side", "neutral") or "neutral")
+        long_allowed_by_regime = regime_runtime_mode in {"BOTH", "LONG_ONLY"}
+        short_allowed_by_regime = regime_runtime_mode in {"BOTH", "SHORT_ONLY"}
         take_profit_pct = self.take_profit_pct
         stop_loss_pct = self._normalize_pct_ratio(signal.stop_loss_pct, self.stop_loss_pct)
         
         # 无明确信号
         if signal.direction == 'neutral':
-            shrink_exit_direction = str((signal.details or {}).get("shrink_exit_direction", "") or "").upper()
-            shrink_exit_ready = bool((signal.details or {}).get("shrink_exit_ready", False))
+            if (
+                pos_side in {"LONG", "SHORT"}
+                and bool(regime_state.get("close_on_reverse", False))
+                and regime_side in {"long", "short"}
+                and (
+                    (pos_side == "LONG" and regime_side == "short")
+                    or (pos_side == "SHORT" and regime_side == "long")
+                )
+            ):
+                metadata["regime_reverse_close"] = {
+                    "position_side": pos_side,
+                    "regime_side": regime_side,
+                    "regime_state": regime_state.get("state"),
+                    "regime_phase": regime_state.get("phase"),
+                }
+                return FundFlowDecision(
+                    operation=Operation.CLOSE,
+                    symbol=symbol,
+                    target_portion_of_balance=1.0,
+                    reason=f"macd_v2_regime_reverse_close_{pos_side.lower()}_{regime_state.get('state', 'neutral')}",
+                    metadata=metadata,
+                )
+            shrink_exit_policy = macd_v2_engine.resolve_4h_shrink_exit_policy(
+                signal_details=signal.details if isinstance(signal.details, dict) else {},
+                position_side=pos_side,
+                position_context=current_pos if isinstance(current_pos, dict) else {},
+            )
             if (
                 pos_side
                 and self.macd_v2_config
                 and self.macd_v2_config.enable_4h_shrink_exit
-                and shrink_exit_ready
-                and shrink_exit_direction == pos_side
+                and bool(shrink_exit_policy.get("active", False))
             ):
                 pnl_ratio = self._rule_position_pnl_ratio(pos_side, current_pos, price)
                 if self.macd_v2_config.exit_4h_require_profit:
@@ -3174,9 +3666,17 @@ class FundFlowDecisionEngine:
                     shrink_exit_ok = pnl_ratio >= float(self.macd_v2_config.exit_4h_weak_loss_threshold)
                 if shrink_exit_ok:
                     metadata["shrink_exit"] = {
-                        "direction": shrink_exit_direction,
+                        "direction": str(shrink_exit_policy.get("shrink_exit_direction", "") or ""),
                         "ready": True,
                         "pnl_ratio": pnl_ratio,
+                        "mode": str(shrink_exit_policy.get("mode", "default") or "default"),
+                        "required_bars": int(shrink_exit_policy.get("required_bars", 0) or 0),
+                        "required_pct": float(shrink_exit_policy.get("required_pct", 0.0) or 0.0),
+                        "observed_bars": int(shrink_exit_policy.get("shrink_bars", 0) or 0),
+                        "observed_pct": float(shrink_exit_policy.get("shrink_pct", 0.0) or 0.0),
+                        "stable_continuation_active": bool(
+                            shrink_exit_policy.get("stable_continuation_active", False)
+                        ),
                     }
                     return FundFlowDecision(
                         operation=Operation.CLOSE,
@@ -3198,6 +3698,21 @@ class FundFlowDecisionEngine:
                     signal.vwap_score,
                     hold_reason,
                 )
+            if not pos_side:
+                regime_entry = self._build_macd_v2_regime_entry_decision(
+                    symbol=symbol,
+                    price=price,
+                    current_time=current_time,
+                    signal=signal,
+                    regime_state=regime_state,
+                    metadata=metadata,
+                    macd_v2_engine=macd_v2_engine,
+                )
+                if regime_entry is not None:
+                    return self._apply_symbol_side_override(
+                        regime_entry,
+                        runtime_override_mode=regime_runtime_mode,
+                    )
             return FundFlowDecision(
                 operation=Operation.HOLD,
                 symbol=symbol,
@@ -3207,6 +3722,19 @@ class FundFlowDecisionEngine:
         
         # 根据信号方向决定操作
         if signal.direction == 'long':
+            if not long_allowed_by_regime:
+                metadata["regime_block"] = {
+                    "blocked_signal_direction": "long",
+                    "regime_state": regime_state.get("state"),
+                    "regime_phase": regime_state.get("phase"),
+                    "regime_runtime_mode": regime_runtime_mode,
+                }
+                return FundFlowDecision(
+                    operation=Operation.HOLD,
+                    symbol=symbol,
+                    reason=f"macd_v2_regime_block_long_{regime_state.get('state', 'neutral')}",
+                    metadata=metadata,
+                )
             # 检查是否有反向持仓需要平仓
             if pos_side == "SHORT":
                 return FundFlowDecision(
@@ -3278,10 +3806,24 @@ class FundFlowDecisionEngine:
                     sl_execution=ExecutionMode.LIMIT,
                     reason=f"macd_v2_long_1h_{signal.signal_type_1h}_15m_{signal.entry_type_15m}_vwap_{signal.vwap_score:.2f}",
                     metadata=metadata
-                )
+                ),
+                runtime_override_mode=regime_runtime_mode,
             )
 
         elif signal.direction == 'short':
+            if not short_allowed_by_regime:
+                metadata["regime_block"] = {
+                    "blocked_signal_direction": "short",
+                    "regime_state": regime_state.get("state"),
+                    "regime_phase": regime_state.get("phase"),
+                    "regime_runtime_mode": regime_runtime_mode,
+                }
+                return FundFlowDecision(
+                    operation=Operation.HOLD,
+                    symbol=symbol,
+                    reason=f"macd_v2_regime_block_short_{regime_state.get('state', 'neutral')}",
+                    metadata=metadata,
+                )
             # 检查是否有反向持仓需要平仓
             if pos_side == "LONG":
                 return FundFlowDecision(
@@ -3353,7 +3895,8 @@ class FundFlowDecisionEngine:
                     sl_execution=ExecutionMode.LIMIT,
                     reason=f"macd_v2_short_1h_{signal.signal_type_1h}_15m_{signal.entry_type_15m}_vwap_{signal.vwap_score:.2f}",
                     metadata=metadata
-                )
+                ),
+                runtime_override_mode=regime_runtime_mode,
             )
         
         return FundFlowDecision(

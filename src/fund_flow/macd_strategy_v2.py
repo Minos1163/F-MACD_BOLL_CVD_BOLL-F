@@ -4,11 +4,11 @@ MACD多时间框架交易策略模块 V2.0 - VWAP + BOLL 增强版
 策略架构：
 - BOLL结构层（4H + 1H）→ 过滤逆势交易，确认价格在布林带中的位置
 - MACD_1H 定方向 → 负责执行方向与过滤
-- MACD_4H 主评分（权重50%）→ 负责主趋势打分，降低噪音
+- MACD_4H 主评分（权重55%）→ 负责主趋势打分，降低噪音
 - MACD_4H 确认增强（默认关闭）→ 预留附加趋势验证
-- VWAP 价值中枢层（权重15%）→ 判断多空偏向，偏离过滤
-- MACD_15M 跟随入场（权重20%）→ 入场时机
-- 成交量确认（权重15%）→ 入场质量验证
+- VWAP 价值中枢层（权重20%）→ 判断多空偏向，偏离过滤
+- MACD_15M 软确认（权重5%）→ 仅用于入场微调，不再作为 4H 主周期下的硬门槛
+- 成交量确认（权重20%）→ 入场质量验证
 
 扫描周期：每15分钟
 """
@@ -72,17 +72,17 @@ class MACDStrategyV2Config:
     vwap_retest_tolerance: float = 0.003
     
     # 评分权重
-    weight_1h_direction: float = 0.50  # 兼容旧配置键：未显式提供 weight_4h_direction 时作为回退
-    weight_4h_direction: float = 0.50  # 4H主趋势评分权重
+    weight_1h_direction: float = 0.00  # 兼容旧配置键：未显式提供 weight_4h_direction 时作为回退
+    weight_4h_direction: float = 0.55  # 4H主趋势评分权重
     weight_4h_enhancement: float = 0.00  # 4H附加增强权重（默认关闭，避免重复计分）
-    weight_vwap: float = 0.25  # 提权强化弱VWAP过滤
-    weight_15m_entry: float = 0.10  # 降低
-    weight_volume: float = 0.15  # 不变
+    weight_vwap: float = 0.20  # VWAP评分权重
+    weight_15m_entry: float = 0.05  # 15M入场时机评分权重（软确认）
+    weight_volume: float = 0.20  # 成交量确认评分权重
     
     # 入场阈值
     min_entry_score: float = 0.25
     min_signal_score: float = 0.850
-    red_bar_growing_min_signal_score: float = 0.870
+    red_bar_growing_min_signal_score: float = 0.850
     flip_bearish_min_signal_score: float = 0.840
     flip_bullish_min_signal_score: float = 0.840
 
@@ -106,10 +106,16 @@ class MACDStrategyV2Config:
     ema_slope_lookback_4h: int = 2  # 兼容旧配置：等价于BOLL中轨斜率lookback
     disable_red_bar_growing_long_entries: bool = False
     disable_green_bar_growing_entries: bool = True
-    primary_direction_timeframe: str = "1h"  # 1h=兼容旧逻辑, 4h=纯4H主趋势
+    disable_green_bar_shrinking_short_dual_pressure_entries: bool = True
+    disable_red_bar_shrinking_long_dual_support_entries: bool = True
+    primary_direction_timeframe: str = "4h"  # 默认使用4H主趋势，兼容旧配置时可显式切回1h
     require_1h_confirmation_when_4h_primary: bool = False
     allow_neutral_1h_confirmation: bool = False
     light_1h_confirmation_when_4h_primary: bool = False
+    enable_soft_15m_confirmation_when_4h_primary: bool = True
+    soft_15m_entry_score: float = 0.28
+    soft_15m_neutral_hist_multiple: float = 3.0
+    soft_15m_max_adverse_hist_multiple: float = 8.0
     enable_green_bar_growing_short_adx_1h_range_filter: bool = False
     green_bar_growing_short_min_adx_1h: float = 0.0
     green_bar_growing_short_max_adx_1h: float = 0.0
@@ -120,6 +126,25 @@ class MACDStrategyV2Config:
     preflip_trial_min_vwap_score: float = 0.06
     preflip_trial_entry_scale: float = 0.35
     preflip_trial_max_leverage: int = 2
+    enable_trial_short_below_structure_continuation_promotion: bool = False
+    trial_short_below_structure_promotion_min_signal_score: float = 0.82
+    trial_short_below_structure_promotion_min_vwap_score: float = 0.075
+    trial_short_below_structure_promotion_min_adx_1h: float = 25.0
+    trial_short_below_structure_promotion_min_4h_shrink_pct: float = 0.80
+    trial_short_below_structure_promotion_min_4h_shrink_bars: int = 6
+    enable_stable_bear_continuation: bool = True
+    stable_bear_continuation_min_signal_score: float = 0.82
+    stable_bear_continuation_min_vwap_score: float = 0.10
+    stable_bear_continuation_min_adx_1h: float = 20.0
+    stable_bear_continuation_min_4h_bars: int = 2
+    enable_stable_bull_continuation: bool = False
+    stable_bull_continuation_min_signal_score: float = 0.82
+    stable_bull_continuation_min_vwap_score: float = 0.10
+    stable_bull_continuation_min_adx_1h: float = 20.0
+    stable_bull_continuation_min_4h_bars: int = 2
+    enable_stable_continuation_slow_4h_shrink_exit: bool = True
+    stable_continuation_exit_4h_shrink_bars: int = 3
+    stable_continuation_exit_4h_min_shrink_pct: float = 0.35
     enable_4h_shrink_exit: bool = False
     exit_4h_shrink_bars: int = 2
     exit_4h_min_shrink_pct: float = 0.20
@@ -140,7 +165,7 @@ class MACDStrategyV2Config:
     overheat_growing_penalty: float = 0.12
     overheat_ema_multiplier_threshold: float = 1.2
     overheat_vwap_score_threshold: float = 0.10
-    min_vwap_score_for_entry: float = 0.20
+    min_vwap_score_for_entry: float = 0.12  # VWAP全局过滤
     
     # 止损配置
     use_dynamic_stop: bool = True
@@ -182,7 +207,20 @@ class MACDStrategyV2Config:
     short_filter_max_oi_delta_ratio: float = 0.0  # oi_delta_ratio < 0 (多头减仓)
     short_filter_min_vwap_deviation: float = 0.005  # price > vwap * 1.005
 
-    def resolve_signal_score_threshold(self, signal_type_1h: Optional[str]) -> float:
+    def resolve_signal_score_threshold(
+        self,
+        signal_type_1h: Optional[str],
+        stable_continuation_side: Optional[str] = None,
+    ) -> float:
+        continuation_side = str(stable_continuation_side or "").strip().lower()
+        if continuation_side == "short" and self.enable_stable_bear_continuation:
+            threshold = float(self.stable_bear_continuation_min_signal_score)
+            if threshold > 0:
+                return threshold
+        if continuation_side == "long" and self.enable_stable_bull_continuation:
+            threshold = float(self.stable_bull_continuation_min_signal_score)
+            if threshold > 0:
+                return threshold
         signal_type = str(signal_type_1h or "").strip().lower()
         thresholds = {
             "red_bar_growing": self.red_bar_growing_min_signal_score,
@@ -242,10 +280,53 @@ class MACDStrategyV2Engine:
 
     def _build_debug_details(self, **kwargs: Any) -> Dict[str, Any]:
         details = dict(kwargs)
+        details["stage_path"] = self._normalize_stage_path(details.get("stage_path"))
+        stage = str(details.get("stage") or "").strip()
+        if stage and (not details["stage_path"] or details["stage_path"][-1] != stage):
+            details["stage_path"].append(stage)
+        details["stage_path_text"] = " > ".join(details["stage_path"]) if details["stage_path"] else ""
         details["min_signal_score"] = self.config.min_signal_score
         details["min_entry_score"] = self.config.min_entry_score
         details["min_vwap_score_for_entry"] = self.config.min_vwap_score_for_entry
         return details
+
+    @staticmethod
+    def _normalize_stage_path(stage_path: Any) -> List[str]:
+        if isinstance(stage_path, list):
+            seen: List[str] = []
+            for item in stage_path:
+                stage = str(item or "").strip()
+                if stage and (not seen or seen[-1] != stage):
+                    seen.append(stage)
+            return seen
+        return []
+
+    def _set_stage(self, details: Dict[str, Any], stage: str, **extra: Any) -> Dict[str, Any]:
+        payload = dict(details or {})
+        normalized = self._normalize_stage_path(payload.get("stage_path"))
+        stage_name = str(stage or "").strip()
+        if stage_name and (not normalized or normalized[-1] != stage_name):
+            normalized.append(stage_name)
+        payload["stage"] = stage_name
+        payload["stage_path"] = normalized
+        payload["stage_path_text"] = " > ".join(normalized) if normalized else ""
+        if extra:
+            payload.update(extra)
+        return payload
+
+    @staticmethod
+    def _extract_reject_reason_metadata(reason: str) -> Tuple[str, str]:
+        text = str(reason or "").strip()
+        if not text:
+            return "unknown_reject", ""
+        open_idx = text.find("(")
+        close_idx = text.rfind(")")
+        if open_idx > 0 and close_idx > open_idx:
+            return text[:open_idx].strip(), text[open_idx + 1:close_idx].strip()
+        if ":" in text:
+            code, detail = text.split(":", 1)
+            return code.strip(), detail.strip()
+        return text, ""
 
     def _neutral_signal(
         self,
@@ -271,6 +352,12 @@ class MACDStrategyV2Engine:
     ) -> MACDSignalV2:
         payload = dict(details or {})
         payload["reason"] = reason
+        payload["reject_stage"] = payload.get("stage") or "unknown"
+        reject_code, reject_detail = self._extract_reject_reason_metadata(reason)
+        payload["reject_reason_code"] = reject_code
+        payload["reject_reason_detail"] = reject_detail
+        payload["stage_path"] = self._normalize_stage_path(payload.get("stage_path"))
+        payload["stage_path_text"] = " > ".join(payload["stage_path"]) if payload["stage_path"] else ""
         if veto_type != VetoType.NONE and "veto_type" not in payload:
             payload["veto_type"] = veto_type.value
         self._last_analysis = payload.copy()
@@ -594,6 +681,32 @@ class MACDStrategyV2Engine:
             cursor -= 1
         return count
 
+    @staticmethod
+    def _count_consecutive_macd_same_sign_bars(
+        macd_hist: np.ndarray,
+        idx: int,
+        *,
+        positive: bool,
+        min_abs_value: float = 0.0,
+    ) -> int:
+        values = np.asarray(macd_hist[: idx + 1], dtype=float)
+        if values.size <= 0:
+            return 0
+
+        count = 0
+        cursor = values.size - 1
+        while cursor >= 0:
+            current = float(values[cursor])
+            if abs(current) <= min_abs_value:
+                break
+            if positive and current <= 0:
+                break
+            if not positive and current >= 0:
+                break
+            count += 1
+            cursor -= 1
+        return count
+
     def _build_4h_shrink_context(
         self,
         macd_hist_4h: np.ndarray,
@@ -623,6 +736,321 @@ class MACDStrategyV2Engine:
                 and shrink_bars >= max(1, int(self.config.exit_4h_shrink_bars))
                 and shrink_pct >= max(0.0, float(self.config.exit_4h_min_shrink_pct))
             ),
+        }
+
+    def _build_stable_trend_context(
+        self,
+        macd_hist_4h: np.ndarray,
+        idx_4h: int,
+    ) -> Dict[str, Any]:
+        values = np.asarray(macd_hist_4h[: idx_4h + 1], dtype=float)
+        current_hist = float(values[-1]) if values.size > 0 else 0.0
+        min_abs_value = max(float(self.config.macd_threshold), 1e-8)
+        positive_bars = self._count_consecutive_macd_same_sign_bars(
+            macd_hist_4h,
+            idx_4h,
+            positive=True,
+            min_abs_value=min_abs_value,
+        )
+        negative_bars = self._count_consecutive_macd_same_sign_bars(
+            macd_hist_4h,
+            idx_4h,
+            positive=False,
+            min_abs_value=min_abs_value,
+        )
+        return {
+            "hist_current": current_hist,
+            "positive_bars": positive_bars,
+            "negative_bars": negative_bars,
+            "bull_active": bool(
+                current_hist > min_abs_value
+                and positive_bars >= max(1, int(self.config.stable_bull_continuation_min_4h_bars))
+            ),
+            "bear_active": bool(
+                current_hist < -min_abs_value
+                and negative_bars >= max(1, int(self.config.stable_bear_continuation_min_4h_bars))
+            ),
+        }
+
+    def _resolve_stable_continuation_direction(
+        self,
+        *,
+        primary_mode: str,
+        direction_1h: Optional[str],
+        details_1h: Dict[str, Any],
+        stable_trend_context: Dict[str, Any],
+    ) -> Tuple[Optional[str], Dict[str, Any]]:
+        debug: Dict[str, Any] = {
+            "stable_continuation_direction_recovered": False,
+        }
+        if primary_mode != "4h" or direction_1h not in {"long", "short"}:
+            debug["stable_continuation_direction_reason"] = "primary_mode_or_1h_not_eligible"
+            return None, debug
+
+        signal_type_1h = str(details_1h.get("signal_type") or "").strip().lower()
+        if direction_1h == "short":
+            if not self.config.enable_stable_bear_continuation:
+                debug["stable_continuation_direction_reason"] = "stable_bear_disabled"
+                return None, debug
+            if not bool(stable_trend_context.get("bear_active", False)):
+                debug["stable_continuation_direction_reason"] = "4h_bear_not_persistent"
+                return None, debug
+            if signal_type_1h not in {"flip_bearish", "green_bar_growing"}:
+                debug["stable_continuation_direction_reason"] = "1h_short_signal_not_supported"
+                return None, debug
+        else:
+            if not self.config.enable_stable_bull_continuation:
+                debug["stable_continuation_direction_reason"] = "stable_bull_disabled"
+                return None, debug
+            if not bool(stable_trend_context.get("bull_active", False)):
+                debug["stable_continuation_direction_reason"] = "4h_bull_not_persistent"
+                return None, debug
+            if signal_type_1h not in {"flip_bullish", "red_bar_growing"}:
+                debug["stable_continuation_direction_reason"] = "1h_long_signal_not_supported"
+                return None, debug
+
+        debug.update(
+            stable_continuation_direction_recovered=True,
+            stable_continuation_direction_reason="stable_4h_hist_persistence",
+            stable_continuation_direction_side=direction_1h,
+        )
+        return direction_1h, debug
+
+    def _evaluate_stable_continuation(
+        self,
+        *,
+        primary_mode: str,
+        trade_direction: Optional[str],
+        signal_type_1h: Optional[str],
+        entry_type_15m: Optional[str],
+        vwap_score: float,
+        vwap_state: str,
+        adx_1h: float,
+        stable_trend_context: Dict[str, Any],
+        is_trial_entry: bool,
+    ) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "stable_continuation_active": False,
+            "stable_continuation_side": None,
+            "stable_continuation_reason": "inactive",
+        }
+        if primary_mode != "4h" or trade_direction not in {"long", "short"} or is_trial_entry:
+            result["stable_continuation_reason"] = "primary_mode_or_trial_not_eligible"
+            return result
+
+        side = str(trade_direction)
+        signal_type = str(signal_type_1h or "").strip().lower()
+        entry_type = str(entry_type_15m or "").strip().lower()
+        state = str(vwap_state or "").strip().lower()
+
+        if side == "short":
+            enabled = bool(self.config.enable_stable_bear_continuation)
+            min_vwap_score = float(self.config.stable_bear_continuation_min_vwap_score)
+            min_adx_1h = float(self.config.stable_bear_continuation_min_adx_1h)
+            min_4h_bars = max(1, int(self.config.stable_bear_continuation_min_4h_bars))
+            hist_bars = int(stable_trend_context.get("negative_bars", 0) or 0)
+            stable_active = bool(stable_trend_context.get("bear_active", False))
+            allowed_states = {
+                "short_dual_pressure",
+                "short_retest_reject",
+                "short_below_session_above_structure",
+            }
+            allowed_signal_types = {"flip_bearish", "green_bar_growing"}
+            allowed_entry_types = {"green_bar_growing"}
+        else:
+            enabled = bool(self.config.enable_stable_bull_continuation)
+            min_vwap_score = float(self.config.stable_bull_continuation_min_vwap_score)
+            min_adx_1h = float(self.config.stable_bull_continuation_min_adx_1h)
+            min_4h_bars = max(1, int(self.config.stable_bull_continuation_min_4h_bars))
+            hist_bars = int(stable_trend_context.get("positive_bars", 0) or 0)
+            stable_active = bool(stable_trend_context.get("bull_active", False))
+            allowed_states = {"long_dual_support", "long_reclaim_confirmed"}
+            allowed_signal_types = {"flip_bullish", "red_bar_growing"}
+            allowed_entry_types = {"red_bar_growing"}
+
+        result.update(
+            stable_continuation_side=side,
+            stable_continuation_hist_bars=hist_bars,
+            stable_continuation_min_4h_bars=min_4h_bars,
+            stable_continuation_min_adx_1h=min_adx_1h,
+            stable_continuation_min_vwap_score=min_vwap_score,
+            stable_continuation_signal_type_1h=signal_type,
+            stable_continuation_entry_type_15m=entry_type,
+            stable_continuation_vwap_state=state,
+        )
+
+        if not enabled:
+            result["stable_continuation_reason"] = "continuation_disabled"
+            return result
+        if not stable_active or hist_bars < min_4h_bars:
+            result["stable_continuation_reason"] = "4h_hist_not_persistent"
+            return result
+        if signal_type not in allowed_signal_types:
+            result["stable_continuation_reason"] = "1h_signal_not_supported"
+            return result
+        if entry_type not in allowed_entry_types:
+            result["stable_continuation_reason"] = "15m_entry_not_supported"
+            return result
+        if float(adx_1h) < min_adx_1h:
+            result["stable_continuation_reason"] = "adx_1h_too_low"
+            return result
+        if float(vwap_score) < min_vwap_score:
+            result["stable_continuation_reason"] = "vwap_score_too_low"
+            return result
+        if state not in allowed_states:
+            result["stable_continuation_reason"] = "vwap_state_not_supported"
+            return result
+
+        result.update(
+            stable_continuation_active=True,
+            stable_continuation_reason="stable_continuation_active",
+        )
+        return result
+
+    def _evaluate_trial_short_below_structure_continuation_promotion(
+        self,
+        *,
+        primary_mode: str,
+        trade_direction: Optional[str],
+        signal_type_1h: Optional[str],
+        entry_type_15m: Optional[str],
+        vwap_state: str,
+        vwap_score: float,
+        adx_1h: float,
+        signal_score: float,
+        shrink_4h_context: Dict[str, Any],
+        is_trial_entry: bool,
+    ) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "trial_short_below_structure_promotion_active": False,
+            "trial_short_below_structure_promotion_reason": "inactive",
+        }
+        if not bool(self.config.enable_trial_short_below_structure_continuation_promotion):
+            result["trial_short_below_structure_promotion_reason"] = "promotion_disabled"
+            return result
+        if not is_trial_entry:
+            result["trial_short_below_structure_promotion_reason"] = "not_trial_entry"
+            return result
+        if primary_mode != "4h" or trade_direction != "short":
+            result["trial_short_below_structure_promotion_reason"] = "direction_not_eligible"
+            return result
+
+        signal_type = str(signal_type_1h or "").strip().lower()
+        entry_type = str(entry_type_15m or "").strip().lower()
+        state = str(vwap_state or "").strip().lower()
+        shrink_pct = max(0.0, float(shrink_4h_context.get("shrink_pct", 0.0) or 0.0))
+        shrink_bars = max(0, int(shrink_4h_context.get("shrink_bars", 0) or 0))
+        min_signal_score = float(self.config.trial_short_below_structure_promotion_min_signal_score)
+        min_vwap_score = float(self.config.trial_short_below_structure_promotion_min_vwap_score)
+        min_adx_1h = float(self.config.trial_short_below_structure_promotion_min_adx_1h)
+        min_shrink_pct = float(self.config.trial_short_below_structure_promotion_min_4h_shrink_pct)
+        min_shrink_bars = max(1, int(self.config.trial_short_below_structure_promotion_min_4h_shrink_bars))
+
+        result.update(
+            trial_short_below_structure_promotion_signal_type_1h=signal_type,
+            trial_short_below_structure_promotion_entry_type_15m=entry_type,
+            trial_short_below_structure_promotion_vwap_state=state,
+            trial_short_below_structure_promotion_signal_score=signal_score,
+            trial_short_below_structure_promotion_vwap_score=vwap_score,
+            trial_short_below_structure_promotion_adx_1h=adx_1h,
+            trial_short_below_structure_promotion_shrink_pct=shrink_pct,
+            trial_short_below_structure_promotion_shrink_bars=shrink_bars,
+            trial_short_below_structure_promotion_min_signal_score=min_signal_score,
+            trial_short_below_structure_promotion_min_vwap_score=min_vwap_score,
+            trial_short_below_structure_promotion_min_adx_1h=min_adx_1h,
+            trial_short_below_structure_promotion_min_shrink_pct=min_shrink_pct,
+            trial_short_below_structure_promotion_min_shrink_bars=min_shrink_bars,
+        )
+
+        if signal_type != "green_bar_growing":
+            result["trial_short_below_structure_promotion_reason"] = "1h_signal_not_supported"
+            return result
+        if entry_type not in {"flip_bearish", "green_bar_growing"}:
+            result["trial_short_below_structure_promotion_reason"] = "15m_entry_not_supported"
+            return result
+        if state != "short_below_session_above_structure":
+            result["trial_short_below_structure_promotion_reason"] = "vwap_state_not_supported"
+            return result
+        if float(signal_score) < min_signal_score:
+            result["trial_short_below_structure_promotion_reason"] = "signal_score_too_low"
+            return result
+        if float(vwap_score) < min_vwap_score:
+            result["trial_short_below_structure_promotion_reason"] = "vwap_score_too_low"
+            return result
+        if float(adx_1h) < min_adx_1h:
+            result["trial_short_below_structure_promotion_reason"] = "adx_1h_too_low"
+            return result
+        if shrink_pct < min_shrink_pct:
+            result["trial_short_below_structure_promotion_reason"] = "4h_shrink_pct_too_low"
+            return result
+        if shrink_bars < min_shrink_bars:
+            result["trial_short_below_structure_promotion_reason"] = "4h_shrink_bars_too_low"
+            return result
+
+        result.update(
+            trial_short_below_structure_promotion_active=True,
+            trial_short_below_structure_promotion_reason="trial_short_below_structure_promoted",
+        )
+        return result
+
+    def resolve_4h_shrink_exit_policy(
+        self,
+        *,
+        signal_details: Optional[Dict[str, Any]],
+        position_side: str,
+        position_context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        details = signal_details if isinstance(signal_details, dict) else {}
+        pos = position_context if isinstance(position_context, dict) else {}
+        side = str(position_side or "").strip().upper()
+        shrink_exit_direction = str(details.get("shrink_exit_direction", "") or "").strip().upper()
+        shrink_pct = max(0.0, float(details.get("macd_4h_shrink_pct", 0.0) or 0.0))
+        shrink_bars = max(0, int(details.get("macd_4h_shrink_bars", 0) or 0))
+
+        default_required_bars = max(1, int(self.config.exit_4h_shrink_bars))
+        default_required_pct = max(0.0, float(self.config.exit_4h_min_shrink_pct))
+        continuation_required_bars = max(
+            default_required_bars,
+            int(self.config.stable_continuation_exit_4h_shrink_bars),
+        )
+        continuation_required_pct = max(
+            default_required_pct,
+            float(self.config.stable_continuation_exit_4h_min_shrink_pct),
+        )
+
+        stable_continuation_active = False
+        continuation_source = ""
+        pos_continuation_active = bool(pos.get("stable_continuation_active", False))
+        pos_continuation_side = str(pos.get("stable_continuation_side", "") or "").strip().upper()
+        if pos_continuation_active and pos_continuation_side == side:
+            stable_continuation_active = True
+            continuation_source = "position_context"
+
+        required_bars = default_required_bars
+        required_pct = default_required_pct
+        mode = "default"
+        if self.config.enable_stable_continuation_slow_4h_shrink_exit and stable_continuation_active:
+            required_bars = continuation_required_bars
+            required_pct = continuation_required_pct
+            mode = "stable_continuation_slow"
+
+        direction_match = bool(side and shrink_exit_direction == side)
+        active = bool(
+            direction_match
+            and shrink_bars >= required_bars
+            and shrink_pct >= required_pct
+        )
+        return {
+            "active": active,
+            "mode": mode,
+            "direction_match": direction_match,
+            "shrink_exit_direction": shrink_exit_direction,
+            "shrink_pct": shrink_pct,
+            "shrink_bars": shrink_bars,
+            "required_bars": required_bars,
+            "required_pct": required_pct,
+            "stable_continuation_active": stable_continuation_active,
+            "continuation_source": continuation_source,
         }
     
     # ==================== MACD 方向检测 ====================
@@ -714,7 +1142,7 @@ class MACDStrategyV2Engine:
         details_4h: Dict[str, Any],
     ) -> Tuple[Optional[str], Optional[str], Dict[str, Any]]:
         """根据配置决定交易主方向，并在 4H 主方向模式下检查 1H 辅助确认。"""
-        mode = str(self.config.primary_direction_timeframe or "1h").strip().lower()
+        mode = str(self.config.primary_direction_timeframe or "4h").strip().lower()
         debug: Dict[str, Any] = {
             "primary_direction_timeframe": mode,
             "direction_1h": direction_1h or "neutral",
@@ -738,6 +1166,12 @@ class MACDStrategyV2Engine:
             return None, "1H无确认信号", debug
 
         if direction_1h != direction_4h:
+            if self.use_light_1h_confirmation():
+                debug["confirmation_status"] = "opposite_light_allowed"
+                debug["confirmation_signal_type_1h"] = details_1h.get("signal_type")
+                debug["light_confirmation_soft_pass"] = True
+                debug["light_confirmation_opposite_direction"] = direction_1h
+                return direction_4h, None, debug
             debug["confirmation_status"] = "opposite"
             return None, f"1H方向反向({direction_1h}->{direction_4h})", debug
 
@@ -746,8 +1180,55 @@ class MACDStrategyV2Engine:
         return direction_4h, None, debug
 
     def use_light_1h_confirmation(self) -> bool:
-        mode = str(self.config.primary_direction_timeframe or "1h").strip().lower()
+        mode = str(self.config.primary_direction_timeframe or "4h").strip().lower()
         return mode == "4h" and bool(self.config.light_1h_confirmation_when_4h_primary)
+
+    def use_soft_15m_confirmation(self) -> bool:
+        mode = str(self.config.primary_direction_timeframe or "4h").strip().lower()
+        return mode == "4h" and bool(self.config.enable_soft_15m_confirmation_when_4h_primary)
+
+    def soften_15m_entry_when_4h_primary(
+        self,
+        can_enter: bool,
+        entry_score_15m: float,
+        details_15m: Dict[str, Any],
+        direction: str,
+    ) -> Tuple[bool, float, Dict[str, Any]]:
+        """4H 主周期下放宽 15m 准入，只保留弱逆势和近零轴容忍。"""
+        if can_enter or not self.use_soft_15m_confirmation():
+            return can_enter, entry_score_15m, details_15m
+
+        details = dict(details_15m or {})
+        hist_0 = float(details.get("hist_current", 0.0) or 0.0)
+        hist_1 = float(details.get("hist_prev", hist_0) or hist_0)
+        neutral_band = max(
+            abs(self.config.macd_threshold) * max(float(self.config.soft_15m_neutral_hist_multiple), 1.0),
+            1e-9,
+        )
+        max_adverse = neutral_band * max(float(self.config.soft_15m_max_adverse_hist_multiple), 1.0)
+        soft_score = max(entry_score_15m, float(self.config.soft_15m_entry_score))
+
+        if direction == "long":
+            near_neutral = hist_0 >= -neutral_band
+            recovering = hist_0 > hist_1 and hist_0 >= -max_adverse
+            if near_neutral or recovering:
+                details["soft_15m_confirmation"] = True
+                details["soft_15m_confirmation_reason"] = "near_neutral" if near_neutral else "recovering"
+                details["entry_type"] = "soft_long_neutral" if near_neutral else "soft_long_recovery"
+                details["base_entry_score"] = soft_score
+                return True, soft_score, details
+
+        elif direction == "short":
+            near_neutral = hist_0 <= neutral_band
+            recovering = hist_0 < hist_1 and hist_0 <= max_adverse
+            if near_neutral or recovering:
+                details["soft_15m_confirmation"] = True
+                details["soft_15m_confirmation_reason"] = "near_neutral" if near_neutral else "recovering"
+                details["entry_type"] = "soft_short_neutral" if near_neutral else "soft_short_recovery"
+                details["base_entry_score"] = soft_score
+                return True, soft_score, details
+
+        return can_enter, entry_score_15m, details
     
     # ==================== MACD_4H 确认增强 ====================
     
@@ -1517,7 +1998,7 @@ class MACDStrategyV2Engine:
             bb_upper_4h = float(upper_4h[-1])
             bb_lower_4h = float(lower_4h[-1])
 
-        primary_mode = str(self.config.primary_direction_timeframe or "1h").strip().lower()
+        primary_mode = str(self.config.primary_direction_timeframe or "4h").strip().lower()
         light_1h_confirmation = self.use_light_1h_confirmation()
 
         # ========== Step 1: MACD_1H 辅助方向状态 ==========
@@ -1535,6 +2016,7 @@ class MACDStrategyV2Engine:
         signal_type_4h = str(details_4h.get("signal_type", ""))
         signal_strength_4h = float(details_4h.get("signal_strength", 0.0) or 0.0)
         shrink_4h_context = self._build_4h_shrink_context(macd_hist_4h, idx_4h, signal_type_4h)
+        stable_trend_context = self._build_stable_trend_context(macd_hist_4h, idx_4h)
         debug_details.update(
             primary_timeframe=primary_mode,
             direction_4h=direction_4h or "neutral",
@@ -1549,6 +2031,11 @@ class MACDStrategyV2Engine:
             macd_4h_shrink_exit_ready=shrink_4h_context["shrink_exit_ready"],
             shrink_exit_direction=shrink_4h_context["exit_direction"],
             shrink_exit_ready=shrink_4h_context["shrink_exit_ready"],
+            stable_4h_hist_current=stable_trend_context["hist_current"],
+            stable_4h_positive_bars=stable_trend_context["positive_bars"],
+            stable_4h_negative_bars=stable_trend_context["negative_bars"],
+            stable_4h_bull_active=stable_trend_context["bull_active"],
+            stable_4h_bear_active=stable_trend_context["bear_active"],
         )
 
         trade_direction: Optional[str] = None
@@ -1556,6 +2043,8 @@ class MACDStrategyV2Engine:
         direction_debug: Dict[str, Any] = {}
         is_trial_entry = False
         entry_scale = 1.0
+        stable_continuation_active = False
+        stable_continuation_side: Optional[str] = None
 
         preflip_candidate_direction = shrink_4h_context.get("preflip_direction")
         preflip_enabled = (
@@ -1576,15 +2065,18 @@ class MACDStrategyV2Engine:
                 "preflip_min_shrink_pct": min_preflip_shrink_pct,
             }
             if direction_1h is None:
-                direction_reject_reason = "1H无预翻转确认信号"
-                direction_debug["preflip_confirmation_status"] = "missing"
+                if self.config.allow_neutral_1h_confirmation:
+                    direction_debug["preflip_confirmation_status"] = "neutral_allowed"
+                else:
+                    direction_reject_reason = "1H无预翻转确认信号"
+                    direction_debug["preflip_confirmation_status"] = "missing"
             elif direction_1h != preflip_candidate_direction:
                 direction_reject_reason = f"1H预翻转方向不一致({direction_1h}->{preflip_candidate_direction})"
                 direction_debug["preflip_confirmation_status"] = "opposite"
-            elif shrink_pct < min_preflip_shrink_pct:
+            if direction_reject_reason is None and shrink_pct < min_preflip_shrink_pct:
                 direction_reject_reason = f"4H预翻转缩短不足({shrink_pct:.2f}<{min_preflip_shrink_pct:.2f})"
                 direction_debug["preflip_confirmation_status"] = "insufficient_shrink"
-            else:
+            elif direction_reject_reason is None:
                 trade_direction = preflip_candidate_direction
                 is_trial_entry = True
                 entry_scale = self._clamp(self.config.preflip_trial_entry_scale, 0.05, 1.0)
@@ -1600,6 +2092,17 @@ class MACDStrategyV2Engine:
                 direction_4h=direction_4h,
                 details_4h=details_4h,
             )
+            if trade_direction is None:
+                recovered_direction, continuation_direction_debug = self._resolve_stable_continuation_direction(
+                    primary_mode=primary_mode,
+                    direction_1h=direction_1h,
+                    details_1h=details_1h,
+                    stable_trend_context=stable_trend_context,
+                )
+                direction_debug.update(continuation_direction_debug)
+                if recovered_direction is not None:
+                    trade_direction = recovered_direction
+                    direction_reject_reason = None
         debug_details.update(
             **direction_debug,
             trade_direction=trade_direction or "neutral",
@@ -1628,8 +2131,9 @@ class MACDStrategyV2Engine:
             bb_lower_4h=bb_lower_4h,
             direction=trade_direction
         )
-        debug_details.update(
-            stage="boll_structure",
+        debug_details = self._set_stage(
+            debug_details,
+            "boll_structure",
             ema_multiplier=ema_multiplier,
             ema_status=ema_status,
             ema_veto=ema_veto.value if ema_veto else VetoType.NONE.value,
@@ -1665,8 +2169,9 @@ class MACDStrategyV2Engine:
                 bb_lower_1h,
                 details_1h.get('signal_type', '')
             )
-            debug_details.update(
-                stage="boll_deviation",
+            debug_details = self._set_stage(
+                debug_details,
+                "boll_deviation",
                 bb_middle_deviation=abs(close_price - bb_middle_1h) / bb_middle_1h if bb_middle_1h > 0 else 0.0,
                 deviation_veto=deviation_veto.value if deviation_veto else VetoType.NONE.value,
             )
@@ -1683,8 +2188,9 @@ class MACDStrategyV2Engine:
                     ),
                 )
         else:
-            debug_details.update(
-                stage="boll_deviation",
+            debug_details = self._set_stage(
+                debug_details,
+                "boll_deviation",
                 bb_middle_deviation=abs(close_price - bb_middle_1h) / bb_middle_1h if bb_middle_1h > 0 else 0.0,
                 deviation_veto=VetoType.NONE.value,
                 deviation_filter_skipped=True,
@@ -1729,8 +2235,9 @@ class MACDStrategyV2Engine:
         vwap_state = str(vwap_details.get("state", "unknown"))
         vwap_location_score = float(vwap_details.get("location_score", 0.0))
         structural_vwap_deviation = float(vwap_details.get("structural_deviation", 0.0))
-        debug_details.update(
-            stage="vwap",
+        debug_details = self._set_stage(
+            debug_details,
+            "vwap",
             vwap_score=vwap_score,
             vwap_deviation=vwap_deviation,
             vwap_state=vwap_state,
@@ -1781,8 +2288,9 @@ class MACDStrategyV2Engine:
                 structural_deviation=structural_vwap_deviation,
             )
             if not vwap_context_ok:
-                debug_details.update(
-                    stage="flip_bearish_vwap_filter",
+                debug_details = self._set_stage(
+                    debug_details,
+                    "flip_bearish_vwap_filter",
                     flip_bearish_vwap_context_passed=False,
                     flip_bearish_vwap_context_reasons=vwap_context_reasons,
                     **vwap_context_details,
@@ -1801,17 +2309,69 @@ class MACDStrategyV2Engine:
                     ),
                 )
         else:
-            debug_details.update(
-                stage="flip_bearish_vwap_filter",
+            debug_details = self._set_stage(
+                debug_details,
+                "flip_bearish_vwap_filter",
                 flip_bearish_vwap_context_skipped=True,
+            )
+
+        if (
+            trade_direction == 'short'
+            and details_1h.get('signal_type') == 'green_bar_shrinking'
+            and vwap_state == 'short_dual_pressure'
+            and self.config.disable_green_bar_shrinking_short_dual_pressure_entries
+        ):
+            debug_details = self._set_stage(
+                debug_details,
+                "shrinking_state_filter",
+                shrinking_state_filter_reason="green_bar_shrinking_short_dual_pressure",
+            )
+            return self._neutral_signal(
+                reason='green_bar_shrinking_short_dual_pressure_disabled',
+                signal_type_1h=details_1h.get('signal_type'),
+                vwap_score=vwap_score,
+                vwap_deviation=vwap_deviation,
+                vwap_state=vwap_state,
+                vwap_location_score=vwap_location_score,
+                ema_multiplier=ema_multiplier,
+                ema_structure_status=ema_status,
+                details=self._build_debug_details(
+                    **debug_details,
+                ),
+            )
+
+        if (
+            trade_direction == 'long'
+            and details_1h.get('signal_type') == 'red_bar_shrinking'
+            and vwap_state == 'long_dual_support'
+            and self.config.disable_red_bar_shrinking_long_dual_support_entries
+        ):
+            debug_details = self._set_stage(
+                debug_details,
+                "shrinking_state_filter",
+                shrinking_state_filter_reason="red_bar_shrinking_long_dual_support",
+            )
+            return self._neutral_signal(
+                reason='red_bar_shrinking_long_dual_support_disabled',
+                signal_type_1h=details_1h.get('signal_type'),
+                vwap_score=vwap_score,
+                vwap_deviation=vwap_deviation,
+                vwap_state=vwap_state,
+                vwap_location_score=vwap_location_score,
+                ema_multiplier=ema_multiplier,
+                ema_structure_status=ema_status,
+                details=self._build_debug_details(
+                    **debug_details,
+                ),
             )
 
         # ========== Step 4: MACD_4H 确认增强 ==========
         is_4h_enhanced, enhancement_score = self.check_4h_macd_enhancement(
             macd_hist_4h, idx_4h, trade_direction
         )
-        debug_details.update(
-            stage="4h_enhancement",
+        debug_details = self._set_stage(
+            debug_details,
+            "4h_enhancement",
             is_4h_enhanced=is_4h_enhanced,
             enhancement_score=enhancement_score,
         )
@@ -1824,9 +2384,16 @@ class MACDStrategyV2Engine:
             bb_lower_15m=bb_lower_15m,
             close_15m=close_15m
         )
+        can_enter, entry_score_15m, details_15m = self.soften_15m_entry_when_4h_primary(
+            can_enter=can_enter,
+            entry_score_15m=entry_score_15m,
+            details_15m=details_15m,
+            direction=trade_direction,
+        )
         entry_type_15m = details_15m.get('entry_type', '')
-        debug_details.update(
-            stage="15m_entry",
+        debug_details = self._set_stage(
+            debug_details,
+            "15m_entry",
             entry_type_15m=entry_type_15m,
             entry_score_15m=entry_score_15m,
             entry_refine_15m=details_15m.get("ema_15m_refine"),
@@ -1854,6 +2421,22 @@ class MACDStrategyV2Engine:
 
         signal_type_1h = details_1h.get('signal_type', '')
         entry_refine_15m = details_15m.get("ema_15m_refine")
+        stable_continuation_eval = self._evaluate_stable_continuation(
+            primary_mode=primary_mode,
+            trade_direction=trade_direction,
+            signal_type_1h=signal_type_1h,
+            entry_type_15m=entry_type_15m,
+            vwap_score=vwap_score,
+            vwap_state=vwap_state,
+            adx_1h=adx_1h,
+            stable_trend_context=stable_trend_context,
+            is_trial_entry=is_trial_entry,
+        )
+        stable_continuation_active = bool(stable_continuation_eval.get("stable_continuation_active", False))
+        stable_continuation_side = (
+            str(stable_continuation_eval.get("stable_continuation_side") or "").strip().lower() or None
+        )
+        debug_details.update(**stable_continuation_eval)
 
         if entry_score_15m < self.config.min_entry_score:
             return self._neutral_signal(
@@ -1872,9 +2455,15 @@ class MACDStrategyV2Engine:
                 ),
             )
 
-        if strict_1h_filters_enabled and self.config.disable_flip_bullish_entries and signal_type_1h == 'flip_bullish':
-            debug_details.update(
-                stage="flip_bullish_disabled",
+        if (
+            strict_1h_filters_enabled
+            and not stable_continuation_active
+            and self.config.disable_flip_bullish_entries
+            and signal_type_1h == 'flip_bullish'
+        ):
+            debug_details = self._set_stage(
+                debug_details,
+                "flip_bullish_disabled",
                 flip_bullish_disabled=True,
             )
             return self._neutral_signal(
@@ -1893,7 +2482,12 @@ class MACDStrategyV2Engine:
                 ),
             )
 
-        if strict_1h_filters_enabled and self.config.enable_flip_bullish_strict_filter and signal_type_1h == 'flip_bullish':
+        if (
+            strict_1h_filters_enabled
+            and not stable_continuation_active
+            and self.config.enable_flip_bullish_strict_filter
+            and signal_type_1h == 'flip_bullish'
+        ):
             strict_filter_reasons: List[str] = []
             if self.config.flip_bullish_require_15m_growing and entry_type_15m != 'red_bar_growing':
                 strict_filter_reasons.append(f"15m_entry={entry_type_15m or 'none'}")
@@ -1904,8 +2498,9 @@ class MACDStrategyV2Engine:
                     f"vwap_score={vwap_score:.2f}<{self.config.flip_bullish_min_vwap_score:.2f}"
                 )
             if strict_filter_reasons:
-                debug_details.update(
-                    stage="flip_bullish_strict_filter",
+                debug_details = self._set_stage(
+                    debug_details,
+                    "flip_bullish_strict_filter",
                     flip_bullish_filter_reasons=strict_filter_reasons,
                     entry_refine_15m=entry_refine_15m,
                 )
@@ -1930,6 +2525,7 @@ class MACDStrategyV2Engine:
             and trade_direction == 'long'
             and signal_type_1h == 'flip_bullish'
             and self.config.enable_flip_bullish_cvd_context_filter
+            and not stable_continuation_active
         ):
             cvd_context_reasons: List[str] = []
             max_upper_wick_ratio = float(self.config.flip_bullish_max_cvd_upper_wick_ratio)
@@ -1951,8 +2547,9 @@ class MACDStrategyV2Engine:
                     f"cvd_1h_delta_ratio={float(cvd_1h_delta_ratio):.4f}<{min_cvd_1h_delta_ratio:.4f}"
                 )
             if cvd_context_reasons:
-                debug_details.update(
-                    stage="flip_bullish_cvd_context_filter",
+                debug_details = self._set_stage(
+                    debug_details,
+                    "flip_bullish_cvd_context_filter",
                     flip_bullish_cvd_context_filter_reasons=cvd_context_reasons,
                 )
                 return self._neutral_signal(
@@ -1971,9 +2568,15 @@ class MACDStrategyV2Engine:
                     ),
                 )
 
-        if strict_1h_filters_enabled and self.config.disable_green_bar_growing_entries and signal_type_1h == 'green_bar_growing':
-            debug_details.update(
-                stage="green_bar_growing_disabled",
+        if (
+            strict_1h_filters_enabled
+            and not stable_continuation_active
+            and self.config.disable_green_bar_growing_entries
+            and signal_type_1h == 'green_bar_growing'
+        ):
+            debug_details = self._set_stage(
+                debug_details,
+                "green_bar_growing_disabled",
                 green_bar_growing_disabled=True,
             )
             return self._neutral_signal(
@@ -1997,12 +2600,14 @@ class MACDStrategyV2Engine:
             and trade_direction == 'short'
             and signal_type_1h == 'green_bar_growing'
             and self.config.enable_green_bar_growing_short_adx_1h_range_filter
+            and not stable_continuation_active
         ):
             min_adx_1h = float(self.config.green_bar_growing_short_min_adx_1h)
             max_adx_1h = float(self.config.green_bar_growing_short_max_adx_1h)
             if max_adx_1h > min_adx_1h and min_adx_1h <= float(adx_1h) < max_adx_1h:
-                debug_details.update(
-                    stage="green_bar_growing_short_adx_1h_range_filter",
+                debug_details = self._set_stage(
+                    debug_details,
+                    "green_bar_growing_short_adx_1h_range_filter",
                     green_bar_growing_short_min_adx_1h=min_adx_1h,
                     green_bar_growing_short_max_adx_1h=max_adx_1h,
                 )
@@ -2028,12 +2633,14 @@ class MACDStrategyV2Engine:
         if (
             strict_1h_filters_enabled
             and
-            self.config.disable_red_bar_growing_long_entries
+            not stable_continuation_active
+            and self.config.disable_red_bar_growing_long_entries
             and signal_type_1h == 'red_bar_growing'
             and trade_direction == 'long'
         ):
-            debug_details.update(
-                stage="red_bar_growing_long_disabled",
+            debug_details = self._set_stage(
+                debug_details,
+                "red_bar_growing_long_disabled",
                 red_bar_growing_long_disabled=True,
             )
             return self._neutral_signal(
@@ -2057,8 +2664,9 @@ class MACDStrategyV2Engine:
             and signal_type_1h == 'flip_bearish'
             and ema_multiplier < self.config.flip_bearish_min_ema_multiplier
         ):
-            debug_details.update(
-                stage="flip_bearish_ema_filter",
+            debug_details = self._set_stage(
+                debug_details,
+                "flip_bearish_ema_filter",
                 flip_bearish_min_ema_multiplier=self.config.flip_bearish_min_ema_multiplier,
             )
             return self._neutral_signal(
@@ -2089,8 +2697,9 @@ class MACDStrategyV2Engine:
                 bb_middle_slope_4h=bb_middle_slope_4h,
             )
             if not structure_ok:
-                debug_details.update(
-                    stage="flip_bearish_structure_filter",
+                debug_details = self._set_stage(
+                    debug_details,
+                    "flip_bearish_structure_filter",
                     flip_bearish_structure_passed=False,
                     flip_bearish_structure_reasons=structure_reasons,
                     **structure_details,
@@ -2113,8 +2722,9 @@ class MACDStrategyV2Engine:
                     ),
                 )
         else:
-            debug_details.update(
-                stage="flip_bearish_structure_filter",
+            debug_details = self._set_stage(
+                debug_details,
+                "flip_bearish_structure_filter",
                 flip_bearish_structure_skipped=True,
             )
 
@@ -2123,8 +2733,9 @@ class MACDStrategyV2Engine:
             self.config.preflip_trial_min_vwap_score if is_trial_entry else self.config.min_vwap_score_for_entry,
         )
         if min_vwap_score_for_entry > 0 and vwap_score < min_vwap_score_for_entry:
-            debug_details.update(
-                stage="vwap_score_filter",
+            debug_details = self._set_stage(
+                debug_details,
+                "vwap_score_filter",
                 min_vwap_score_for_entry=min_vwap_score_for_entry,
             )
             return self._neutral_signal(
@@ -2148,8 +2759,9 @@ class MACDStrategyV2Engine:
 
         if strict_1h_filters_enabled and signal_type_1h == 'red_bar_growing' and trade_direction == 'long':
             if ema_status == 'against':
-                debug_details.update(
-                    stage="red_bar_long_filter",
+                debug_details = self._set_stage(
+                    debug_details,
+                    "red_bar_long_filter",
                     red_bar_long_filter_reason="ema_against",
                 )
                 return self._neutral_signal(
@@ -2168,8 +2780,9 @@ class MACDStrategyV2Engine:
                     ),
                 )
             if vwap_deviation < -self.config.vwap_deviation_hard_block:
-                debug_details.update(
-                    stage="red_bar_long_filter",
+                debug_details = self._set_stage(
+                    debug_details,
+                    "red_bar_long_filter",
                     red_bar_long_filter_reason="vwap_dev_too_low",
                 )
                 return self._neutral_signal(
@@ -2272,8 +2885,9 @@ class MACDStrategyV2Engine:
             overheat_penalty = self.config.overheat_growing_penalty
             score = max(0.0, score - overheat_penalty)
 
-        debug_details.update(
-            stage="score_aggregation",
+        debug_details = self._set_stage(
+            debug_details,
+            "score_aggregation",
             primary_timeframe="4h",
             primary_signal_type=signal_type_4h,
             primary_signal_strength=signal_strength_4h,
@@ -2292,6 +2906,31 @@ class MACDStrategyV2Engine:
             legacy_4h_boost=legacy_4h_boost,
             effective_4h_score=effective_4h_score,
         )
+        trial_short_promotion_eval = self._evaluate_trial_short_below_structure_continuation_promotion(
+            primary_mode=primary_mode,
+            trade_direction=trade_direction,
+            signal_type_1h=signal_type_1h,
+            entry_type_15m=entry_type_15m,
+            vwap_state=vwap_state,
+            vwap_score=vwap_score,
+            adx_1h=adx_1h,
+            signal_score=score,
+            shrink_4h_context=shrink_4h_context,
+            is_trial_entry=is_trial_entry,
+        )
+        debug_details.update(**trial_short_promotion_eval)
+        if bool(trial_short_promotion_eval.get("trial_short_below_structure_promotion_active", False)):
+            stable_continuation_active = True
+            stable_continuation_side = "short"
+            stable_continuation_eval.update(
+                stable_continuation_active=True,
+                stable_continuation_side="short",
+                stable_continuation_reason="trial_short_below_structure_promoted",
+                stable_continuation_hist_bars=int(stable_trend_context.get("negative_bars", 0) or 0),
+                stable_continuation_promoted_from_trial=True,
+                stable_continuation_promoted_vwap_state=vwap_state,
+            )
+            debug_details.update(**stable_continuation_eval)
         if self.config.weight_4h_enhancement > 0 and score_4h_enhancement == 0.0:
             logger.debug(
                 "[MACD_V2_SCORE] 4H enhancement=0.0 but weight=%.2f, check 4H data source",
@@ -2305,8 +2944,9 @@ class MACDStrategyV2Engine:
             and self.config.flip_bearish_normal_ema_min_signal_score > 0
             and score < self.config.flip_bearish_normal_ema_min_signal_score
         ):
-            debug_details.update(
-                stage="flip_bearish_normal_ema_score_filter",
+            debug_details = self._set_stage(
+                debug_details,
+                "flip_bearish_normal_ema_score_filter",
                 flip_bearish_normal_ema_min_signal_score=self.config.flip_bearish_normal_ema_min_signal_score,
             )
             return self._neutral_signal(
@@ -2401,13 +3041,17 @@ class MACDStrategyV2Engine:
                 )
         
         # ========== Step 8: 入场阈值检查 ==========
-        threshold = self.config.resolve_signal_score_threshold(signal_type_1h)
-        if primary_mode == "4h":
+        threshold = self.config.resolve_signal_score_threshold(
+            signal_type_1h,
+            stable_continuation_side=stable_continuation_side if stable_continuation_active else None,
+        )
+        if primary_mode == "4h" and not stable_continuation_active:
             threshold = self.config.resolve_signal_score_threshold(signal_type_4h or signal_type_1h)
         if is_trial_entry:
             threshold = float(self.config.preflip_trial_min_signal_score)
-        debug_details.update(
-            stage="threshold_check",
+        debug_details = self._set_stage(
+            debug_details,
+            "threshold_check",
             signal_score_threshold=threshold,
         )
         if score < threshold:
@@ -2443,9 +3087,13 @@ class MACDStrategyV2Engine:
         # ========== Step 10: 返回结果 ==========
         final_score = min(score, 1.0)
         
+        final_stage_path = self._normalize_stage_path(debug_details.get("stage_path"))
+        final_stage_path = self._set_stage({"stage_path": final_stage_path}, "final")["stage_path"]
         self._last_analysis = {
             'strategy': 'macd_mtf_strategy_v2',
             'stage': 'final',
+            'stage_path': final_stage_path,
+            'stage_path_text': " > ".join(final_stage_path),
             'primary_timeframe': primary_mode,
             'trade_direction': trade_direction,
             'direction_1h': direction_1h,
@@ -2457,6 +3105,10 @@ class MACDStrategyV2Engine:
             'is_4h_enhanced': is_4h_enhanced,
             'is_trial_entry': is_trial_entry,
             'entry_scale': entry_scale,
+            'stable_continuation_active': stable_continuation_active,
+            'stable_continuation_side': stable_continuation_side,
+            'stable_continuation_reason': stable_continuation_eval.get("stable_continuation_reason"),
+            'stable_continuation_hist_bars': stable_continuation_eval.get("stable_continuation_hist_bars"),
             'enhancement_score': enhancement_score,
             'entry_type_15m': entry_type_15m,
             'entry_score_15m': entry_score_15m,
@@ -2493,6 +3145,9 @@ class MACDStrategyV2Engine:
             'effective_4h_score': effective_4h_score,
             'entry_refine_15m': entry_refine_15m,
             'veto_type': VetoType.NONE.value,
+            'reject_stage': '',
+            'reject_reason_code': '',
+            'reject_reason_detail': '',
             'total_score': final_score,
             'stop_price': stop_price,
             'stop_loss_pct': stop_pct,
