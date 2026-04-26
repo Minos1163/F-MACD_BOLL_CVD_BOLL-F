@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 import re
+import time
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from src.app.fund_flow_bot import FundFlowDecision, FundFlowOperation, TradingBot
@@ -82,6 +84,66 @@ def test_diff_counter_dict_only_keeps_positive_deltas():
     )
 
     assert delta == {"200": 2, "500": 1}
+
+
+def test_decision_signal_score_prefers_macd_v2_signal_score():
+    bot = TradingBot.__new__(TradingBot)
+    decision = FundFlowDecision(
+        operation=FundFlowOperation.BUY,
+        symbol="BTCUSDT",
+        target_portion_of_balance=0.1,
+        leverage=1.0,
+        reason="test",
+        metadata={
+            "strategy_mode": "macd_mtf_strategy_v2",
+            "signal_score": 0.7825,
+            "long_score": 0.0,
+            "short_score": 0.0,
+        },
+    )
+
+    assert bot._decision_signal_score(decision) == 0.7825
+
+
+def test_cancel_stale_pending_entry_orders_only_cancels_old_entry_orders():
+    bot = TradingBot.__new__(TradingBot)
+    now_ms = int(time.time() * 1000)
+    cancelled = []
+
+    bot.client = SimpleNamespace(
+        get_open_orders=lambda symbol: [
+            {"orderId": 1, "status": "NEW", "type": "LIMIT", "time": now_ms - 3 * 3600 * 1000},
+            {"orderId": 2, "status": "NEW", "type": "LIMIT", "time": now_ms - 10 * 60 * 1000},
+            {"orderId": 3, "status": "NEW", "type": "TAKE_PROFIT_MARKET", "time": now_ms - 5 * 3600 * 1000},
+            {"orderId": 4, "status": "FILLED", "type": "LIMIT", "time": now_ms - 5 * 3600 * 1000},
+        ],
+        cancel_order=lambda symbol, order_id: cancelled.append((symbol, order_id)) or {"status": "success"},
+    )
+
+    summary = bot._cancel_stale_pending_entry_orders("BTCUSDT", stale_seconds=3600)
+
+    assert cancelled == [("BTCUSDT", 1)]
+    assert summary["stale"] == 1
+    assert summary["cancelled"] == 1
+
+
+def test_cancel_stale_pending_entry_orders_keeps_fresh_entry_orders():
+    bot = TradingBot.__new__(TradingBot)
+    now_ms = int(time.time() * 1000)
+    cancelled = []
+
+    bot.client = SimpleNamespace(
+        get_open_orders=lambda symbol: [
+            {"orderId": 11, "status": "NEW", "type": "LIMIT", "time": now_ms - 15 * 60 * 1000},
+        ],
+        cancel_order=lambda symbol, order_id: cancelled.append((symbol, order_id)) or {"status": "success"},
+    )
+
+    summary = bot._cancel_stale_pending_entry_orders("ETHUSDT", stale_seconds=3600)
+
+    assert cancelled == []
+    assert summary["stale"] == 0
+    assert summary["cancelled"] == 0
 
 
 def test_range_dynamic_signal_pool_inherits_edge_trigger_flag_from_runtime_pool():
@@ -219,3 +281,129 @@ def test_global_signal_pool_disable_skips_outer_pool_evaluation():
         pass
     else:
         raise AssertionError("expected to reach the next stage after signal_pool bypass")
+
+
+def test_execute_symbol_signal_decision_logs_blocked_gate_payload():
+    bot = TradingBot.__new__(TradingBot)
+    captured = {}
+
+    bot._materialize_flow_snapshot = lambda symbol, market_data: (
+        {"symbol": symbol},
+        SimpleNamespace(signal_strength=1.0, timestamp=market_data["timestamp"]),
+        {"active_timeframe": "15m"},
+    )
+    bot._update_extreme_volatility_state = lambda symbol, flow_context: {
+        "blocked": True,
+        "remaining_seconds": 90,
+        "atr_pct": 0.031,
+        "threshold": 0.02,
+        "streak": 3,
+        "timeframe": "1m",
+        "reason": "extreme_volatility",
+    }
+    bot._conflict_symbol_cooldown_state = lambda symbol: {"blocked": False}
+    bot._log_entry_gate_block = lambda **kwargs: captured.update(kwargs)
+
+    bot._execute_symbol_signal_decision(
+        symbol="BTCUSDT",
+        market_data={"timestamp": __import__("datetime").datetime(2026, 3, 25)},
+        position=None,
+        current_price=1.0,
+        account_summary={"available_balance": 1000.0, "equity": 1000.0},
+        pending_new_entries=[],
+        protection_gap_symbols=[],
+        block_new_entries_due_to_protection_gap=False,
+        allow_new_entries=True,
+        ff_cfg={"trigger_dedupe_seconds": 180},
+        max_active_symbols=10,
+        max_symbol_position_portion=0.1,
+        add_position_portion=0.0,
+        risk_guard_enabled=False,
+        ai_review_mode="disabled",
+        ai_review_cfg={"enabled": False},
+    )
+
+    assert captured["gate"] == "extreme_volatility_cooldown"
+    assert captured["threshold"] == 0.02
+    assert captured["value"] == 0.031
+    assert captured["extra"]["remaining_seconds"] == 90
+
+
+def test_write_trade_fill_log_normalizes_fee_sign_and_realized_pnl():
+    bot = TradingBot.__new__(TradingBot)
+    captured = []
+    bot._trade_fill_logged_keys = set()
+    bot._trade_fill_last_seen_ms_by_symbol = {}
+    trade_ts = int(datetime(2026, 4, 25, 18, 45, 12, tzinfo=timezone.utc).timestamp() * 1000)
+    bot._fetch_order_trade_fills = lambda symbol, order_id: [
+        {
+            "orderId": 123,
+            "id": 456,
+            "time": trade_ts,
+            "side": "SELL",
+            "qty": "10",
+            "price": "0.09750",
+            "quoteQty": "0.975",
+            "commission": "0.0005",
+            "commissionAsset": "USDT",
+            "realizedPnl": "-0.0123",
+        }
+    ]
+    bot._append_trade_fill_rows = lambda rows: captured.extend(rows)
+
+    bot._write_trade_fill_log(
+        symbol="DOGEUSDT",
+        decision=FundFlowDecision(
+            operation=FundFlowOperation.CLOSE,
+            symbol="DOGEUSDT",
+            target_portion_of_balance=1.0,
+            leverage=1.0,
+            reason="test close",
+        ),
+        execution_result={"order": {"orderId": 123, "side": "SELL"}},
+    )
+
+    assert len(captured) == 1
+    assert captured[0]["手续费"] == -0.0005
+    assert captured[0]["已实现盈亏"] == -0.0123
+    assert captured[0]["订单ID"] == "123"
+    assert captured[0]["成交ID"] == "456"
+
+
+def test_sync_recent_trade_fills_reconciles_exchange_side_close_fills():
+    bot = TradingBot.__new__(TradingBot)
+    captured = []
+    bot._trade_fill_logged_keys = set()
+    bot._trade_fill_last_seen_ms_by_symbol = {}
+    trade_ts = int(datetime(2026, 4, 25, 23, 30, 10, tzinfo=timezone.utc).timestamp() * 1000)
+
+    def _fetch(symbol, order_id):
+        assert order_id is None
+        if symbol == "VETUSDT":
+            return [
+                {
+                    "orderId": 789,
+                    "id": 999,
+                    "time": trade_ts,
+                    "side": "BUY",
+                    "qty": "4424",
+                    "price": "0.007354",
+                    "quoteQty": "32.531696",
+                    "commission": "0.0162",
+                    "commissionAsset": "USDT",
+                    "realizedPnl": "-0.3415",
+                }
+            ]
+        return []
+
+    bot._fetch_order_trade_fills = _fetch
+    bot._append_trade_fill_rows = lambda rows: captured.extend(rows)
+
+    bot._sync_recent_trade_fills(["VETUSDT", "DOGEUSDT"])
+
+    assert len(captured) == 1
+    assert captured[0]["合约"] == "VETUSDT"
+    assert captured[0]["方向"] == "买入"
+    assert captured[0]["手续费"] == -0.0162
+    assert captured[0]["已实现盈亏"] == -0.3415
+    assert captured[0]["来源"] == "user_trades"

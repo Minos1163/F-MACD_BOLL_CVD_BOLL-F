@@ -239,6 +239,168 @@ def test_preflip_trial_entry_allows_4h_green_shrinking_long() -> None:
     assert signal.details["macd_4h_shrink_pct"] >= 0.75
 
 
+def test_promoted_trial_uses_stable_continuation_threshold() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            weight_1h_direction=0.0,
+            weight_4h_direction=0.55,
+            weight_4h_enhancement=0.0,
+            weight_vwap=0.35,
+            weight_15m_entry=0.05,
+            weight_volume=0.20,
+            min_signal_score=0.85,
+            min_entry_score=0.1,
+            min_vwap_score_for_entry=0.0,
+            overheat_growing_penalty=0.0,
+            enable_flip_bullish_strict_filter=False,
+            disable_flip_bullish_entries=False,
+            disable_green_bar_growing_entries=False,
+            primary_direction_timeframe="4h",
+            require_1h_confirmation_when_4h_primary=True,
+            allow_neutral_1h_confirmation=True,
+            light_1h_confirmation_when_4h_primary=True,
+            enable_soft_15m_confirmation_when_4h_primary=True,
+            enable_4h_preflip_trial_entries=True,
+            preflip_trial_min_shrink_pct_short=0.30,
+            preflip_trial_min_signal_score=0.75,
+            preflip_trial_min_vwap_score=0.06,
+            preflip_trial_entry_scale=0.35,
+            enable_trial_short_below_structure_continuation_promotion=True,
+            trial_short_below_structure_promotion_min_signal_score=0.79,
+            trial_short_below_structure_promotion_min_vwap_score=0.075,
+            trial_short_below_structure_promotion_min_adx_1h=30.0,
+            trial_short_below_structure_promotion_min_4h_shrink_pct=0.80,
+            trial_short_below_structure_promotion_min_4h_shrink_bars=6,
+            enable_stable_bear_continuation=True,
+            stable_bear_continuation_min_signal_score=0.82,
+            stable_bear_continuation_min_vwap_score=0.10,
+            stable_bear_continuation_min_adx_1h=30.0,
+            stable_bear_continuation_min_4h_bars=2,
+        )
+    )
+
+    signal = engine.analyze(
+        macd_hist_15m=np.array([0.10, 0.05, -0.02, -0.08]),
+        macd_hist_1h=np.array([0.20, 0.10, -0.05, -0.12]),
+        macd_hist_4h=np.array([0.90, 1.20, 1.40, 1.50, 1.20, 0.90, 0.70, 0.50, 0.35, 0.25]),
+        idx_15m=3,
+        idx_1h=3,
+        idx_4h=9,
+        volume_ratio=2.0,
+        vwap=100.0,
+        structural_vwap=99.45,
+        close_price=99.5,
+        bb_middle_1h=100.0,
+        bb_upper_1h=110.0,
+        bb_lower_1h=90.0,
+        bb_middle_4h=100.0,
+        bb_upper_4h=110.0,
+        bb_lower_4h=90.0,
+        bb_middle_15m=100.0,
+        bb_upper_15m=103.0,
+        bb_lower_15m=97.0,
+        close_15m=99.5,
+        adx_1h=35.0,
+        adx_4h=22.0,
+        atr_1h=1.0,
+    )
+
+    assert signal.signal_score == pytest.approx(0.8167, rel=1e-4)
+    assert signal.direction == "neutral"
+    assert signal.is_trial_entry is True
+    assert signal.details["stable_continuation_active"] is True
+    assert signal.details["stable_continuation_reason"] == "trial_short_below_structure_promoted"
+    assert signal.details["signal_score_threshold"] == pytest.approx(0.82, rel=1e-6)
+    assert signal.details["threshold_source"] == "stable_continuation_short"
+
+
+def test_vwap_score_filter_uses_distinct_reason_code() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            weight_1h_direction=0.0,
+            weight_4h_direction=0.55,
+            weight_4h_enhancement=0.0,
+            weight_vwap=0.20,
+            weight_15m_entry=0.05,
+            weight_volume=0.20,
+            min_signal_score=0.82,
+            min_entry_score=0.1,
+            min_vwap_score_for_entry=0.10,
+            overheat_growing_penalty=0.0,
+            enable_flip_bullish_strict_filter=False,
+            disable_flip_bullish_entries=False,
+            disable_green_bar_growing_entries=False,
+            primary_direction_timeframe="4h",
+            require_1h_confirmation_when_4h_primary=True,
+            allow_neutral_1h_confirmation=True,
+            light_1h_confirmation_when_4h_primary=True,
+            enable_soft_15m_confirmation_when_4h_primary=True,
+        )
+    )
+
+    signal = engine.analyze(
+        macd_hist_15m=np.array([-0.10, -0.05, 0.02, 0.08]),
+        macd_hist_1h=np.array([0.10, 0.15, 0.20, 0.25]),
+        macd_hist_4h=np.array([0.10, 0.15, 0.20, 0.25]),
+        idx_15m=3,
+        idx_1h=3,
+        idx_4h=3,
+        volume_ratio=2.0,
+        vwap=100.0,
+        structural_vwap=100.05,
+        close_price=100.12,
+        bb_middle_1h=100.0,
+        bb_upper_1h=110.0,
+        bb_lower_1h=90.0,
+        bb_middle_4h=99.0,
+        bb_upper_4h=109.0,
+        bb_lower_4h=89.0,
+        bb_middle_15m=100.0,
+        bb_upper_15m=103.0,
+        bb_lower_15m=97.0,
+        close_15m=100.12,
+        adx_1h=20.0,
+        adx_4h=22.0,
+        atr_1h=1.0,
+    )
+
+    assert signal.direction == "neutral"
+    assert signal.veto_type.value == "vwap_score_filter"
+    assert signal.details["reject_stage"] == "vwap_score_filter"
+    assert signal.details["reject_reason_code"] == "vwap_score_filter"
+    assert "vwap_score_filter(" in signal.details["reason"]
+
+
+def test_soft_long_threshold_override_only_affects_soft_long_entries() -> None:
+    config = MACDStrategyV2Config(
+        min_signal_score=0.85,
+        red_bar_growing_min_signal_score=0.82,
+        soft_long_min_signal_score=0.80,
+    )
+
+    threshold, source = config.resolve_entry_threshold(
+        signal_type="red_bar_growing",
+        entry_type_15m="soft_long_recovery",
+        primary_mode="4h",
+        is_trial_entry=False,
+        stable_continuation_active=False,
+        stable_continuation_side=None,
+    )
+    short_threshold, short_source = config.resolve_entry_threshold(
+        signal_type="red_bar_growing",
+        entry_type_15m="soft_short_recovery",
+        primary_mode="4h",
+        is_trial_entry=False,
+        stable_continuation_active=False,
+        stable_continuation_side=None,
+    )
+
+    assert threshold == pytest.approx(0.80, rel=1e-6)
+    assert source == "soft_long_override(primary_4h_red_bar_growing)"
+    assert short_threshold == pytest.approx(0.82, rel=1e-6)
+    assert short_source == "primary_4h_red_bar_growing"
+
+
 def test_neutral_signal_carries_4h_shrink_exit_metadata() -> None:
     engine = MACDStrategyV2Engine(
         MACDStrategyV2Config(
@@ -611,3 +773,200 @@ def test_vwap_score_position_tiers_apply_only_to_target_states() -> None:
     assert weak_dual_pressure == pytest.approx(0.60 * 0.80, rel=1e-6)
     assert strong_flip == pytest.approx(0.60, rel=1e-6)
     assert untouched == pytest.approx(0.60, rel=1e-6)
+
+
+def test_check_15m_macd_follow_prefers_rsi_spring_refinement_for_long() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            rsi_period=5,
+            enable_rsi_entry_refinement=True,
+            rsi_spring_recent_extreme_lookback=6,
+            rsi_spring_recent_oversold=35.0,
+            rsi_spring_prev_max=50.0,
+            rsi_spring_confirm=50.0,
+            rsi_1h_long_support=52.0,
+        )
+    )
+
+    can_enter, entry_score, details = engine.check_15m_macd_follow(
+        macd_hist_15m=np.array([-0.10, 0.02, 0.08]),
+        idx=2,
+        direction="long",
+        close_15m=98.0,
+        close_15m_series=np.array([100, 99, 98, 97, 96, 95, 94, 93, 92, 91, 90, 92, 96], dtype=float),
+        close_1h_series=np.array([100, 101, 102, 101, 103, 104, 105, 106, 107, 108, 109, 110], dtype=float),
+    )
+
+    assert can_enter is True
+    assert details["entry_type"] == "red_bar_growing"
+    assert details["ema_15m_refine"] == "rsi_spring"
+    assert entry_score > 0.85
+
+
+def test_analyze_blocks_shrinking_soft_short_combo_with_weak_combo_veto() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            weight_1h_direction=0.0,
+            weight_4h_direction=0.55,
+            weight_4h_enhancement=0.0,
+            weight_vwap=0.0,
+            weight_15m_entry=0.15,
+            weight_volume=0.15,
+            min_signal_score=0.1,
+            min_entry_score=0.1,
+            min_vwap_score_for_entry=0.0,
+            overheat_growing_penalty=0.0,
+            disable_green_bar_shrinking_short_dual_pressure_entries=False,
+            primary_direction_timeframe="4h",
+            require_1h_confirmation_when_4h_primary=True,
+            allow_neutral_1h_confirmation=True,
+            enable_soft_15m_confirmation_when_4h_primary=True,
+            enable_rsi_entry_refinement=False,
+        )
+    )
+
+    signal = engine.analyze(
+        macd_hist_15m=np.array([0.00020, 0.00010, 0.00005, 0.0]),
+        macd_hist_1h=np.array([-0.35, -0.30, -0.25, -0.20]),
+        macd_hist_4h=np.array([0.10, -0.02, -0.08, -0.14]),
+        idx_15m=3,
+        idx_1h=3,
+        idx_4h=3,
+        volume_ratio=2.0,
+        vwap=100.0,
+        structural_vwap=99.6,
+        close_price=99.2,
+        bb_middle_1h=100.0,
+        bb_upper_1h=106.0,
+        bb_lower_1h=94.0,
+        bb_middle_4h=100.0,
+        bb_upper_4h=106.0,
+        bb_lower_4h=94.0,
+        bb_middle_15m=99.5,
+        bb_upper_15m=100.5,
+        bb_lower_15m=98.5,
+        close_15m=99.2,
+        close_15m_series=np.array([99.8, 99.6, 99.4, 99.3, 99.2], dtype=float),
+        close_1h_series=np.array([101.0, 100.7, 100.3, 99.8, 99.4, 99.2], dtype=float),
+        close_4h_series=np.array([103.0, 102.0, 101.0, 100.0, 99.6, 99.2], dtype=float),
+        adx_1h=30.0,
+        adx_4h=24.0,
+        atr_1h=1.0,
+    )
+
+    assert signal.direction == "neutral"
+    assert signal.signal_type_1h == "green_bar_shrinking"
+    assert signal.entry_type_15m == "soft_short_neutral"
+    assert signal.details["reject_reason_code"] == "weak_combo_veto"
+
+
+def test_analyze_blocks_shrinking_soft_long_combo_with_weak_combo_veto() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            weight_1h_direction=0.0,
+            weight_4h_direction=0.55,
+            weight_4h_enhancement=0.0,
+            weight_vwap=0.0,
+            weight_15m_entry=0.15,
+            weight_volume=0.15,
+            min_signal_score=0.1,
+            min_entry_score=0.1,
+            min_vwap_score_for_entry=0.0,
+            overheat_growing_penalty=0.0,
+            disable_red_bar_shrinking_long_dual_support_entries=False,
+            primary_direction_timeframe="4h",
+            require_1h_confirmation_when_4h_primary=True,
+            allow_neutral_1h_confirmation=True,
+            enable_soft_15m_confirmation_when_4h_primary=True,
+            enable_rsi_entry_refinement=False,
+        )
+    )
+
+    signal = engine.analyze(
+        macd_hist_15m=np.array([-0.00020, -0.00010, -0.00005, 0.0]),
+        macd_hist_1h=np.array([0.35, 0.30, 0.25, 0.20]),
+        macd_hist_4h=np.array([-0.10, 0.02, 0.08, 0.14]),
+        idx_15m=3,
+        idx_1h=3,
+        idx_4h=3,
+        volume_ratio=2.0,
+        vwap=100.0,
+        structural_vwap=100.4,
+        close_price=100.8,
+        bb_middle_1h=100.0,
+        bb_upper_1h=106.0,
+        bb_lower_1h=94.0,
+        bb_middle_4h=100.0,
+        bb_upper_4h=106.0,
+        bb_lower_4h=94.0,
+        bb_middle_15m=100.5,
+        bb_upper_15m=101.5,
+        bb_lower_15m=99.5,
+        close_15m=100.8,
+        close_15m_series=np.array([100.2, 100.4, 100.6, 100.7, 100.8], dtype=float),
+        close_1h_series=np.array([99.0, 99.3, 99.7, 100.2, 100.6, 100.8], dtype=float),
+        close_4h_series=np.array([97.0, 98.0, 99.0, 100.0, 100.4, 100.8], dtype=float),
+        adx_1h=30.0,
+        adx_4h=24.0,
+        atr_1h=1.0,
+    )
+
+    assert signal.direction == "neutral"
+    assert signal.signal_type_1h == "red_bar_shrinking"
+    assert signal.entry_type_15m == "soft_long_neutral"
+    assert signal.details["reject_reason_code"] == "weak_combo_veto"
+
+
+def test_analyze_skips_weak_combo_veto_when_disabled() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            weight_1h_direction=0.0,
+            weight_4h_direction=0.55,
+            weight_4h_enhancement=0.0,
+            weight_vwap=0.0,
+            weight_15m_entry=0.15,
+            weight_volume=0.15,
+            min_signal_score=0.1,
+            min_entry_score=0.1,
+            min_vwap_score_for_entry=0.0,
+            overheat_growing_penalty=0.0,
+            disable_green_bar_shrinking_short_dual_pressure_entries=False,
+            primary_direction_timeframe="4h",
+            require_1h_confirmation_when_4h_primary=True,
+            allow_neutral_1h_confirmation=True,
+            enable_soft_15m_confirmation_when_4h_primary=True,
+            enable_rsi_entry_refinement=False,
+            enable_weak_combo_veto=False,
+        )
+    )
+
+    signal = engine.analyze(
+        macd_hist_15m=np.array([0.00020, 0.00010, 0.00005, 0.0]),
+        macd_hist_1h=np.array([-0.35, -0.30, -0.25, -0.20]),
+        macd_hist_4h=np.array([0.10, -0.02, -0.08, -0.14]),
+        idx_15m=3,
+        idx_1h=3,
+        idx_4h=3,
+        volume_ratio=2.0,
+        vwap=100.0,
+        structural_vwap=99.6,
+        close_price=99.2,
+        bb_middle_1h=100.0,
+        bb_upper_1h=106.0,
+        bb_lower_1h=94.0,
+        bb_middle_4h=100.0,
+        bb_upper_4h=106.0,
+        bb_lower_4h=94.0,
+        bb_middle_15m=99.5,
+        bb_upper_15m=100.5,
+        bb_lower_15m=98.5,
+        close_15m=99.2,
+        close_15m_series=np.array([99.8, 99.6, 99.4, 99.3, 99.2], dtype=float),
+        close_1h_series=np.array([101.0, 100.7, 100.3, 99.8, 99.4, 99.2], dtype=float),
+        close_4h_series=np.array([103.0, 102.0, 101.0, 100.0, 99.6, 99.2], dtype=float),
+        adx_1h=30.0,
+        adx_4h=24.0,
+        atr_1h=1.0,
+    )
+
+    assert signal.details.get("reject_reason_code") != "weak_combo_veto"

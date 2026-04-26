@@ -36,6 +36,7 @@ class VetoType(Enum):
     EMA_4H_REVERSE = "ema_4h_reverse"  # 兼容旧枚举值：4H结构完全反向
     MACD_HIGH_DEVIATION = "macd_high_deviation"  # 兼容旧枚举值：MACD翻色时价格远离BOLL中轨
     VOLUME_VWAP_BOTH_LOW = "volume_vwap_both_low"  # 量价双低
+    WEAK_SIGNAL_COMBO = "weak_combo_veto"  # 1H shrinking + 15m soft_* 弱组合
     SHORT_QUALITY_FILTER = "short_quality_filter"  # 空头质量过滤（V3专家组建议）
     CVD_CONTINUATION_RISK = "cvd_continuation_risk"  # session-reset CVD 显示短线买盘延续风险
 
@@ -85,6 +86,7 @@ class MACDStrategyV2Config:
     red_bar_growing_min_signal_score: float = 0.850
     flip_bearish_min_signal_score: float = 0.840
     flip_bullish_min_signal_score: float = 0.840
+    soft_long_min_signal_score: float = 0.0
 
     # 1H flip_bullish 严格过滤
     enable_flip_bullish_strict_filter: bool = True
@@ -113,9 +115,22 @@ class MACDStrategyV2Config:
     allow_neutral_1h_confirmation: bool = False
     light_1h_confirmation_when_4h_primary: bool = False
     enable_soft_15m_confirmation_when_4h_primary: bool = True
+    enable_weak_combo_veto: bool = True
     soft_15m_entry_score: float = 0.28
     soft_15m_neutral_hist_multiple: float = 3.0
     soft_15m_max_adverse_hist_multiple: float = 8.0
+    enable_rsi_entry_refinement: bool = True
+    rsi_period: int = 14
+    rsi_spring_recent_extreme_lookback: int = 6
+    rsi_spring_recent_oversold: float = 40.0
+    rsi_spring_recent_overbought: float = 60.0
+    rsi_spring_prev_max: float = 50.0
+    rsi_spring_confirm: float = 50.0
+    rsi_1h_long_support: float = 52.0
+    rsi_1h_short_support: float = 48.0
+    rsi_extension_penalty_threshold_long: float = 62.0
+    rsi_extension_penalty_threshold_short: float = 38.0
+    rsi_extension_penalty_multiplier: float = 0.60
     enable_green_bar_growing_short_adx_1h_range_filter: bool = False
     green_bar_growing_short_min_adx_1h: float = 0.0
     green_bar_growing_short_max_adx_1h: float = 0.0
@@ -231,6 +246,46 @@ class MACDStrategyV2Config:
         if threshold is None or threshold <= 0:
             return self.min_signal_score
         return threshold
+
+    def resolve_entry_threshold(
+        self,
+        *,
+        signal_type: Optional[str],
+        entry_type_15m: Optional[str],
+        primary_mode: str,
+        is_trial_entry: bool,
+        stable_continuation_active: bool,
+        stable_continuation_side: Optional[str],
+    ) -> Tuple[float, str]:
+        threshold_source = "signal_type_1h_default"
+        threshold = self.resolve_signal_score_threshold(
+            signal_type,
+            stable_continuation_side=stable_continuation_side if stable_continuation_active else None,
+        )
+
+        if stable_continuation_active and stable_continuation_side:
+            threshold_source = f"stable_continuation_{stable_continuation_side}"
+        elif primary_mode == "4h":
+            threshold_source = f"primary_4h_{str(signal_type or 'default').strip().lower()}"
+        elif signal_type:
+            threshold_source = f"signal_type_1h_{str(signal_type).strip().lower()}"
+
+        if is_trial_entry and not stable_continuation_active:
+            return float(self.preflip_trial_min_signal_score), "preflip_trial"
+
+        soft_long_threshold = float(self.soft_long_min_signal_score or 0.0)
+        entry_type = str(entry_type_15m or "").strip().lower()
+        if (
+            primary_mode == "4h"
+            and not stable_continuation_active
+            and entry_type.startswith("soft_long_")
+            and soft_long_threshold > 0
+            and threshold > soft_long_threshold
+        ):
+            threshold = soft_long_threshold
+            threshold_source = f"soft_long_override({threshold_source})"
+
+        return threshold, threshold_source
 
     def is_flip_bearish_normal_ema(self, signal_type_1h: Optional[str], ema_multiplier: float) -> bool:
         if str(signal_type_1h or "").strip().lower() != "flip_bearish":
@@ -643,6 +698,125 @@ class MACDStrategyV2Engine:
             return float(values[offset])
         except (IndexError, ValueError, TypeError):
             return default
+
+    @staticmethod
+    def calculate_rsi_series(prices: Optional[np.ndarray], period: int = 14) -> np.ndarray:
+        if prices is None:
+            return np.array([], dtype=float)
+        values = np.asarray(prices, dtype=float)
+        if values.size < max(2, period + 1):
+            return np.array([], dtype=float)
+
+        deltas = np.diff(values)
+        gains = np.where(deltas > 0, deltas, 0.0)
+        losses = np.where(deltas < 0, -deltas, 0.0)
+        rsi = np.full(values.shape, np.nan, dtype=float)
+
+        for idx in range(period, values.size):
+            avg_gain = float(np.mean(gains[idx - period : idx]))
+            avg_loss = float(np.mean(losses[idx - period : idx]))
+            if avg_loss <= 1e-12:
+                rsi[idx] = 100.0 if avg_gain > 1e-12 else 50.0
+                continue
+            rs = avg_gain / avg_loss
+            rsi[idx] = 100.0 - (100.0 / (1.0 + rs))
+
+        return rsi
+
+    @staticmethod
+    def _finite_tail(values: np.ndarray, lookback: int) -> np.ndarray:
+        if values.size == 0 or lookback <= 0:
+            return np.array([], dtype=float)
+        tail = values[-lookback:]
+        return tail[np.isfinite(tail)]
+
+    def _resolve_rsi_entry_refinement(
+        self,
+        *,
+        direction: str,
+        entry_score: float,
+        close_15m_series: Optional[np.ndarray],
+        close_1h_series: Optional[np.ndarray],
+    ) -> Dict[str, Any]:
+        out: Dict[str, Any] = {
+            "entry_score": entry_score,
+            "refine": None,
+        }
+        if not self.config.enable_rsi_entry_refinement:
+            return out
+
+        rsi_period = max(2, int(self.config.rsi_period))
+        rsi_15m_series = self.calculate_rsi_series(close_15m_series, period=rsi_period)
+        rsi_1h_series = self.calculate_rsi_series(close_1h_series, period=rsi_period)
+        current_rsi_15m = self._series_value(rsi_15m_series, default=np.nan)
+        prev_rsi_15m = self._series_value(rsi_15m_series, offset=-2, default=np.nan)
+        current_rsi_1h = self._series_value(rsi_1h_series, default=np.nan)
+        recent_window = self._finite_tail(rsi_15m_series, max(1, int(self.config.rsi_spring_recent_extreme_lookback)))
+        recent_min = float(np.min(recent_window)) if recent_window.size else np.nan
+        recent_max = float(np.max(recent_window)) if recent_window.size else np.nan
+
+        out.update(
+            rsi_15m=current_rsi_15m,
+            rsi_15m_prev=prev_rsi_15m,
+            rsi_1h=current_rsi_1h,
+            rsi_15m_recent_min=recent_min,
+            rsi_15m_recent_max=recent_max,
+        )
+
+        if not (np.isfinite(current_rsi_15m) and np.isfinite(prev_rsi_15m) and np.isfinite(current_rsi_1h)):
+            return out
+
+        if direction == "long":
+            if (
+                current_rsi_1h >= float(self.config.rsi_1h_long_support)
+                and np.isfinite(recent_min)
+                and recent_min <= float(self.config.rsi_spring_recent_oversold)
+                and prev_rsi_15m < float(self.config.rsi_spring_prev_max)
+                and current_rsi_15m >= float(self.config.rsi_spring_confirm)
+            ):
+                out["entry_score"] = min(1.0, entry_score + 0.15)
+                out["refine"] = "rsi_spring"
+                return out
+            if (
+                current_rsi_1h >= 50.0
+                and 45.0 <= current_rsi_15m <= 55.0
+                and current_rsi_15m > prev_rsi_15m
+            ):
+                out["entry_score"] = min(1.0, entry_score + 0.05)
+                out["refine"] = "rsi_neutral_resume"
+                return out
+            if current_rsi_15m >= float(self.config.rsi_extension_penalty_threshold_long):
+                out["entry_score"] = entry_score * float(self.config.rsi_extension_penalty_multiplier)
+                out["refine"] = "rsi_extension_penalty"
+                return out
+
+        if direction == "short":
+            short_prev_min = 100.0 - float(self.config.rsi_spring_prev_max)
+            short_confirm = 100.0 - float(self.config.rsi_spring_confirm)
+            if (
+                current_rsi_1h <= float(self.config.rsi_1h_short_support)
+                and np.isfinite(recent_max)
+                and recent_max >= float(self.config.rsi_spring_recent_overbought)
+                and prev_rsi_15m > short_prev_min
+                and current_rsi_15m <= short_confirm
+            ):
+                out["entry_score"] = min(1.0, entry_score + 0.15)
+                out["refine"] = "rsi_reject"
+                return out
+            if (
+                current_rsi_1h <= 50.0
+                and 45.0 <= current_rsi_15m <= 55.0
+                and current_rsi_15m < prev_rsi_15m
+            ):
+                out["entry_score"] = min(1.0, entry_score + 0.05)
+                out["refine"] = "rsi_neutral_resume"
+                return out
+            if current_rsi_15m <= float(self.config.rsi_extension_penalty_threshold_short):
+                out["entry_score"] = entry_score * float(self.config.rsi_extension_penalty_multiplier)
+                out["refine"] = "rsi_extension_penalty"
+                return out
+
+        return out
 
     @staticmethod
     def _calculate_macd_shrink_pct(macd_hist: np.ndarray, idx: int) -> float:
@@ -1229,6 +1403,42 @@ class MACDStrategyV2Engine:
                 return True, soft_score, details
 
         return can_enter, entry_score_15m, details
+
+    def check_weak_signal_combo_veto(
+        self,
+        *,
+        trade_direction: str,
+        signal_type_1h: Optional[str],
+        entry_type_15m: Optional[str],
+    ) -> Tuple[VetoType, Dict[str, Any]]:
+        signal_type = str(signal_type_1h or "").strip().lower()
+        entry_type = str(entry_type_15m or "").strip().lower()
+        details = {
+            "weak_combo_veto": False,
+            "signal_type_1h": signal_type,
+            "entry_type_15m": entry_type,
+            "veto_reason": "",
+        }
+
+        if (
+            trade_direction == "short"
+            and signal_type == "green_bar_shrinking"
+            and entry_type.startswith("soft_short_")
+        ):
+            details["weak_combo_veto"] = True
+            details["veto_reason"] = "green_bar_shrinking_soft_short"
+            return VetoType.WEAK_SIGNAL_COMBO, details
+
+        if (
+            trade_direction == "long"
+            and signal_type == "red_bar_shrinking"
+            and entry_type.startswith("soft_long_")
+        ):
+            details["weak_combo_veto"] = True
+            details["veto_reason"] = "red_bar_shrinking_soft_long"
+            return VetoType.WEAK_SIGNAL_COMBO, details
+
+        return VetoType.NONE, details
     
     # ==================== MACD_4H 确认增强 ====================
     
@@ -1278,7 +1488,9 @@ class MACDStrategyV2Engine:
         bb_middle_15m: float = None,
         bb_upper_15m: float = None,
         bb_lower_15m: float = None,
-        close_15m: float = None
+        close_15m: float = None,
+        close_15m_series: Optional[np.ndarray] = None,
+        close_1h_series: Optional[np.ndarray] = None,
     ) -> Tuple[bool, float, Dict]:
         """
         MACD_15M跟随1H方向执行买卖
@@ -1345,8 +1557,22 @@ class MACDStrategyV2Engine:
                 can_enter = True
                 details['entry_type'] = 'green_bar_shrinking'
         
-        # V2.0新增：BOLL中轨精化
-        if can_enter and bb_middle_15m is not None and bb_middle_15m > 0 and close_15m is not None:
+        if can_enter and self.config.enable_rsi_entry_refinement:
+            rsi_refine = self._resolve_rsi_entry_refinement(
+                direction=direction,
+                entry_score=entry_score,
+                close_15m_series=close_15m_series,
+                close_1h_series=close_1h_series,
+            )
+            entry_score = float(rsi_refine.get("entry_score", entry_score))
+            details['ema_15m_refine'] = rsi_refine.get("refine")
+            details['rsi_15m'] = rsi_refine.get("rsi_15m")
+            details['rsi_15m_prev'] = rsi_refine.get("rsi_15m_prev")
+            details['rsi_1h'] = rsi_refine.get("rsi_1h")
+            details['rsi_15m_recent_min'] = rsi_refine.get("rsi_15m_recent_min")
+            details['rsi_15m_recent_max'] = rsi_refine.get("rsi_15m_recent_max")
+        elif can_enter and bb_middle_15m is not None and bb_middle_15m > 0 and close_15m is not None:
+            # 兼容旧版：仅在未启用 RSI 精化时回退到 BOLL 中轨逻辑
             band_half_width = 0.0
             if bb_upper_15m is not None and bb_lower_15m is not None and bb_upper_15m > bb_lower_15m:
                 band_half_width = max((bb_upper_15m - bb_lower_15m) * 0.5, bb_middle_15m * 0.002)
@@ -1354,21 +1580,16 @@ class MACDStrategyV2Engine:
                 band_half_width = bb_middle_15m * 0.003
             near_middle = abs(close_15m - bb_middle_15m) <= band_half_width
             if direction == 'long':
-                # 回踩BOLL中轨后反弹（最优）
                 if near_middle:
                     entry_score = min(entry_score * 1.15, 1.0)
                     details['ema_15m_refine'] = 'midline_bounce'
-                # 价格低于中轨（逆短期趋势）
                 elif close_15m < bb_middle_15m:
                     entry_score *= 0.7
                     details['ema_15m_refine'] = 'below_midline'
-                    
             elif direction == 'short':
-                # 反弹至BOLL中轨后回落
                 if near_middle:
                     entry_score = min(entry_score * 1.15, 1.0)
                     details['ema_15m_refine'] = 'midline_reject'
-                # 价格高于中轨
                 elif close_15m > bb_middle_15m:
                     entry_score *= 0.7
                     details['ema_15m_refine'] = 'above_midline'
@@ -1941,6 +2162,7 @@ class MACDStrategyV2Engine:
         bb_upper_15m: float = 0.0,
         bb_lower_15m: float = 0.0,
         close_15m: float = 0.0,
+        close_15m_series: Optional[np.ndarray] = None,
         close_1h_series: Optional[np.ndarray] = None,
         close_4h_series: Optional[np.ndarray] = None,
         vwap_1h_series: Optional[np.ndarray] = None,
@@ -2382,7 +2604,9 @@ class MACDStrategyV2Engine:
             bb_middle_15m=bb_middle_15m,
             bb_upper_15m=bb_upper_15m,
             bb_lower_15m=bb_lower_15m,
-            close_15m=close_15m
+            close_15m=close_15m,
+            close_15m_series=close_15m_series,
+            close_1h_series=close_1h_series,
         )
         can_enter, entry_score_15m, details_15m = self.soften_15m_entry_when_4h_primary(
             can_enter=can_enter,
@@ -2437,6 +2661,41 @@ class MACDStrategyV2Engine:
             str(stable_continuation_eval.get("stable_continuation_side") or "").strip().lower() or None
         )
         debug_details.update(**stable_continuation_eval)
+
+        debug_details["weak_combo_veto_enabled"] = bool(self.config.enable_weak_combo_veto)
+        if self.config.enable_weak_combo_veto:
+            weak_combo_veto, weak_combo_details = self.check_weak_signal_combo_veto(
+                trade_direction=trade_direction,
+                signal_type_1h=signal_type_1h,
+                entry_type_15m=entry_type_15m,
+            )
+            debug_details = self._set_stage(
+                debug_details,
+                "weak_combo_veto",
+                **weak_combo_details,
+            )
+            if weak_combo_veto != VetoType.NONE:
+                return self._neutral_signal(
+                    reason=(
+                        f"weak_combo_veto({weak_combo_details.get('veto_reason') or 'shrinking_soft_combo'})"
+                    ),
+                    veto_type=weak_combo_veto,
+                    veto_reason="weak_combo_veto",
+                    signal_type_1h=signal_type_1h,
+                    entry_type_15m=entry_type_15m,
+                    entry_score_15m=entry_score_15m,
+                    vwap_score=vwap_score,
+                    vwap_deviation=vwap_deviation,
+                    vwap_state=vwap_state,
+                    vwap_location_score=vwap_location_score,
+                    ema_multiplier=ema_multiplier,
+                    ema_structure_status=ema_status,
+                    enhancement_score=enhancement_score,
+                    is_4h_enhanced=is_4h_enhanced,
+                    details=self._build_debug_details(
+                        **debug_details,
+                    ),
+                )
 
         if entry_score_15m < self.config.min_entry_score:
             return self._neutral_signal(
@@ -2739,7 +2998,7 @@ class MACDStrategyV2Engine:
                 min_vwap_score_for_entry=min_vwap_score_for_entry,
             )
             return self._neutral_signal(
-                reason=f'vwap_hard_block({vwap_score:.2f}<{min_vwap_score_for_entry:.2f})',
+                reason=f'vwap_score_filter({vwap_score:.4f}<{min_vwap_score_for_entry:.4f})',
                 score=0.0,
                 veto_type=VetoType.VWAP_SCORE_FILTER,
                 veto_reason="VWAP评分低于入场阈值",
@@ -3041,18 +3300,24 @@ class MACDStrategyV2Engine:
                 )
         
         # ========== Step 8: 入场阈值检查 ==========
-        threshold = self.config.resolve_signal_score_threshold(
-            signal_type_1h,
-            stable_continuation_side=stable_continuation_side if stable_continuation_active else None,
+        threshold_signal_type = (signal_type_4h or signal_type_1h) if primary_mode == "4h" else signal_type_1h
+        threshold, threshold_source = self.config.resolve_entry_threshold(
+            signal_type=threshold_signal_type,
+            entry_type_15m=entry_type_15m,
+            primary_mode=primary_mode,
+            is_trial_entry=is_trial_entry,
+            stable_continuation_active=stable_continuation_active,
+            stable_continuation_side=stable_continuation_side,
         )
-        if primary_mode == "4h" and not stable_continuation_active:
-            threshold = self.config.resolve_signal_score_threshold(signal_type_4h or signal_type_1h)
-        if is_trial_entry:
-            threshold = float(self.config.preflip_trial_min_signal_score)
         debug_details = self._set_stage(
             debug_details,
             "threshold_check",
             signal_score_threshold=threshold,
+            threshold_source=threshold_source,
+            is_trial_entry=is_trial_entry,
+            entry_scale=entry_scale,
+            stable_continuation_active=stable_continuation_active,
+            stable_continuation_side=stable_continuation_side,
         )
         if score < threshold:
             return self._neutral_signal(
@@ -3067,6 +3332,8 @@ class MACDStrategyV2Engine:
                 ema_structure_status=ema_status,
                 enhancement_score=enhancement_score,
                 is_4h_enhanced=is_4h_enhanced,
+                is_trial_entry=is_trial_entry,
+                entry_scale=entry_scale,
                 details=self._build_debug_details(
                     **debug_details,
                 ),

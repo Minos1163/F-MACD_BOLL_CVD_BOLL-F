@@ -465,6 +465,7 @@ class FundFlowDecisionEngine:
         if self.macd_v2_enabled:
             v2_cfg = ff.get("macd_mtf_strategy_v2", {}) if isinstance(ff.get("macd_mtf_strategy_v2"), dict) else {}
             boll_cfg = v2_cfg.get("boll_config", {}) if isinstance(v2_cfg.get("boll_config"), dict) else {}
+            rsi_cfg = v2_cfg.get("rsi_config", {}) if isinstance(v2_cfg.get("rsi_config"), dict) else {}
             ema_cfg = v2_cfg.get("ema_config", {})
             leverage_cfg = v2_cfg.get("leverage_config", {}) if isinstance(v2_cfg.get("leverage_config"), dict) else {}
             vwap_cfg = v2_cfg.get("vwap_config", {})
@@ -477,6 +478,10 @@ class FundFlowDecisionEngine:
             session_risk_cfg = v2_cfg.get("session_risk_control", {}) if isinstance(v2_cfg.get("session_risk_control"), dict) else {}
             vwap_score_tier_cfg = v2_cfg.get("vwap_score_position_tiers", {}) if isinstance(v2_cfg.get("vwap_score_position_tiers"), dict) else {}
             symbol_risk_cfg = v2_cfg.get("symbol_risk_tiers", {}) if isinstance(v2_cfg.get("symbol_risk_tiers"), dict) else {}
+            common_stable_continuation_min_signal_score = thresholds_cfg.get("stable_continuation_min_signal_score")
+            common_stable_continuation_min_vwap_score = filter_cfg.get("stable_continuation_min_vwap_score")
+            common_stable_continuation_min_adx_1h = filter_cfg.get("stable_continuation_min_adx_1h")
+            common_stable_continuation_min_4h_bars = filter_cfg.get("stable_continuation_min_4h_bars")
             default_signal_threshold = self._to_float(
                 thresholds_cfg.get("default", thresholds_cfg.get("min_signal_score")),
                 0.850,
@@ -534,6 +539,7 @@ class FundFlowDecisionEngine:
                 red_bar_growing_min_signal_score=self._to_float(thresholds_cfg.get("red_bar_growing"), default_signal_threshold),
                 flip_bearish_min_signal_score=self._to_float(thresholds_cfg.get("flip_bearish"), default_signal_threshold),
                 flip_bullish_min_signal_score=self._to_float(thresholds_cfg.get("flip_bullish"), default_signal_threshold),
+                soft_long_min_signal_score=self._to_float(thresholds_cfg.get("soft_long_min_signal_score"), 0.0),
                 enable_flip_bullish_strict_filter=bool(filter_cfg.get("enable_flip_bullish_strict_filter", True)),
                 disable_flip_bullish_entries=bool(filter_cfg.get("disable_flip_bullish_entries", False)),
                 flip_bullish_min_vwap_score=self._to_float(filter_cfg.get("flip_bullish_min_vwap_score"), 0.12),
@@ -563,6 +569,7 @@ class FundFlowDecisionEngine:
                 enable_soft_15m_confirmation_when_4h_primary=bool(
                     filter_cfg.get("enable_soft_15m_confirmation_when_4h_primary", True)
                 ),
+                enable_weak_combo_veto=bool(filter_cfg.get("enable_weak_combo_veto", True)),
                 soft_15m_entry_score=self._to_float(filter_cfg.get("soft_15m_entry_score"), 0.28),
                 soft_15m_neutral_hist_multiple=self._to_float(
                     filter_cfg.get("soft_15m_neutral_hist_multiple"),
@@ -571,6 +578,27 @@ class FundFlowDecisionEngine:
                 soft_15m_max_adverse_hist_multiple=self._to_float(
                     filter_cfg.get("soft_15m_max_adverse_hist_multiple"),
                     8.0,
+                ),
+                enable_rsi_entry_refinement=bool(rsi_cfg.get("enable_entry_refinement", True)),
+                rsi_period=max(2, int(self._to_float(rsi_cfg.get("period"), 14))),
+                rsi_spring_recent_extreme_lookback=max(2, int(self._to_float(rsi_cfg.get("spring_recent_extreme_lookback"), 6))),
+                rsi_spring_recent_oversold=self._to_float(rsi_cfg.get("spring_recent_oversold"), 40.0),
+                rsi_spring_recent_overbought=self._to_float(rsi_cfg.get("spring_recent_overbought"), 60.0),
+                rsi_spring_prev_max=self._to_float(rsi_cfg.get("spring_prev_max"), 50.0),
+                rsi_spring_confirm=self._to_float(rsi_cfg.get("spring_confirm"), 50.0),
+                rsi_1h_long_support=self._to_float(rsi_cfg.get("rsi_1h_long_support"), 52.0),
+                rsi_1h_short_support=self._to_float(rsi_cfg.get("rsi_1h_short_support"), 48.0),
+                rsi_extension_penalty_threshold_long=self._to_float(
+                    rsi_cfg.get("extension_penalty_threshold_long"),
+                    62.0,
+                ),
+                rsi_extension_penalty_threshold_short=self._to_float(
+                    rsi_cfg.get("extension_penalty_threshold_short"),
+                    38.0,
+                ),
+                rsi_extension_penalty_multiplier=self._to_float(
+                    rsi_cfg.get("extension_penalty_multiplier"),
+                    0.60,
                 ),
                 enable_green_bar_growing_short_adx_1h_range_filter=bool(filter_cfg.get("enable_green_bar_growing_short_adx_1h_range_filter", False)),
                 green_bar_growing_short_min_adx_1h=self._to_float(filter_cfg.get("green_bar_growing_short_min_adx_1h"), 0.0),
@@ -614,41 +642,75 @@ class FundFlowDecisionEngine:
                 stable_bear_continuation_min_signal_score=self._to_float(
                     thresholds_cfg.get(
                         "stable_bear_continuation_min_signal_score",
-                        filter_cfg.get("stable_bear_continuation_min_signal_score"),
+                        filter_cfg.get(
+                            "stable_bear_continuation_min_signal_score",
+                            common_stable_continuation_min_signal_score,
+                        ),
                     ),
                     0.82,
                 ),
                 stable_bear_continuation_min_vwap_score=self._to_float(
-                    filter_cfg.get("stable_bear_continuation_min_vwap_score"),
+                    filter_cfg.get(
+                        "stable_bear_continuation_min_vwap_score",
+                        common_stable_continuation_min_vwap_score,
+                    ),
                     0.10,
                 ),
                 stable_bear_continuation_min_adx_1h=self._to_float(
-                    filter_cfg.get("stable_bear_continuation_min_adx_1h"),
+                    filter_cfg.get(
+                        "stable_bear_continuation_min_adx_1h",
+                        common_stable_continuation_min_adx_1h,
+                    ),
                     20.0,
                 ),
                 stable_bear_continuation_min_4h_bars=max(
                     1,
-                    int(self._to_float(filter_cfg.get("stable_bear_continuation_min_4h_bars"), 2)),
+                    int(
+                        self._to_float(
+                            filter_cfg.get(
+                                "stable_bear_continuation_min_4h_bars",
+                                common_stable_continuation_min_4h_bars,
+                            ),
+                            2,
+                        )
+                    ),
                 ),
                 enable_stable_bull_continuation=bool(filter_cfg.get("enable_stable_bull_continuation", False)),
                 stable_bull_continuation_min_signal_score=self._to_float(
                     thresholds_cfg.get(
                         "stable_bull_continuation_min_signal_score",
-                        filter_cfg.get("stable_bull_continuation_min_signal_score"),
+                        filter_cfg.get(
+                            "stable_bull_continuation_min_signal_score",
+                            common_stable_continuation_min_signal_score,
+                        ),
                     ),
                     0.82,
                 ),
                 stable_bull_continuation_min_vwap_score=self._to_float(
-                    filter_cfg.get("stable_bull_continuation_min_vwap_score"),
+                    filter_cfg.get(
+                        "stable_bull_continuation_min_vwap_score",
+                        common_stable_continuation_min_vwap_score,
+                    ),
                     0.10,
                 ),
                 stable_bull_continuation_min_adx_1h=self._to_float(
-                    filter_cfg.get("stable_bull_continuation_min_adx_1h"),
+                    filter_cfg.get(
+                        "stable_bull_continuation_min_adx_1h",
+                        common_stable_continuation_min_adx_1h,
+                    ),
                     20.0,
                 ),
                 stable_bull_continuation_min_4h_bars=max(
                     1,
-                    int(self._to_float(filter_cfg.get("stable_bull_continuation_min_4h_bars"), 2)),
+                    int(
+                        self._to_float(
+                            filter_cfg.get(
+                                "stable_bull_continuation_min_4h_bars",
+                                common_stable_continuation_min_4h_bars,
+                            ),
+                            2,
+                        )
+                    ),
                 ),
                 enable_stable_continuation_slow_4h_shrink_exit=bool(
                     stop_cfg.get("enable_stable_continuation_slow_4h_shrink_exit", True)
@@ -1491,6 +1553,79 @@ class FundFlowDecisionEngine:
         metadata["blocked_operation"] = decision.operation.value
         metadata["blocked_decision_reason"] = decision.reason
 
+        reason = blocked_reason if not decision.reason else f"{blocked_reason} | {decision.reason}"
+        return FundFlowDecision(
+            operation=Operation.HOLD,
+            symbol=decision.symbol,
+            target_portion_of_balance=0.0,
+            leverage=max(1, int(decision.leverage or self.default_leverage)),
+            reason=reason,
+            metadata=metadata,
+        )
+
+    def _apply_macd_v2_direction_gate(
+        self,
+        decision: FundFlowDecision,
+        *,
+        effective_mode: Optional[str],
+        source: str,
+    ) -> FundFlowDecision:
+        metadata = dict(decision.metadata or {})
+        gate_mode = self._normalize_symbol_side_override_mode(effective_mode)
+        metadata["direction_lock"] = gate_mode
+        metadata["direction_lock_source"] = source
+        metadata["direction_gate_source"] = source
+        metadata["direction_gate_effective_mode"] = gate_mode
+        metadata["direction_gate_pre_decision"] = decision.operation.value
+
+        if decision.operation not in (Operation.BUY, Operation.SELL):
+            metadata["direction_gate_veto"] = False
+            metadata["direction_gate_final_decision"] = decision.operation.value
+            return FundFlowDecision(
+                operation=decision.operation,
+                symbol=decision.symbol,
+                target_portion_of_balance=decision.target_portion_of_balance,
+                leverage=decision.leverage,
+                max_price=decision.max_price,
+                min_price=decision.min_price,
+                time_in_force=decision.time_in_force,
+                take_profit_price=decision.take_profit_price,
+                stop_loss_price=decision.stop_loss_price,
+                tp_execution=decision.tp_execution,
+                sl_execution=decision.sl_execution,
+                reason=decision.reason,
+                metadata=metadata,
+            )
+
+        allowed = (
+            gate_mode == "BOTH"
+            or (decision.operation == Operation.BUY and gate_mode == "LONG_ONLY")
+            or (decision.operation == Operation.SELL and gate_mode == "SHORT_ONLY")
+        )
+        metadata["direction_gate_veto"] = not allowed
+
+        if allowed:
+            metadata["direction_gate_final_decision"] = decision.operation.value
+            return FundFlowDecision(
+                operation=decision.operation,
+                symbol=decision.symbol,
+                target_portion_of_balance=decision.target_portion_of_balance,
+                leverage=decision.leverage,
+                max_price=decision.max_price,
+                min_price=decision.min_price,
+                time_in_force=decision.time_in_force,
+                take_profit_price=decision.take_profit_price,
+                stop_loss_price=decision.stop_loss_price,
+                tp_execution=decision.tp_execution,
+                sl_execution=decision.sl_execution,
+                reason=decision.reason,
+                metadata=metadata,
+            )
+
+        metadata["direction_gate_final_decision"] = Operation.HOLD.value
+        metadata["blocked_reason"] = "direction_gate_veto"
+        metadata["blocked_operation"] = decision.operation.value
+        blocked_reason = "direction_gate_veto"
         reason = blocked_reason if not decision.reason else f"{blocked_reason} | {decision.reason}"
         return FundFlowDecision(
             operation=Operation.HOLD,
@@ -3519,6 +3654,9 @@ class FundFlowDecisionEngine:
         close_1h_series = tf_1h.get("close_series")
         if close_1h_series is None:
             close_1h_series = tf_1h.get("close_array")
+        close_15m_series = tf_15m.get("close_series")
+        if close_15m_series is None:
+            close_15m_series = tf_15m.get("close_array")
         close_4h_series = tf_4h.get("close_series")
         if close_4h_series is None:
             close_4h_series = tf_4h.get("close_array")
@@ -3557,6 +3695,7 @@ class FundFlowDecisionEngine:
             bb_upper_15m=bb_upper_15m,
             bb_lower_15m=bb_lower_15m,
             close_15m=close_15m,
+            close_15m_series=close_15m_series,
             close_1h_series=close_1h_series,
             close_4h_series=close_4h_series,
             vwap_1h_series=vwap_1h_series,
@@ -3604,7 +3743,10 @@ class FundFlowDecisionEngine:
             "regime": regime_info.get("regime"),
             "regime_adx": regime_info.get("adx"),
             "regime_atr_pct": regime_info.get("atr_pct"),
-            "direction_lock": regime_info.get("direction", "BOTH"),
+            "direction_lock": "BOTH",
+            "direction_lock_source": "macd_4h_regime_state.side_override_mode",
+            "direction_gate_source": "macd_4h_regime_state.side_override_mode",
+            "direction_gate_effective_mode": "BOTH",
             "last_open": regime_info.get("last_open", 0.0),
             "last_close": regime_info.get("last_close", 0.0),
             "macd_v2_debug": signal.details if isinstance(signal.details, dict) else {},
@@ -3619,6 +3761,8 @@ class FundFlowDecisionEngine:
         metadata["macd_4h_regime_state"] = regime_state
         regime_runtime_mode = str(regime_state.get("side_override_mode", "BOTH") or "BOTH")
         regime_side = str(regime_state.get("side", "neutral") or "neutral")
+        metadata["direction_lock"] = regime_runtime_mode
+        metadata["direction_gate_effective_mode"] = regime_runtime_mode
         long_allowed_by_regime = regime_runtime_mode in {"BOTH", "LONG_ONLY"}
         short_allowed_by_regime = regime_runtime_mode in {"BOTH", "SHORT_ONLY"}
         take_profit_pct = self.take_profit_pct
@@ -3709,6 +3853,11 @@ class FundFlowDecisionEngine:
                     macd_v2_engine=macd_v2_engine,
                 )
                 if regime_entry is not None:
+                    regime_entry = self._apply_macd_v2_direction_gate(
+                        regime_entry,
+                        effective_mode=regime_runtime_mode,
+                        source="macd_4h_regime_state.side_override_mode",
+                    )
                     return self._apply_symbol_side_override(
                         regime_entry,
                         runtime_override_mode=regime_runtime_mode,
@@ -3792,7 +3941,7 @@ class FundFlowDecisionEngine:
                 "sl_enabled": stop_loss_price is not None,
             }
 
-            return self._apply_symbol_side_override(
+            decision = self._apply_macd_v2_direction_gate(
                 FundFlowDecision(
                     operation=Operation.BUY,
                     symbol=symbol,
@@ -3807,6 +3956,11 @@ class FundFlowDecisionEngine:
                     reason=f"macd_v2_long_1h_{signal.signal_type_1h}_15m_{signal.entry_type_15m}_vwap_{signal.vwap_score:.2f}",
                     metadata=metadata
                 ),
+                effective_mode=regime_runtime_mode,
+                source="macd_4h_regime_state.side_override_mode",
+            )
+            return self._apply_symbol_side_override(
+                decision,
                 runtime_override_mode=regime_runtime_mode,
             )
 
@@ -3881,7 +4035,7 @@ class FundFlowDecisionEngine:
                 "sl_enabled": stop_loss_price is not None,
             }
 
-            return self._apply_symbol_side_override(
+            decision = self._apply_macd_v2_direction_gate(
                 FundFlowDecision(
                     operation=Operation.SELL,
                     symbol=symbol,
@@ -3896,6 +4050,11 @@ class FundFlowDecisionEngine:
                     reason=f"macd_v2_short_1h_{signal.signal_type_1h}_15m_{signal.entry_type_15m}_vwap_{signal.vwap_score:.2f}",
                     metadata=metadata
                 ),
+                effective_mode=regime_runtime_mode,
+                source="macd_4h_regime_state.side_override_mode",
+            )
+            return self._apply_symbol_side_override(
+                decision,
                 runtime_override_mode=regime_runtime_mode,
             )
         

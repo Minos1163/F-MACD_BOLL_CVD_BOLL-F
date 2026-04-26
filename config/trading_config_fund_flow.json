@@ -363,14 +363,15 @@
         "weight_volume": 0.20
       },
       "entry_thresholds": {
-        "default": 0.820,
+        "default": 0.970,
         "min_entry_score": 0.25,
-        "min_signal_score": 0.850,
-        "stable_bear_continuation_min_signal_score": 0.820,
-        "stable_bull_continuation_min_signal_score": 0.820,
-        "red_bar_growing": 0.820,
-        "flip_bearish": 0.810,
-        "flip_bullish": 0.810
+        "min_signal_score": 0.970,
+        "soft_long_min_signal_score": 0.970,
+        "stable_bear_continuation_min_signal_score": 0.970,
+        "stable_bull_continuation_min_signal_score": 0.970,
+        "red_bar_growing": 0.970,
+        "flip_bearish": 0.970,
+        "flip_bullish": 0.970
       },
       "entry_filters": {
         "primary_direction_timeframe": "4h",
@@ -378,6 +379,7 @@
         "allow_neutral_1h_confirmation": true,
         "light_1h_confirmation_when_4h_primary": true,
         "enable_soft_15m_confirmation_when_4h_primary": true,
+        "enable_weak_combo_veto": false,
         "soft_15m_entry_score": 0.28,
         "soft_15m_neutral_hist_multiple": 3.0,
         "soft_15m_max_adverse_hist_multiple": 8.0,
@@ -387,12 +389,12 @@
         "enable_4h_preflip_trial_entries": true,
         "preflip_trial_min_shrink_pct_long": 0.60,
         "preflip_trial_min_shrink_pct_short": 0.30,
-        "preflip_trial_min_signal_score": 0.75,
+        "preflip_trial_min_signal_score": 0.970,
         "preflip_trial_min_vwap_score": 0.06,
         "preflip_trial_entry_scale": 0.35,
         "preflip_trial_max_leverage": 2,
         "enable_trial_short_below_structure_continuation_promotion": true,
-        "trial_short_below_structure_promotion_min_signal_score": 0.79,
+        "trial_short_below_structure_promotion_min_signal_score": 0.970,
         "trial_short_below_structure_promotion_min_vwap_score": 0.075,
         "trial_short_below_structure_promotion_min_adx_1h": 30.0,
         "trial_short_below_structure_promotion_min_4h_shrink_pct": 0.80,
@@ -426,15 +428,15 @@
         "disable_green_bar_growing_entries": false,
         "disable_green_bar_shrinking_short_dual_pressure_entries": true,
         "disable_red_bar_shrinking_long_dual_support_entries": true,
-        "min_signal_score": 0.850,
-        "min_vwap_score_for_entry": 0.10,
+        "min_signal_score": 0.970,
+        "min_vwap_score_for_entry": 0.16,
         "symbol_signal_overrides": []
       },
       "penalty_config": {
         "overheat_growing_penalty": 0.12,
         "overheat_boll_multiplier_threshold": 1.2,
         "overheat_vwap_score_threshold": 0.1,
-        "min_vwap_score_for_entry": 0.10
+        "min_vwap_score_for_entry": 0.16
       },
       "stop_loss_config": {
         "use_dynamic_stop": true,
@@ -1645,6 +1647,79 @@
             }
           },
           "notes": "Profile V11/F1+B1: apply the watchlist throttle on top of V10, and rebalance pre-flip shrink symmetry to long=0.60 / short=0.40."
+        },
+        "macd_v2_ablation_vwap_deweight": {
+          "config_overrides": {
+            "fund_flow": {
+              "macd_mtf_strategy_v2": {
+                "scoring_weights": {
+                  "weight_vwap": 0.05
+                },
+                "entry_filters": {
+                  "min_vwap_score_for_entry": 0.0,
+                  "stable_bear_continuation_min_vwap_score": 0.0,
+                  "stable_bull_continuation_min_vwap_score": 0.0
+                }
+              }
+            }
+          },
+          "notes": "Ablation profile: isolate the VWAP gate by lowering VWAP score weight to 0.05 and removing VWAP score thresholds for normal and stable continuation entries, while leaving all other live filters unchanged."
+        },
+        "macd_v2_ablation_restore_1h_weight": {
+          "config_overrides": {
+            "fund_flow": {
+              "macd_mtf_strategy_v2": {
+                "scoring_weights": {
+                  "weight_1h_direction": 0.15,
+                  "weight_4h_direction": 0.40
+                }
+              }
+            }
+          },
+          "notes": "Ablation profile: restore 1H directional confirmation weight to 0.15 and reduce 4H direction weight to 0.40 so the total score budget stays unchanged."
+        },
+        "macd_v2_ablation_remove_trial_promotion": {
+          "config_overrides": {
+            "fund_flow": {
+              "macd_mtf_strategy_v2": {
+                "entry_filters": {
+                  "enable_4h_preflip_trial_entries": false,
+                  "enable_trial_short_below_structure_continuation_promotion": false
+                }
+              }
+            }
+          },
+          "notes": "Ablation profile: disable 4H pre-flip trial entries and short-below-structure promotion only, keeping the rest of the V2 live funnel unchanged."
+        },
+        "macd_v2_ablation_soft_long_threshold_080": {
+          "config_overrides": {
+            "fund_flow": {
+              "macd_mtf_strategy_v2": {
+                "short_quality_filter": {
+                  "enabled": false
+                },
+                "entry_thresholds": {
+                  "soft_long_min_signal_score": 0.80
+                }
+              }
+            }
+          },
+          "notes": "Ablation profile: only relax soft_long_* threshold_check floor from the baseline 0.82 path down to 0.80, keeping VWAP and all other live funnel gates unchanged."
+        },
+        "macd_v2_ablation_soft_long_threshold_079": {
+          "config_overrides": {
+            "fund_flow": {
+              "macd_mtf_strategy_v2": {
+                "short_quality_filter": {
+                  "enabled": false
+                },
+                "entry_thresholds": {
+                  "soft_long_min_signal_score": 0.79
+                }
+              }
+            }
+          },
+          "notes": "Ablation profile: only relax soft_long_* threshold_check floor from the baseline 0.82 path down to 0.79, keeping VWAP and all other live funnel gates unchanged."
         },
         "top100_binance_rot_20260319": {
           "symbols": [

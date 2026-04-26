@@ -1,11 +1,26 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pandas as pd
+import pytest
 
 from src.config.config_loader import ConfigLoader
 from scripts.generate_backtest_config import build_backtest_copy
-from scripts.backtest_macd_v2 import BacktestConfig, BacktestEngine, apply_backtest_profile
+from scripts.backtest_macd_v2 import (
+    BacktestConfig,
+    BacktestEngine,
+    apply_backtest_profile,
+    build_backtest_summary,
+    build_strategy_config,
+)
 from src.fund_flow.macd_strategy_v2 import MACDSignalV2, MACDStrategyV2Config
+
+
+def _load_live_runtime_config() -> dict:
+    config_path = Path("D:/AIDCA/AI2/config/trading_config_fund_flow.json")
+    return json.loads(config_path.read_text(encoding="utf-8"))
 
 
 def test_apply_backtest_profile_disables_short_filter_only_for_backtest() -> None:
@@ -99,6 +114,23 @@ def test_apply_backtest_profile_uses_default_profile_when_requested() -> None:
 
     assert active_profile == "macd_v2_disable_short_filter"
     assert merged["fund_flow"]["macd_mtf_strategy_v2"]["short_quality_filter"]["enabled"] is False
+
+
+def test_live_runtime_config_contains_soft_long_threshold_ablation_profiles() -> None:
+    runtime_cfg = _load_live_runtime_config()
+    profiles = runtime_cfg["fund_flow"]["backtest"]["profiles"]
+
+    profile_080 = profiles["macd_v2_ablation_soft_long_threshold_080"]["config_overrides"]["fund_flow"][
+        "macd_mtf_strategy_v2"
+    ]
+    profile_079 = profiles["macd_v2_ablation_soft_long_threshold_079"]["config_overrides"]["fund_flow"][
+        "macd_mtf_strategy_v2"
+    ]
+
+    assert profile_080["entry_thresholds"]["soft_long_min_signal_score"] == 0.80
+    assert profile_080["short_quality_filter"]["enabled"] is False
+    assert profile_079["entry_thresholds"]["soft_long_min_signal_score"] == 0.79
+    assert profile_079["short_quality_filter"]["enabled"] is False
 
 
 def test_trading_symbols_respect_symbol_blacklist() -> None:
@@ -596,3 +628,169 @@ def test_backtest_entry_cooldown_triggers_after_two_losses() -> None:
     engine._update_loss_streak_after_trade_close(second_close, -5.0)
     assert engine._is_entry_cooldown_active(pd.Timestamp("2026-03-21 16:00:00")) is True
     assert engine._is_entry_cooldown_active(pd.Timestamp("2026-03-21 17:01:00")) is False
+
+
+def test_backtest_candidate_audit_tracks_filter_reasons() -> None:
+    config = BacktestConfig(symbols=["SOLUSDT", "BTCUSDT", "ETHUSDT", "XRPUSDT", "BNBUSDT"])
+    strategy_config = MACDStrategyV2Config(
+        min_signal_score=0.75,
+        red_bar_growing_min_signal_score=0.75,
+    )
+    engine = BacktestEngine(config, strategy_config, runtime_config={})
+    engine.positions["SOLUSDT"] = {"side": "long"}
+    engine.pending_orders["BTCUSDT"] = {"margin": 100.0}
+
+    analyses = {
+        "SOLUSDT": {"signal": MACDSignalV2(direction="long", signal_score=0.90, signal_type_1h="red_bar_growing")},
+        "BTCUSDT": {"signal": MACDSignalV2(direction="long", signal_score=0.88, signal_type_1h="red_bar_growing")},
+        "ETHUSDT": {"signal": MACDSignalV2(direction="neutral", signal_score=0.0, signal_type_1h="red_bar_growing")},
+        "XRPUSDT": {"signal": MACDSignalV2(direction="long", signal_score=0.70, signal_type_1h="red_bar_growing")},
+        "BNBUSDT": {"signal": MACDSignalV2(direction="long", signal_score=0.80, signal_type_1h="red_bar_growing")},
+    }
+
+    candidates = engine._build_entry_candidates(analyses, closed_symbols_this_bar=set())
+
+    assert [symbol for symbol, _analysis in candidates] == ["BNBUSDT"]
+    assert engine.execution_audit["blocked_existing_position"] == 1
+    assert engine.execution_audit["blocked_pending_order"] == 1
+    assert engine.execution_audit["blocked_neutral_signal"] == 1
+    assert engine.execution_audit["blocked_threshold"] == 1
+    assert engine.execution_audit["candidate_entries"] == 1
+
+
+def test_backtest_pending_cancel_audit_tracks_reason_breakdown() -> None:
+    config = BacktestConfig(symbols=["SOLUSDT"], initial_capital=10000.0)
+    engine = BacktestEngine(config, MACDStrategyV2Config(), runtime_config={})
+    engine.capital = 9900.0
+    engine.pending_orders["SOLUSDT"] = {"margin": 100.0}
+
+    engine._cancel_pending_order("SOLUSDT", reason="ioc_unfilled")
+
+    assert engine.capital == pytest.approx(10000.0, rel=1e-6)
+    assert engine.execution_audit["orders_canceled"] == 1
+    assert engine.execution_audit["pending_cancel_reasons"]["ioc_unfilled"] == 1
+
+
+def test_build_backtest_summary_includes_execution_funnel_audit() -> None:
+    config = BacktestConfig(symbols=["SOLUSDT"], initial_capital=10000.0)
+    strategy_config = MACDStrategyV2Config()
+    engine = BacktestEngine(config, strategy_config, runtime_config={})
+    engine.execution_audit["candidate_entries"] = 12
+    engine.execution_audit["orders_submitted"] = 5
+    engine.execution_audit["orders_filled"] = 4
+    engine.execution_audit["capacity_full_precheck_candidates"] = 3
+    engine.execution_audit["capacity_competition_dropped"] = 2
+    engine.execution_audit["pending_cancel_reasons"]["ioc_unfilled"] = 1
+
+    summary = build_backtest_summary(
+        config,
+        strategy_config,
+        engine,
+        available_symbols=["SOLUSDT"],
+        missing_symbols=[],
+        stats={"signals": 20, "timeline_points": 10},
+    )
+
+    audit = summary["execution_funnel"]
+    assert audit["candidate_entries"] == 12
+    assert audit["orders_submitted"] == 5
+    assert audit["orders_filled"] == 4
+    assert audit["capacity_full_precheck_candidates"] == 3
+    assert audit["capacity_competition_dropped"] == 2
+    assert audit["pending_cancel_reasons"]["ioc_unfilled"] == 1
+
+
+def test_live_config_contains_vwap_deweight_ablation_profile() -> None:
+    runtime_cfg = _load_live_runtime_config()
+
+    merged, active_profile = apply_backtest_profile(
+        runtime_cfg,
+        profile_name="macd_v2_ablation_vwap_deweight",
+    )
+
+    assert active_profile == "macd_v2_ablation_vwap_deweight"
+    scoring = merged["fund_flow"]["macd_mtf_strategy_v2"]["scoring_weights"]
+    filters = merged["fund_flow"]["macd_mtf_strategy_v2"]["entry_filters"]
+    assert scoring["weight_vwap"] == 0.05
+    assert filters["min_vwap_score_for_entry"] == 0.0
+    assert filters["stable_bear_continuation_min_vwap_score"] == 0.0
+    assert filters["stable_bull_continuation_min_vwap_score"] == 0.0
+
+
+def test_live_config_contains_restore_1h_weight_ablation_profile() -> None:
+    runtime_cfg = _load_live_runtime_config()
+
+    merged, active_profile = apply_backtest_profile(
+        runtime_cfg,
+        profile_name="macd_v2_ablation_restore_1h_weight",
+    )
+
+    assert active_profile == "macd_v2_ablation_restore_1h_weight"
+    scoring = merged["fund_flow"]["macd_mtf_strategy_v2"]["scoring_weights"]
+    assert scoring["weight_1h_direction"] == 0.15
+    assert scoring["weight_4h_direction"] == 0.40
+    assert scoring["weight_vwap"] == runtime_cfg["fund_flow"]["macd_mtf_strategy_v2"]["scoring_weights"]["weight_vwap"]
+
+
+def test_live_config_contains_remove_trial_promotion_ablation_profile() -> None:
+    runtime_cfg = _load_live_runtime_config()
+
+    merged, active_profile = apply_backtest_profile(
+        runtime_cfg,
+        profile_name="macd_v2_ablation_remove_trial_promotion",
+    )
+
+    assert active_profile == "macd_v2_ablation_remove_trial_promotion"
+    filters = merged["fund_flow"]["macd_mtf_strategy_v2"]["entry_filters"]
+    assert filters["enable_4h_preflip_trial_entries"] is False
+    assert filters["enable_trial_short_below_structure_continuation_promotion"] is False
+    assert filters["enable_stable_bear_continuation"] == runtime_cfg["fund_flow"]["macd_mtf_strategy_v2"]["entry_filters"]["enable_stable_bear_continuation"]
+
+
+def test_build_strategy_config_ignores_legacy_momentum_exhaustion_keys() -> None:
+    runtime_cfg = {
+        "fund_flow": {
+            "macd_mtf_strategy_v2": {
+                "rsi_config": {
+                    "enable_entry_refinement": False,
+                    "enable_momentum_exhaustion_veto": False,
+                    "momentum_exhaustion_bars_1h": 7,
+                    "momentum_exhaustion_rsi_overbought": 80.0,
+                    "momentum_exhaustion_rsi_oversold": 20.0,
+                }
+            }
+        }
+    }
+
+    cfg = build_strategy_config(runtime_cfg)
+
+    assert cfg.enable_rsi_entry_refinement is False
+    assert not hasattr(cfg, "enable_momentum_exhaustion_veto")
+    assert not hasattr(cfg, "momentum_exhaustion_bars_1h")
+    assert not hasattr(cfg, "momentum_exhaustion_rsi_overbought")
+    assert not hasattr(cfg, "momentum_exhaustion_rsi_oversold")
+
+
+def test_live_config_disables_weak_combo_veto_for_deployment() -> None:
+    runtime_cfg = _load_live_runtime_config()
+
+    cfg = build_strategy_config(runtime_cfg)
+
+    assert cfg.enable_weak_combo_veto is False
+
+
+def test_live_config_raises_macd_v2_thresholds_to_target_90_120_trades() -> None:
+    runtime_cfg = _load_live_runtime_config()
+
+    cfg = build_strategy_config(runtime_cfg)
+
+    assert cfg.min_signal_score == pytest.approx(0.97, rel=1e-6)
+    assert cfg.red_bar_growing_min_signal_score == pytest.approx(0.97, rel=1e-6)
+    assert cfg.flip_bearish_min_signal_score == pytest.approx(0.97, rel=1e-6)
+    assert cfg.flip_bullish_min_signal_score == pytest.approx(0.97, rel=1e-6)
+    assert cfg.soft_long_min_signal_score == pytest.approx(0.97, rel=1e-6)
+    assert cfg.stable_bear_continuation_min_signal_score == pytest.approx(0.97, rel=1e-6)
+    assert cfg.stable_bull_continuation_min_signal_score == pytest.approx(0.97, rel=1e-6)
+    assert cfg.min_vwap_score_for_entry == pytest.approx(0.16, rel=1e-6)
+    assert cfg.preflip_trial_min_signal_score == pytest.approx(0.97, rel=1e-6)
+    assert cfg.trial_short_below_structure_promotion_min_signal_score == pytest.approx(0.97, rel=1e-6)

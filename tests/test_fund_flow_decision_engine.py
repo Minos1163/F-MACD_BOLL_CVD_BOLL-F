@@ -1,5 +1,5 @@
 from src.fund_flow.decision_engine import FundFlowDecisionEngine
-from src.fund_flow.models import Operation
+from src.fund_flow.models import FundFlowDecision, Operation
 
 
 def _cfg():
@@ -48,6 +48,104 @@ def test_macd_mtf_default_4h_enhancement_weight_is_aligned_to_v2_default():
     engine = FundFlowDecisionEngine(cfg)
 
     assert engine.macd_mtf_strategy_config.weight_4h_enhancement == 0.10
+
+
+def test_macd_v2_common_stable_continuation_threshold_populates_both_sides():
+    cfg = _cfg()
+    cfg["fund_flow"]["strategy_mode"] = "macd_mtf_strategy_v2"
+    cfg["fund_flow"]["macd_mtf_strategy_v2"] = {
+        "entry_thresholds": {
+            "stable_continuation_min_signal_score": 0.86,
+        },
+        "entry_filters": {
+            "enable_stable_bear_continuation": True,
+            "enable_stable_bull_continuation": True,
+        },
+    }
+
+    engine = FundFlowDecisionEngine(cfg)
+
+    assert engine.macd_v2_config.stable_bear_continuation_min_signal_score == 0.86
+    assert engine.macd_v2_config.stable_bull_continuation_min_signal_score == 0.86
+
+
+def test_macd_v2_common_stable_continuation_filters_are_side_defaults_only():
+    cfg = _cfg()
+    cfg["fund_flow"]["strategy_mode"] = "macd_mtf_strategy_v2"
+    cfg["fund_flow"]["macd_mtf_strategy_v2"] = {
+        "entry_filters": {
+            "enable_stable_bear_continuation": True,
+            "enable_stable_bull_continuation": True,
+            "stable_continuation_min_vwap_score": 0.07,
+            "stable_continuation_min_adx_1h": 28.0,
+            "stable_continuation_min_4h_bars": 2,
+            "stable_bull_continuation_min_vwap_score": 0.11,
+        },
+    }
+
+    engine = FundFlowDecisionEngine(cfg)
+
+    assert engine.macd_v2_config.stable_bear_continuation_min_vwap_score == 0.07
+    assert engine.macd_v2_config.stable_bear_continuation_min_adx_1h == 28.0
+    assert engine.macd_v2_config.stable_bear_continuation_min_4h_bars == 2
+    assert engine.macd_v2_config.stable_bull_continuation_min_vwap_score == 0.11
+    assert engine.macd_v2_config.stable_bull_continuation_min_adx_1h == 28.0
+    assert engine.macd_v2_config.stable_bull_continuation_min_4h_bars == 2
+
+
+def test_macd_v2_weak_combo_veto_flag_propagates_from_live_config():
+    cfg = _cfg()
+    cfg["fund_flow"]["strategy_mode"] = "macd_mtf_strategy_v2"
+    cfg["fund_flow"]["macd_mtf_strategy_v2"] = {
+        "entry_filters": {
+            "enable_weak_combo_veto": False,
+        },
+    }
+
+    engine = FundFlowDecisionEngine(cfg)
+
+    assert engine.macd_v2_config.enable_weak_combo_veto is False
+
+
+def test_macd_v2_soft_long_threshold_override_populates_config():
+    cfg = _cfg()
+    cfg["fund_flow"]["strategy_mode"] = "macd_mtf_strategy_v2"
+    cfg["fund_flow"]["macd_mtf_strategy_v2"] = {
+        "entry_thresholds": {
+            "soft_long_min_signal_score": 0.80,
+        },
+    }
+
+    engine = FundFlowDecisionEngine(cfg)
+
+    assert engine.macd_v2_config.soft_long_min_signal_score == 0.80
+
+
+def test_macd_v2_direction_gate_veto_uses_effective_runtime_mode():
+    engine = FundFlowDecisionEngine(_cfg())
+    decision = FundFlowDecision(
+        operation=Operation.SELL,
+        symbol="VETUSDT",
+        target_portion_of_balance=0.2,
+        leverage=4,
+        reason="macd_v2_short_1h_green_bar_growing_15m_soft_short_neutral_vwap_0.12",
+        metadata={"direction_lock": "BOTH"},
+    )
+
+    resolved = engine._apply_macd_v2_direction_gate(
+        decision,
+        effective_mode="LONG_ONLY",
+        source="macd_4h_regime_state.side_override_mode",
+    )
+
+    assert resolved.operation == Operation.HOLD
+    assert resolved.metadata["direction_lock"] == "LONG_ONLY"
+    assert resolved.metadata["direction_gate_source"] == "macd_4h_regime_state.side_override_mode"
+    assert resolved.metadata["direction_gate_effective_mode"] == "LONG_ONLY"
+    assert resolved.metadata["direction_gate_pre_decision"] == Operation.SELL.value
+    assert resolved.metadata["direction_gate_final_decision"] == Operation.HOLD.value
+    assert resolved.metadata["direction_gate_veto"] is True
+    assert resolved.metadata["blocked_reason"] == "direction_gate_veto"
 
 
 def test_decide_hold_when_long_score_lacks_breakout_or_pullback():

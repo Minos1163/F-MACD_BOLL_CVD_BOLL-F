@@ -244,6 +244,7 @@ def build_backtest_summary(
             "max_drawdown_trough_time": str(getattr(engine, "max_drawdown_trough_time", "") or ""),
             "max_drawdown_recovery_time": str(getattr(engine, "max_drawdown_recovery_time", "") or ""),
         },
+        "execution_funnel": copy.deepcopy(getattr(engine, "execution_audit", {}) or {}),
         "strategy_config": {
             "min_signal_score": strategy_config.min_signal_score,
             "min_entry_score": strategy_config.min_entry_score,
@@ -398,6 +399,11 @@ def build_strategy_config(runtime_cfg: dict) -> MACDStrategyV2Config:
     macd_cfg = v2_cfg.get("macd_config", {}) if isinstance(v2_cfg.get("macd_config"), dict) else {}
     filter_cfg = v2_cfg.get("entry_filters", {}) if isinstance(v2_cfg.get("entry_filters"), dict) else {}
     penalty_cfg = v2_cfg.get("penalty_config", {}) if isinstance(v2_cfg.get("penalty_config"), dict) else {}
+    rsi_cfg = v2_cfg.get("rsi_config", {}) if isinstance(v2_cfg.get("rsi_config"), dict) else {}
+    common_stable_continuation_min_signal_score = thresholds_cfg.get("stable_continuation_min_signal_score")
+    common_stable_continuation_min_vwap_score = filter_cfg.get("stable_continuation_min_vwap_score")
+    common_stable_continuation_min_adx_1h = filter_cfg.get("stable_continuation_min_adx_1h")
+    common_stable_continuation_min_4h_bars = filter_cfg.get("stable_continuation_min_4h_bars")
     default_signal_threshold = float(thresholds_cfg.get("default", thresholds_cfg.get("min_signal_score", 0.850)))
 
     return MACDStrategyV2Config(
@@ -435,6 +441,7 @@ def build_strategy_config(runtime_cfg: dict) -> MACDStrategyV2Config:
         red_bar_growing_min_signal_score=float(thresholds_cfg.get("red_bar_growing", default_signal_threshold)),
         flip_bearish_min_signal_score=float(thresholds_cfg.get("flip_bearish", default_signal_threshold)),
         flip_bullish_min_signal_score=float(thresholds_cfg.get("flip_bullish", default_signal_threshold)),
+        soft_long_min_signal_score=float(thresholds_cfg.get("soft_long_min_signal_score", 0.0)),
         enable_flip_bullish_strict_filter=bool(filter_cfg.get("enable_flip_bullish_strict_filter", True)),
         disable_flip_bullish_entries=bool(filter_cfg.get("disable_flip_bullish_entries", False)),
         flip_bullish_min_vwap_score=float(filter_cfg.get("flip_bullish_min_vwap_score", 0.12)),
@@ -459,9 +466,22 @@ def build_strategy_config(runtime_cfg: dict) -> MACDStrategyV2Config:
         allow_neutral_1h_confirmation=bool(filter_cfg.get("allow_neutral_1h_confirmation", False)),
         light_1h_confirmation_when_4h_primary=bool(filter_cfg.get("light_1h_confirmation_when_4h_primary", False)),
         enable_soft_15m_confirmation_when_4h_primary=bool(filter_cfg.get("enable_soft_15m_confirmation_when_4h_primary", True)),
+        enable_weak_combo_veto=bool(filter_cfg.get("enable_weak_combo_veto", True)),
         soft_15m_entry_score=float(filter_cfg.get("soft_15m_entry_score", 0.28)),
         soft_15m_neutral_hist_multiple=float(filter_cfg.get("soft_15m_neutral_hist_multiple", 3.0)),
         soft_15m_max_adverse_hist_multiple=float(filter_cfg.get("soft_15m_max_adverse_hist_multiple", 8.0)),
+        enable_rsi_entry_refinement=bool(rsi_cfg.get("enable_entry_refinement", True)),
+        rsi_period=int(float(rsi_cfg.get("period", 14))),
+        rsi_spring_recent_extreme_lookback=int(float(rsi_cfg.get("spring_recent_extreme_lookback", 6))),
+        rsi_spring_recent_oversold=float(rsi_cfg.get("spring_recent_oversold", 40.0)),
+        rsi_spring_recent_overbought=float(rsi_cfg.get("spring_recent_overbought", 60.0)),
+        rsi_spring_prev_max=float(rsi_cfg.get("spring_prev_max", 50.0)),
+        rsi_spring_confirm=float(rsi_cfg.get("spring_confirm", 50.0)),
+        rsi_1h_long_support=float(rsi_cfg.get("rsi_1h_long_support", rsi_cfg.get("long_support", 52.0))),
+        rsi_1h_short_support=float(rsi_cfg.get("rsi_1h_short_support", rsi_cfg.get("short_support", 48.0))),
+        rsi_extension_penalty_threshold_long=float(rsi_cfg.get("extension_penalty_threshold_long", 62.0)),
+        rsi_extension_penalty_threshold_short=float(rsi_cfg.get("extension_penalty_threshold_short", 38.0)),
+        rsi_extension_penalty_multiplier=float(rsi_cfg.get("extension_penalty_multiplier", 0.60)),
         enable_green_bar_growing_short_adx_1h_range_filter=bool(filter_cfg.get("enable_green_bar_growing_short_adx_1h_range_filter", False)),
         green_bar_growing_short_min_adx_1h=float(filter_cfg.get("green_bar_growing_short_min_adx_1h", 0.0)),
         green_bar_growing_short_max_adx_1h=float(filter_cfg.get("green_bar_growing_short_max_adx_1h", 0.0)),
@@ -472,6 +492,84 @@ def build_strategy_config(runtime_cfg: dict) -> MACDStrategyV2Config:
         preflip_trial_min_vwap_score=float(filter_cfg.get("preflip_trial_min_vwap_score", 0.06)),
         preflip_trial_entry_scale=float(filter_cfg.get("preflip_trial_entry_scale", 0.35)),
         preflip_trial_max_leverage=int(float(filter_cfg.get("preflip_trial_max_leverage", 2))),
+        enable_trial_short_below_structure_continuation_promotion=bool(
+            filter_cfg.get("enable_trial_short_below_structure_continuation_promotion", False)
+        ),
+        trial_short_below_structure_promotion_min_signal_score=float(
+            filter_cfg.get("trial_short_below_structure_promotion_min_signal_score", 0.82)
+        ),
+        trial_short_below_structure_promotion_min_vwap_score=float(
+            filter_cfg.get("trial_short_below_structure_promotion_min_vwap_score", 0.075)
+        ),
+        trial_short_below_structure_promotion_min_adx_1h=float(
+            filter_cfg.get("trial_short_below_structure_promotion_min_adx_1h", 25.0)
+        ),
+        trial_short_below_structure_promotion_min_4h_shrink_pct=float(
+            filter_cfg.get("trial_short_below_structure_promotion_min_4h_shrink_pct", 0.80)
+        ),
+        trial_short_below_structure_promotion_min_4h_shrink_bars=int(
+            float(filter_cfg.get("trial_short_below_structure_promotion_min_4h_shrink_bars", 6))
+        ),
+        enable_stable_bear_continuation=bool(filter_cfg.get("enable_stable_bear_continuation", True)),
+        stable_bear_continuation_min_signal_score=float(
+            thresholds_cfg.get(
+                "stable_bear_continuation_min_signal_score",
+                filter_cfg.get(
+                    "stable_bear_continuation_min_signal_score",
+                    common_stable_continuation_min_signal_score if common_stable_continuation_min_signal_score is not None else 0.82,
+                ),
+            )
+        ),
+        stable_bear_continuation_min_vwap_score=float(
+            filter_cfg.get(
+                "stable_bear_continuation_min_vwap_score",
+                common_stable_continuation_min_vwap_score if common_stable_continuation_min_vwap_score is not None else 0.10,
+            )
+        ),
+        stable_bear_continuation_min_adx_1h=float(
+            filter_cfg.get(
+                "stable_bear_continuation_min_adx_1h",
+                common_stable_continuation_min_adx_1h if common_stable_continuation_min_adx_1h is not None else 20.0,
+            )
+        ),
+        stable_bear_continuation_min_4h_bars=int(
+            float(
+                filter_cfg.get(
+                    "stable_bear_continuation_min_4h_bars",
+                    common_stable_continuation_min_4h_bars if common_stable_continuation_min_4h_bars is not None else 2,
+                )
+            )
+        ),
+        enable_stable_bull_continuation=bool(filter_cfg.get("enable_stable_bull_continuation", False)),
+        stable_bull_continuation_min_signal_score=float(
+            thresholds_cfg.get(
+                "stable_bull_continuation_min_signal_score",
+                filter_cfg.get(
+                    "stable_bull_continuation_min_signal_score",
+                    common_stable_continuation_min_signal_score if common_stable_continuation_min_signal_score is not None else 0.82,
+                ),
+            )
+        ),
+        stable_bull_continuation_min_vwap_score=float(
+            filter_cfg.get(
+                "stable_bull_continuation_min_vwap_score",
+                common_stable_continuation_min_vwap_score if common_stable_continuation_min_vwap_score is not None else 0.10,
+            )
+        ),
+        stable_bull_continuation_min_adx_1h=float(
+            filter_cfg.get(
+                "stable_bull_continuation_min_adx_1h",
+                common_stable_continuation_min_adx_1h if common_stable_continuation_min_adx_1h is not None else 20.0,
+            )
+        ),
+        stable_bull_continuation_min_4h_bars=int(
+            float(
+                filter_cfg.get(
+                    "stable_bull_continuation_min_4h_bars",
+                    common_stable_continuation_min_4h_bars if common_stable_continuation_min_4h_bars is not None else 2,
+                )
+            )
+        ),
         overheat_growing_penalty=float(penalty_cfg.get("overheat_growing_penalty", 0.12)),
         overheat_ema_multiplier_threshold=float(penalty_cfg.get("overheat_boll_multiplier_threshold", penalty_cfg.get("overheat_ema_multiplier_threshold", 1.2))),
         overheat_vwap_score_threshold=float(penalty_cfg.get("overheat_vwap_score_threshold", 0.10)),
@@ -876,6 +974,106 @@ class BacktestEngine:
         self._consecutive_losses: int = 0
         self._loss_streak_date_utc: str = ""
         self._entry_cooldown_until: Optional[pd.Timestamp] = None
+        self.execution_audit = {
+            "candidate_entries": 0,
+            "blocked_existing_position": 0,
+            "blocked_pending_order": 0,
+            "blocked_closed_same_bar": 0,
+            "blocked_neutral_signal": 0,
+            "blocked_threshold": 0,
+            "orders_submitted": 0,
+            "orders_filled": 0,
+            "orders_canceled": 0,
+            "capacity_full_precheck_bars": 0,
+            "capacity_full_precheck_candidates": 0,
+            "capacity_competition_bars": 0,
+            "capacity_competition_dropped": 0,
+            "execute_reject_reasons": {},
+            "pending_cancel_reasons": {},
+            "capacity_full_examples": [],
+            "competition_drop_examples": [],
+            "pending_cancel_examples": [],
+        }
+
+    def _bump_execution_audit(self, key: str, amount: int = 1) -> None:
+        self.execution_audit[key] = int(self.execution_audit.get(key, 0) or 0) + int(amount)
+
+    def _bump_execution_reason(self, bucket: str, reason: str, amount: int = 1) -> None:
+        reasons = self.execution_audit.setdefault(bucket, {})
+        name = str(reason or "unknown")
+        reasons[name] = int(reasons.get(name, 0) or 0) + int(amount)
+
+    def _append_execution_example(self, bucket: str, example: dict, limit: int = 20) -> None:
+        items = self.execution_audit.setdefault(bucket, [])
+        if len(items) >= limit:
+            return
+        items.append(copy.deepcopy(example))
+
+    def _build_entry_candidates(
+        self,
+        analyses: Dict[str, dict],
+        *,
+        closed_symbols_this_bar: set[str],
+    ) -> List[Tuple[str, dict]]:
+        candidates: List[Tuple[str, dict]] = []
+        for symbol, analysis in analyses.items():
+            if symbol in self.positions:
+                self._bump_execution_audit("blocked_existing_position")
+                continue
+            if symbol in closed_symbols_this_bar:
+                self._bump_execution_audit("blocked_closed_same_bar")
+                continue
+            if symbol in self.pending_orders:
+                self._bump_execution_audit("blocked_pending_order")
+                continue
+
+            signal = analysis['signal']
+            if signal.direction == 'neutral':
+                self._bump_execution_audit("blocked_neutral_signal")
+                continue
+            if signal.signal_score < self._signal_threshold(signal):
+                self._bump_execution_audit("blocked_threshold")
+                continue
+
+            self._bump_execution_audit("candidate_entries")
+            candidates.append((symbol, analysis))
+        return candidates
+
+    def _record_capacity_block(
+        self,
+        *,
+        current_ts: object,
+        blocked: List[Tuple[str, dict]],
+        positions_count: int,
+        pending_count: int,
+        precheck: bool,
+    ) -> None:
+        if not blocked:
+            return
+        if precheck:
+            self._bump_execution_audit("capacity_full_precheck_bars")
+            self._bump_execution_audit("capacity_full_precheck_candidates", len(blocked))
+            bucket = "capacity_full_examples"
+        else:
+            self._bump_execution_audit("capacity_competition_bars")
+            self._bump_execution_audit("capacity_competition_dropped", len(blocked))
+            bucket = "competition_drop_examples"
+
+        for symbol, analysis in blocked[:3]:
+            signal = analysis["signal"]
+            self._append_execution_example(
+                bucket,
+                {
+                    "ts": str(current_ts),
+                    "symbol": symbol,
+                    "signal_score": float(getattr(signal, "signal_score", 0.0) or 0.0),
+                    "signal_type_1h": str(getattr(signal, "signal_type_1h", "") or ""),
+                    "entry_type_15m": str(getattr(signal, "entry_type_15m", "") or ""),
+                    "vwap_score": float(getattr(signal, "vwap_score", 0.0) or 0.0),
+                    "positions": int(positions_count),
+                    "pending_orders": int(pending_count),
+                },
+            )
 
     def _strategy_engine_for_symbol(self, symbol: str) -> MACDStrategyV2Engine:
         override = self.signal_override_registry.get_override(symbol)
@@ -926,6 +1124,19 @@ class BacktestEngine:
         if not order:
             return
         self.capital += float(order.get('margin', 0.0))
+        cancel_reason = str(reason or "unknown")
+        self._bump_execution_audit("orders_canceled")
+        self._bump_execution_reason("pending_cancel_reasons", cancel_reason)
+        self._append_execution_example(
+            "pending_cancel_examples",
+            {
+                "symbol": symbol,
+                "reason": cancel_reason,
+                "bars_waited": int(order.get("bars_waited", 0) or 0),
+                "signal_score": float(order.get("signal_score", 0.0) or 0.0),
+                "side": str(order.get("side", "") or ""),
+            },
+        )
 
     @staticmethod
     def _utc_timestamp(ts: object) -> pd.Timestamp:
@@ -1332,11 +1543,22 @@ class BacktestEngine:
         return position_value, leverage
 
     def _signal_threshold(self, signal: MACDSignalV2) -> float:
-        if bool(getattr(signal, 'is_trial_entry', False)):
-            return float(self.strategy_config.preflip_trial_min_signal_score)
-        return self.strategy_config.resolve_signal_score_threshold(getattr(signal, 'signal_type_1h', None))
+        details = getattr(signal, 'details', {}) or {}
+        primary_mode = str(getattr(self.strategy_config, 'primary_direction_timeframe', '1h'))
+        threshold_signal_type = (
+            details.get('signal_type_4h') or getattr(signal, 'signal_type_1h', None)
+        ) if primary_mode == '4h' else getattr(signal, 'signal_type_1h', None)
+        threshold, _ = self.strategy_config.resolve_entry_threshold(
+            signal_type=threshold_signal_type,
+            entry_type_15m=getattr(signal, 'entry_type_15m', None),
+            primary_mode=primary_mode,
+            is_trial_entry=bool(getattr(signal, 'is_trial_entry', False)),
+            stable_continuation_active=bool(details.get('stable_continuation_active', False)),
+            stable_continuation_side=details.get('stable_continuation_side'),
+        )
+        return threshold
     
-    def execute_trade(self, symbol: str, analysis: dict, data: Dict[str, pd.DataFrame]):
+    def execute_trade(self, symbol: str, analysis: dict, data: Dict[str, pd.DataFrame]) -> bool:
         """在当前bar收盘后生成待成交入场订单，下一根bar开始撮合"""
         signal = analysis['signal']
         price = analysis['price']
@@ -1346,20 +1568,25 @@ class BacktestEngine:
         
         # 无信号或信号分数不足
         if signal.direction == 'neutral':
-            return
+            self._bump_execution_reason("execute_reject_reasons", "neutral_signal")
+            return False
         
         # 严格检查信号分数阈值
         if signal.signal_score < self._signal_threshold(signal):
-            return
+            self._bump_execution_reason("execute_reject_reasons", "below_threshold")
+            return False
 
         if symbol in self.positions or symbol in self.pending_orders:
-            return
+            self._bump_execution_reason("execute_reject_reasons", "already_active")
+            return False
 
         if self._is_entry_cooldown_active(time):
-            return
+            self._bump_execution_reason("execute_reject_reasons", "entry_cooldown")
+            return False
 
         if (len(self.positions) + len(self.pending_orders)) >= self.config.max_positions:
-            return
+            self._bump_execution_reason("execute_reject_reasons", "capacity_full")
+            return False
 
         strategy_engine = self._strategy_engine_for_symbol(symbol)
         session_position_scale = strategy_engine.resolve_session_position_scale(
@@ -1387,7 +1614,8 @@ class BacktestEngine:
             session_scale=session_position_scale,
         )
         if position_value <= 0:
-            return
+            self._bump_execution_reason("execute_reject_reasons", "position_value_zero")
+            return False
         
         # 计算止损价（使用V2.0动态止损）
         if signal.suggested_stop_price and signal.suggested_stop_price > 0:
@@ -1422,7 +1650,8 @@ class BacktestEngine:
             position_value = min(position_value, max_affordable_margin)
             required_margin = position_value
             if required_margin < 100:
-                return
+                self._bump_execution_reason("execute_reject_reasons", "insufficient_margin")
+                return False
 
         if signal.direction == 'long':
             limit_price = price * (1.0 + self.config.entry_slippage)
@@ -1479,6 +1708,8 @@ class BacktestEngine:
             'macd_4h_shrink_pct': float((signal.details or {}).get('macd_4h_shrink_pct', 0.0)),
             'macd_4h_shrink_bars': int((signal.details or {}).get('macd_4h_shrink_bars', 0) or 0),
         }
+        self._bump_execution_audit("orders_submitted")
+        return True
     
     def close_position(
         self,
@@ -1654,6 +1885,7 @@ class BacktestEngine:
             'realized_pnl_accum': 0.0,
         }
         self.pending_orders.pop(symbol, None)
+        self._bump_execution_audit("orders_filled")
         return True
 
     def process_pending_orders(self, analyses: Dict[str, dict]) -> set[str]:
@@ -1953,19 +2185,10 @@ class BacktestEngine:
                 if self.check_stops(symbol, analysis):
                     closed_symbols_this_bar.add(symbol)
 
-            if (len(self.positions) + len(self.pending_orders)) >= self.config.max_positions:
-                continue
-
-            candidates: List[Tuple[str, dict]] = []
-            for symbol, analysis in analyses.items():
-                if symbol in self.positions or symbol in closed_symbols_this_bar or symbol in self.pending_orders:
-                    continue
-                signal = analysis['signal']
-                if signal.direction == 'neutral':
-                    continue
-                if signal.signal_score < self._signal_threshold(signal):
-                    continue
-                candidates.append((symbol, analysis))
+            candidates = self._build_entry_candidates(
+                analyses,
+                closed_symbols_this_bar=closed_symbols_this_bar,
+            )
 
             candidates.sort(
                 key=lambda item: (
@@ -1976,8 +2199,25 @@ class BacktestEngine:
                 reverse=True,
             )
 
-            for symbol, analysis in candidates:
+            if (len(self.positions) + len(self.pending_orders)) >= self.config.max_positions:
+                self._record_capacity_block(
+                    current_ts=current_ts,
+                    blocked=candidates,
+                    positions_count=len(self.positions),
+                    pending_count=len(self.pending_orders),
+                    precheck=True,
+                )
+                continue
+
+            for idx, (symbol, analysis) in enumerate(candidates):
                 if (len(self.positions) + len(self.pending_orders)) >= self.config.max_positions:
+                    self._record_capacity_block(
+                        current_ts=current_ts,
+                        blocked=candidates[idx:],
+                        positions_count=len(self.positions),
+                        pending_count=len(self.pending_orders),
+                        precheck=False,
+                    )
                     break
                 self.execute_trade(symbol, analysis, market_data_map[symbol])
 
@@ -2353,7 +2593,25 @@ def run_backtest(
     for v, count in stats['vetoes'].items():
         if count > 0:
             print(f"  {v.value}: {count}次")
-    
+
+    audit = getattr(engine, "execution_audit", {}) or {}
+    if audit:
+        print(f"\n执行漏斗审计:")
+        print(f"  候选入池: {int(audit.get('candidate_entries', 0) or 0)}")
+        print(f"  挂单提交: {int(audit.get('orders_submitted', 0) or 0)}")
+        print(f"  挂单成交: {int(audit.get('orders_filled', 0) or 0)}")
+        print(
+            "  仓位占满拦截: "
+            f"precheck候选={int(audit.get('capacity_full_precheck_candidates', 0) or 0)}, "
+            f"same_bar竞争丢弃={int(audit.get('capacity_competition_dropped', 0) or 0)}"
+        )
+        pending_cancel_reasons = audit.get("pending_cancel_reasons", {}) or {}
+        if pending_cancel_reasons:
+            print(
+                "  挂单取消原因: "
+                + ", ".join(f"{key}={value}" for key, value in sorted(pending_cancel_reasons.items()))
+            )
+
     # 保存交易记录
     if trades:
         trades_df = pd.DataFrame(trades)
