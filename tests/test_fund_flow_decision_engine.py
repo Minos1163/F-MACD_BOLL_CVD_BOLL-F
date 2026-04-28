@@ -1846,3 +1846,23 @@ def test_rule_stop_trigger_short_runner_exits_on_below_zero_golden_cross():
     assert stop_state["exit_stage"] == "RUNNER"
     assert stop_state["exit_trigger"] == "macd_golden_cross_below_zero"
 
+
+def test_macd_v2_volume_vwap_combo_thresholds_propagate_from_config() -> None:
+    cfg = _cfg()
+    cfg["fund_flow"]["strategy_mode"] = "macd_mtf_strategy_v2"
+    cfg["fund_flow"]["macd_mtf_strategy_v2"] = {
+        "entry_filters": {
+            "volume_vwap_both_low_min_score_vol": 0.02,
+            "volume_vwap_both_low_min_vwap_score": 0.02,
+            "disable_red_bar_shrinking_long_dual_support_entries": False,
+            "disable_green_bar_shrinking_short_dual_pressure_entries": False,
+        },
+    }
+
+    engine = FundFlowDecisionEngine(cfg)
+
+    assert engine.macd_v2_config.volume_vwap_both_low_min_score_vol == pytest.approx(0.02, rel=1e-6)
+    assert engine.macd_v2_config.volume_vwap_both_low_min_vwap_score == pytest.approx(0.02, rel=1e-6)
+    assert engine.macd_v2_config.disable_red_bar_shrinking_long_dual_support_entries is False
+    assert engine.macd_v2_config.disable_green_bar_shrinking_short_dual_pressure_entries is False
+

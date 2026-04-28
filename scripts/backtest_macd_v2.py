@@ -456,6 +456,7 @@ def build_strategy_config(runtime_cfg: dict) -> MACDStrategyV2Config:
         min_entry_score=float(thresholds_cfg.get("min_entry_score", 0.25)),
         min_signal_score=default_signal_threshold,
         red_bar_growing_min_signal_score=float(thresholds_cfg.get("red_bar_growing", default_signal_threshold)),
+        green_bar_growing_min_signal_score=float(thresholds_cfg.get("green_bar_growing", default_signal_threshold)),
         flip_bearish_min_signal_score=float(thresholds_cfg.get("flip_bearish", default_signal_threshold)),
         flip_bullish_min_signal_score=float(thresholds_cfg.get("flip_bullish", default_signal_threshold)),
         soft_long_min_signal_score=float(thresholds_cfg.get("soft_long_min_signal_score", 0.0)),
@@ -479,6 +480,7 @@ def build_strategy_config(runtime_cfg: dict) -> MACDStrategyV2Config:
         flip_bullish_cooling_reject_if_1h_rsi_above=float(flip_bullish_cooling_cfg.get("reject_if_1h_rsi_above", 72.0)),
         flip_bullish_cooling_soft_rsi_above=float(flip_bullish_cooling_cfg.get("soft_rsi_above", 72.0)),
         flip_bullish_cooling_soft_discount=float(flip_bullish_cooling_cfg.get("soft_discount", 0.90)),
+        flip_bullish_cooling_hard_rsi_buffer=float(flip_bullish_cooling_cfg.get("hard_rsi_buffer", 3.0)),
         flip_bullish_cooling_reject_if_15m_no_spring_and_rsi_high=bool(
             flip_bullish_cooling_cfg.get("reject_if_15m_no_spring_and_rsi_high", True)
         ),
@@ -494,6 +496,12 @@ def build_strategy_config(runtime_cfg: dict) -> MACDStrategyV2Config:
         ema_slope_lookback_4h=int(float(filter_cfg.get("bb_slope_lookback_4h", filter_cfg.get("ema_slope_lookback_4h", 2)))),
         disable_red_bar_growing_long_entries=bool(filter_cfg.get("disable_red_bar_growing_long_entries", False)),
         disable_green_bar_growing_entries=bool(filter_cfg.get("disable_green_bar_growing_entries", True)),
+        disable_green_bar_shrinking_short_dual_pressure_entries=bool(
+            filter_cfg.get("disable_green_bar_shrinking_short_dual_pressure_entries", True)
+        ),
+        disable_red_bar_shrinking_long_dual_support_entries=bool(
+            filter_cfg.get("disable_red_bar_shrinking_long_dual_support_entries", True)
+        ),
         primary_direction_timeframe=str(filter_cfg.get("primary_direction_timeframe", "4h")),
         require_1h_confirmation_when_4h_primary=bool(filter_cfg.get("require_1h_confirmation_when_4h_primary", False)),
         allow_neutral_1h_confirmation=bool(filter_cfg.get("allow_neutral_1h_confirmation", False)),
@@ -541,6 +549,8 @@ def build_strategy_config(runtime_cfg: dict) -> MACDStrategyV2Config:
         enable_green_bar_growing_probe_overlay=bool(position_mgmt_cfg.get("enable_green_bar_growing_probe_overlay", False)),
         green_bar_growing_probe_position_penalty=float(position_mgmt_cfg.get("green_bar_growing_probe_position_penalty", 0.40)),
         green_bar_growing_probe_max_leverage=max(1, int(float(position_mgmt_cfg.get("green_bar_growing_probe_max_leverage", 2)))),
+        volume_vwap_both_low_min_score_vol=float(filter_cfg.get("volume_vwap_both_low_min_score_vol", 0.05)),
+        volume_vwap_both_low_min_vwap_score=float(filter_cfg.get("volume_vwap_both_low_min_vwap_score", 0.10)),
         rsi_spring_recent_extreme_lookback=int(float(rsi_cfg.get("spring_recent_extreme_lookback", 6))),
         rsi_spring_recent_oversold=float(rsi_cfg.get("spring_recent_oversold", 40.0)),
         rsi_spring_recent_overbought=float(rsi_cfg.get("spring_recent_overbought", 60.0)),

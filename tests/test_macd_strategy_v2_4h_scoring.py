@@ -321,6 +321,218 @@ def test_promoted_trial_uses_stable_continuation_threshold() -> None:
     assert signal.details.get("threshold_source") is None
 
 
+def test_preflip_zero_shrink_falls_back_to_primary_direction(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            weight_1h_direction=0.0,
+            weight_4h_direction=0.5,
+            weight_4h_enhancement=0.0,
+            weight_vwap=0.0,
+            weight_15m_entry=0.0,
+            weight_volume=0.15,
+            min_signal_score=0.1,
+            min_entry_score=0.0,
+            flip_bullish_min_signal_score=0.1,
+            min_vwap_score_for_entry=0.0,
+            overheat_growing_penalty=0.0,
+            enable_flip_bullish_strict_filter=False,
+            disable_flip_bullish_entries=False,
+            disable_green_bar_growing_entries=False,
+            primary_direction_timeframe="4h",
+            require_1h_confirmation_when_4h_primary=True,
+            allow_neutral_1h_confirmation=True,
+            light_1h_confirmation_when_4h_primary=True,
+            enable_4h_preflip_trial_entries=True,
+            preflip_trial_min_shrink_pct_long=0.75,
+        )
+    )
+
+    monkeypatch.setattr(
+        engine,
+        "detect_1h_macd_direction",
+        lambda hist, idx: (
+            None,
+            {
+                "signal_type": "",
+                "signal_strength": 0.0,
+                "hist_current": float(hist[idx]),
+                "hist_prev": float(hist[idx - 1]) if idx > 0 else float(hist[idx]),
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        engine,
+        "detect_macd_direction",
+        lambda hist, idx: (
+            None,
+            {
+                "signal_type": "green_bar_shrinking",
+                "signal_strength": 0.0,
+                "hist_current": float(hist[idx]),
+                "hist_prev": float(hist[idx - 1]) if idx > 0 else float(hist[idx]),
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        engine,
+        "_build_4h_shrink_context",
+        lambda hist, idx, signal_type: {
+            "signal_type_4h": "green_bar_shrinking",
+            "shrink_pct": 0.0,
+            "shrink_bars": 0,
+            "preflip_direction": "long",
+            "exit_direction": "short",
+            "shrink_exit_ready": False,
+        },
+    )
+    monkeypatch.setattr(
+        engine,
+        "resolve_primary_direction",
+        lambda **kwargs: ("long", None, {"fallback_primary_direction_used": True}),
+    )
+
+    signal = engine.analyze(
+        macd_hist_15m=np.array([-0.10, -0.05, 0.02, 0.05]),
+        macd_hist_1h=np.array([-0.20, -0.10, 0.05, 0.10]),
+        macd_hist_4h=np.array([0.40, 0.45, 0.45, 0.45]),
+        idx_15m=3,
+        idx_1h=3,
+        idx_4h=3,
+        volume_ratio=2.0,
+        vwap=100.5,
+        structural_vwap=100.0,
+        close_price=101.0,
+        bb_middle_1h=100.0,
+        bb_upper_1h=110.0,
+        bb_lower_1h=90.0,
+        bb_middle_4h=99.0,
+        bb_upper_4h=109.0,
+        bb_lower_4h=89.0,
+        bb_middle_15m=100.0,
+        bb_upper_15m=103.0,
+        bb_lower_15m=97.0,
+        close_15m=100.8,
+        close_15m_series=np.array([99.0, 99.5, 100.0, 100.8]),
+        close_1h_series=np.array([98.5, 99.0, 100.0, 101.0]),
+        close_4h_series=np.array([97.0, 98.0, 99.0, 101.0]),
+        adx_1h=20.0,
+        adx_4h=22.0,
+        atr_1h=1.0,
+    )
+
+    assert signal.direction == "long"
+    assert signal.details["trade_direction"] == "long"
+    assert signal.details["is_trial_entry"] is False
+    assert signal.details["macd_4h_shrink_pct"] == pytest.approx(0.0, rel=1e-6)
+    assert "4H预翻转缩短不足" not in str(signal.details.get("reason"))
+
+
+def test_preflip_insufficient_shrink_falls_back_to_primary_direction(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            weight_1h_direction=0.0,
+            weight_4h_direction=0.5,
+            weight_4h_enhancement=0.0,
+            weight_vwap=0.0,
+            weight_15m_entry=0.0,
+            weight_volume=0.15,
+            min_signal_score=0.1,
+            min_entry_score=0.0,
+            flip_bullish_min_signal_score=0.1,
+            min_vwap_score_for_entry=0.0,
+            overheat_growing_penalty=0.0,
+            enable_flip_bullish_strict_filter=False,
+            disable_flip_bullish_entries=False,
+            disable_green_bar_growing_entries=False,
+            primary_direction_timeframe="4h",
+            require_1h_confirmation_when_4h_primary=True,
+            allow_neutral_1h_confirmation=True,
+            light_1h_confirmation_when_4h_primary=True,
+            enable_4h_preflip_trial_entries=True,
+            preflip_trial_min_shrink_pct_long=0.75,
+        )
+    )
+
+    monkeypatch.setattr(
+        engine,
+        "detect_1h_macd_direction",
+        lambda hist, idx: (
+            None,
+            {
+                "signal_type": "",
+                "signal_strength": 0.0,
+                "hist_current": float(hist[idx]),
+                "hist_prev": float(hist[idx - 1]) if idx > 0 else float(hist[idx]),
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        engine,
+        "detect_macd_direction",
+        lambda hist, idx: (
+            None,
+            {
+                "signal_type": "green_bar_shrinking",
+                "signal_strength": 0.0,
+                "hist_current": float(hist[idx]),
+                "hist_prev": float(hist[idx - 1]) if idx > 0 else float(hist[idx]),
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        engine,
+        "_build_4h_shrink_context",
+        lambda hist, idx, signal_type: {
+            "signal_type_4h": "green_bar_shrinking",
+            "shrink_pct": 0.20,
+            "shrink_bars": 2,
+            "preflip_direction": "long",
+            "exit_direction": "short",
+            "shrink_exit_ready": False,
+        },
+    )
+    monkeypatch.setattr(
+        engine,
+        "resolve_primary_direction",
+        lambda **kwargs: ("long", None, {"fallback_primary_direction_used": True}),
+    )
+
+    signal = engine.analyze(
+        macd_hist_15m=np.array([-0.10, -0.05, 0.02, 0.05]),
+        macd_hist_1h=np.array([-0.20, -0.10, 0.05, 0.10]),
+        macd_hist_4h=np.array([0.40, 0.45, 0.45, 0.45]),
+        idx_15m=3,
+        idx_1h=3,
+        idx_4h=3,
+        volume_ratio=2.0,
+        vwap=100.5,
+        structural_vwap=100.0,
+        close_price=101.0,
+        bb_middle_1h=100.0,
+        bb_upper_1h=110.0,
+        bb_lower_1h=90.0,
+        bb_middle_4h=99.0,
+        bb_upper_4h=109.0,
+        bb_lower_4h=89.0,
+        bb_middle_15m=100.0,
+        bb_upper_15m=103.0,
+        bb_lower_15m=97.0,
+        close_15m=100.8,
+        close_15m_series=np.array([99.0, 99.5, 100.0, 100.8]),
+        close_1h_series=np.array([98.5, 99.0, 100.0, 101.0]),
+        close_4h_series=np.array([97.0, 98.0, 99.0, 101.0]),
+        adx_1h=20.0,
+        adx_4h=22.0,
+        atr_1h=1.0,
+    )
+
+    assert signal.direction == "long"
+    assert signal.details["trade_direction"] == "long"
+    assert signal.details["macd_4h_shrink_pct"] == pytest.approx(0.20, rel=1e-6)
+    assert signal.details["is_trial_entry"] is False
+    assert "4H预翻转缩短不足" not in str(signal.details.get("reason"))
+
+
 def test_evaluate_rsi_rhythm_long_spring_reports_weighted_trace() -> None:
     engine = MACDStrategyV2Engine(
         MACDStrategyV2Config(
@@ -352,6 +564,16 @@ def test_evaluate_rsi_rhythm_long_spring_reports_weighted_trace() -> None:
     assert result["raw_score"] > 0.70
     assert result["weighted_score"] == pytest.approx(result["raw_score"] * 0.25, rel=1e-6)
     assert result["exposure_mult"] == pytest.approx(1.2, rel=1e-6)
+
+
+def test_calculate_portion_multiplier_keeps_mid_score_candidates_tradeable() -> None:
+    engine = MACDStrategyV2Engine(MACDStrategyV2Config())
+
+    assert engine.calculate_portion_multiplier(0.92) == pytest.approx(1.2, rel=1e-6)
+    assert engine.calculate_portion_multiplier(0.82) == pytest.approx(1.0, rel=1e-6)
+    assert engine.calculate_portion_multiplier(0.66) == pytest.approx(0.8, rel=1e-6)
+    assert engine.calculate_portion_multiplier(0.60) == pytest.approx(0.6, rel=1e-6)
+    assert engine.calculate_portion_multiplier(0.54) == pytest.approx(0.0, rel=1e-6)
 
 
 def test_evaluate_rsi_rhythm_extreme_veto_blocks_without_price_breakout() -> None:
@@ -590,7 +812,7 @@ def test_flip_bullish_cooling_allows_spring_like_high_rsi_launch() -> None:
     assert result["score_multiplier"] == pytest.approx(1.0, rel=1e-6)
 
 
-def test_flip_bullish_cooling_rejects_mildly_overheated_non_spring_launch() -> None:
+def test_flip_bullish_cooling_softens_mildly_overheated_non_spring_launch() -> None:
     engine = MACDStrategyV2Engine(MACDStrategyV2Config())
 
     result = engine._evaluate_flip_bullish_cooling(
@@ -604,9 +826,9 @@ def test_flip_bullish_cooling_rejects_mildly_overheated_non_spring_launch() -> N
     )
 
     assert result["applies"] is True
-    assert result["passed"] is False
-    assert result["reason"] == "overheated_launch"
-    assert result["score_multiplier"] == pytest.approx(1.0, rel=1e-6)
+    assert result["passed"] is True
+    assert result["reason"] == "soft_launch_profile"
+    assert result["score_multiplier"] == pytest.approx(0.90, rel=1e-6)
 
 
 def test_flip_bullish_cooling_rejects_high_15m_rsi_without_spring() -> None:
@@ -626,6 +848,126 @@ def test_flip_bullish_cooling_rejects_high_15m_rsi_without_spring() -> None:
     assert result["passed"] is False
     assert result["reason"] == "no_spring_high_rsi"
     assert result["score_multiplier"] == pytest.approx(1.0, rel=1e-6)
+
+
+def test_analyze_vwap_hard_block_only_triggers_beyond_3pct_deviation() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            weight_1h_direction=0.15,
+            weight_4h_direction=0.40,
+            weight_4h_enhancement=0.0,
+            weight_rsi_rhythm=0.25,
+            weight_vwap=0.0,
+            weight_15m_entry=0.0,
+            weight_volume=0.20,
+            min_signal_score=0.10,
+            min_entry_score=0.10,
+            flip_bullish_min_signal_score=0.10,
+            min_vwap_score_for_entry=0.0,
+            overheat_growing_penalty=0.0,
+            enable_flip_bullish_sniper=False,
+            enable_flip_bullish_cooling=False,
+            enable_flip_bullish_strict_filter=False,
+            disable_flip_bullish_entries=False,
+            disable_green_bar_growing_entries=False,
+            primary_direction_timeframe="4h",
+        )
+    )
+
+    analyze_kwargs = dict(
+        macd_hist_15m=np.array([-0.10, -0.05, 0.02, 0.05]),
+        macd_hist_1h=np.array([-0.20, -0.10, 0.05, 0.10]),
+        macd_hist_4h=np.array([-0.30, -0.15, -0.05, 0.20]),
+        idx_15m=3,
+        idx_1h=3,
+        idx_4h=3,
+        volume_ratio=2.0,
+        vwap=100.0,
+        structural_vwap=100.0,
+        bb_middle_1h=100.0,
+        bb_upper_1h=110.0,
+        bb_lower_1h=90.0,
+        bb_middle_4h=99.0,
+        bb_upper_4h=109.0,
+        bb_lower_4h=89.0,
+        bb_middle_15m=100.0,
+        bb_upper_15m=103.0,
+        bb_lower_15m=97.0,
+        close_15m=102.5,
+        adx_1h=20.0,
+        adx_4h=22.0,
+        atr_1h=1.0,
+    )
+
+    slight_deviation_signal = engine.analyze(
+        close_price=102.5,
+        **analyze_kwargs,
+    )
+    hard_block_signal = engine.analyze(
+        close_price=103.5,
+        **analyze_kwargs,
+    )
+
+    assert slight_deviation_signal.direction == "long"
+    assert hard_block_signal.direction == "neutral"
+    assert hard_block_signal.veto_type is not None
+    assert hard_block_signal.veto_type.value == "vwap_hard_block"
+
+
+def test_analyze_volume_vwap_combo_veto_respects_relaxed_thresholds() -> None:
+    config = MACDStrategyV2Config(
+        weight_1h_direction=0.15,
+        weight_4h_direction=0.40,
+        weight_4h_enhancement=0.0,
+        weight_rsi_rhythm=0.25,
+        weight_vwap=0.05,
+        weight_15m_entry=0.0,
+        weight_volume=0.10,
+        min_signal_score=0.10,
+        min_entry_score=0.10,
+        flip_bullish_min_signal_score=0.10,
+        min_vwap_score_for_entry=0.0,
+        overheat_growing_penalty=0.0,
+        enable_flip_bullish_sniper=False,
+        enable_flip_bullish_cooling=False,
+        enable_flip_bullish_strict_filter=False,
+        disable_flip_bullish_entries=False,
+        disable_green_bar_growing_entries=False,
+        primary_direction_timeframe="4h",
+    )
+    config.volume_vwap_both_low_min_score_vol = 0.02
+    config.volume_vwap_both_low_min_vwap_score = 0.02
+    engine = MACDStrategyV2Engine(config)
+
+    signal = engine.analyze(
+        macd_hist_15m=np.array([-0.10, -0.05, 0.02, 0.05]),
+        macd_hist_1h=np.array([-0.20, -0.10, 0.05, 0.10]),
+        macd_hist_4h=np.array([-0.30, -0.15, -0.05, 0.20]),
+        idx_15m=3,
+        idx_1h=3,
+        idx_4h=3,
+        volume_ratio=0.7,
+        vwap=100.0,
+        structural_vwap=100.0,
+        close_price=100.6,
+        bb_middle_1h=100.0,
+        bb_upper_1h=110.0,
+        bb_lower_1h=90.0,
+        bb_middle_4h=99.0,
+        bb_upper_4h=109.0,
+        bb_lower_4h=89.0,
+        bb_middle_15m=100.0,
+        bb_upper_15m=103.0,
+        bb_lower_15m=97.0,
+        close_15m=100.6,
+        adx_1h=20.0,
+        adx_4h=22.0,
+        atr_1h=1.0,
+    )
+
+    assert signal.direction == "long"
+    assert signal.veto_type is not None
+    assert signal.veto_type.value == "none"
 
 
 def test_flip_bullish_strict_filter_softens_into_score_penalty() -> None:

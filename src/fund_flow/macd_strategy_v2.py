@@ -113,6 +113,7 @@ class MACDStrategyV2Config:
     flip_bullish_cooling_reject_if_1h_rsi_above: float = 72.0
     flip_bullish_cooling_soft_rsi_above: float = 72.0
     flip_bullish_cooling_soft_discount: float = 0.90
+    flip_bullish_cooling_hard_rsi_buffer: float = 3.0
     flip_bullish_cooling_reject_if_15m_no_spring_and_rsi_high: bool = True
     flip_bullish_cooling_reject_if_15m_rsi_above: float = 65.0
     flip_bearish_min_ema_multiplier: float = 0.0
@@ -273,6 +274,8 @@ class MACDStrategyV2Config:
     overheat_ema_multiplier_threshold: float = 1.2
     overheat_vwap_score_threshold: float = 0.10
     min_vwap_score_for_entry: float = 0.10  # VWAP全局过滤
+    volume_vwap_both_low_min_score_vol: float = 0.05
+    volume_vwap_both_low_min_vwap_score: float = 0.10
     
     # 止损配置
     use_dynamic_stop: bool = True
@@ -1110,13 +1113,29 @@ class MACDStrategyV2Engine:
         rsi_15m_current = float(rhythm.get("rsi_15m_current", np.nan) or np.nan)
         entry_type = str(rhythm.get("entry_type") or "").strip().lower()
         spring_like_entry = entry_type in {"rsi_spring", "rsi_neutral_resume"}
+        soft_threshold = float(self.config.flip_bullish_cooling_soft_rsi_above)
+        hard_threshold = max(
+            float(self.config.flip_bullish_cooling_reject_if_1h_rsi_above),
+            soft_threshold + max(0.0, float(self.config.flip_bullish_cooling_hard_rsi_buffer)),
+        )
 
         if (
             np.isfinite(rsi_1h_current)
-            and rsi_1h_current > float(self.config.flip_bullish_cooling_reject_if_1h_rsi_above)
             and not spring_like_entry
+            and rsi_1h_current > hard_threshold
         ):
             result.update(passed=False, reason="overheated_launch")
+            return result
+        if (
+            np.isfinite(rsi_1h_current)
+            and not spring_like_entry
+            and rsi_1h_current > soft_threshold
+        ):
+            result.update(
+                passed=True,
+                reason="soft_launch_profile",
+                score_multiplier=float(self.config.flip_bullish_cooling_soft_discount),
+            )
             return result
         if (
             self.config.flip_bullish_cooling_reject_if_15m_no_spring_and_rsi_high
@@ -3280,8 +3299,10 @@ class MACDStrategyV2Engine:
             and bool(self.config.enable_4h_preflip_trial_entries)
             and preflip_candidate_direction is not None
         )
+        preflip_trial_active = False
         if preflip_enabled and direction_4h is None:
             shrink_pct = float(shrink_4h_context["shrink_pct"])
+            shrink_bars = int(shrink_4h_context.get("shrink_bars", 0) or 0)
             min_preflip_shrink_pct = (
                 float(self.config.preflip_trial_min_shrink_pct_long)
                 if preflip_candidate_direction == "long"
@@ -3292,34 +3313,41 @@ class MACDStrategyV2Engine:
                 "preflip_candidate_direction": preflip_candidate_direction,
                 "preflip_min_shrink_pct": min_preflip_shrink_pct,
             }
-            if direction_1h is None:
-                if self.config.allow_neutral_1h_confirmation:
-                    direction_debug["preflip_confirmation_status"] = "neutral_allowed"
+            if shrink_pct > 0.0 and shrink_bars > 0:
+                if direction_1h is None:
+                    if self.config.allow_neutral_1h_confirmation:
+                        direction_debug["preflip_confirmation_status"] = "neutral_allowed"
+                    else:
+                        direction_debug["preflip_confirmation_status"] = "missing"
+                elif direction_1h != preflip_candidate_direction:
+                    direction_debug["preflip_confirmation_status"] = "opposite"
+                elif shrink_pct < min_preflip_shrink_pct:
+                    direction_debug["preflip_confirmation_status"] = "insufficient_shrink"
                 else:
-                    direction_reject_reason = "1H无预翻转确认信号"
-                    direction_debug["preflip_confirmation_status"] = "missing"
-            elif direction_1h != preflip_candidate_direction:
-                direction_reject_reason = f"1H预翻转方向不一致({direction_1h}->{preflip_candidate_direction})"
-                direction_debug["preflip_confirmation_status"] = "opposite"
-            if direction_reject_reason is None and shrink_pct < min_preflip_shrink_pct:
-                direction_reject_reason = f"4H预翻转缩短不足({shrink_pct:.2f}<{min_preflip_shrink_pct:.2f})"
-                direction_debug["preflip_confirmation_status"] = "insufficient_shrink"
-            elif direction_reject_reason is None:
-                trade_direction = preflip_candidate_direction
-                is_trial_entry = True
-                entry_scale = self._clamp(self.config.preflip_trial_entry_scale, 0.05, 1.0)
+                    preflip_trial_active = True
+                    trade_direction = preflip_candidate_direction
+                    is_trial_entry = True
+                    entry_scale = self._clamp(self.config.preflip_trial_entry_scale, 0.05, 1.0)
+                    direction_debug.update(
+                        preflip_confirmation_status="aligned",
+                        preflip_trial_entry=True,
+                        preflip_entry_scale=entry_scale,
+                    )
+            else:
                 direction_debug.update(
-                    preflip_confirmation_status="aligned",
-                    preflip_trial_entry=True,
-                    preflip_entry_scale=entry_scale,
+                    preflip_confirmation_status="inactive_zero_shrink",
+                    preflip_zero_shrink_fallback=True,
                 )
-        else:
-            trade_direction, direction_reject_reason, direction_debug = self.resolve_primary_direction(
+        if not preflip_trial_active:
+            preflip_fallback_debug = dict(direction_debug)
+            trade_direction, direction_reject_reason, primary_direction_debug = self.resolve_primary_direction(
                 direction_1h=direction_1h,
                 details_1h=details_1h,
                 direction_4h=direction_4h,
                 details_4h=details_4h,
             )
+            preflip_fallback_debug.update(primary_direction_debug)
+            direction_debug = preflip_fallback_debug
             if trade_direction is None:
                 recovered_direction, continuation_direction_debug = self._resolve_stable_continuation_direction(
                     primary_mode=primary_mode,
@@ -4483,7 +4511,10 @@ class MACDStrategyV2Engine:
         
         # ========== Step 7: 组合否决检查 ==========
         # V6: 成交量 + VWAP 双低
-        if score_vol < 0.05 and vwap_score <= 0.10:
+        if (
+            score_vol < float(self.config.volume_vwap_both_low_min_score_vol)
+            and vwap_score <= float(self.config.volume_vwap_both_low_min_vwap_score)
+        ):
             return self._neutral_signal(
                 reason='volume_vwap_both_low',
                 score=score,
@@ -4871,10 +4902,12 @@ class MACDStrategyV2Engine:
         """根据评分计算仓位乘数"""
         if score >= 0.90:
             return 1.2
-        elif score >= 0.85:
+        elif score >= 0.80:
             return 1.0
-        elif score >= 0.75:
+        elif score >= 0.65:
             return 0.8
+        elif score >= 0.55:
+            return 0.6
         return 0.0
 
     def calculate_position_portion(

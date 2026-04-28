@@ -605,6 +605,10 @@ class FundFlowDecisionEngine:
                 flip_bullish_cooling_reject_if_1h_rsi_above=self._to_float(flip_bullish_cooling_cfg.get("reject_if_1h_rsi_above"), 72.0),
                 flip_bullish_cooling_soft_rsi_above=self._to_float(flip_bullish_cooling_cfg.get("soft_rsi_above"), 72.0),
                 flip_bullish_cooling_soft_discount=self._to_float(flip_bullish_cooling_cfg.get("soft_discount"), 0.90),
+                flip_bullish_cooling_hard_rsi_buffer=self._to_float(
+                    flip_bullish_cooling_cfg.get("hard_rsi_buffer"),
+                    3.0,
+                ),
                 flip_bullish_cooling_reject_if_15m_no_spring_and_rsi_high=bool(
                     flip_bullish_cooling_cfg.get("reject_if_15m_no_spring_and_rsi_high", True)
                 ),
@@ -626,6 +630,12 @@ class FundFlowDecisionEngine:
                 ema_slope_lookback_4h=int(self._to_float(filter_cfg.get("bb_slope_lookback_4h", filter_cfg.get("ema_slope_lookback_4h")), 2)),
                 disable_red_bar_growing_long_entries=bool(filter_cfg.get("disable_red_bar_growing_long_entries", False)),
                 disable_green_bar_growing_entries=bool(filter_cfg.get("disable_green_bar_growing_entries", True)),
+                disable_green_bar_shrinking_short_dual_pressure_entries=bool(
+                    filter_cfg.get("disable_green_bar_shrinking_short_dual_pressure_entries", True)
+                ),
+                disable_red_bar_shrinking_long_dual_support_entries=bool(
+                    filter_cfg.get("disable_red_bar_shrinking_long_dual_support_entries", True)
+                ),
                 primary_direction_timeframe=str(filter_cfg.get("primary_direction_timeframe", "4h")),
                 require_1h_confirmation_when_4h_primary=bool(filter_cfg.get("require_1h_confirmation_when_4h_primary", False)),
                 allow_neutral_1h_confirmation=bool(filter_cfg.get("allow_neutral_1h_confirmation", False)),
@@ -695,6 +705,14 @@ class FundFlowDecisionEngine:
                 green_bar_growing_probe_max_leverage=max(
                     1,
                     int(self._to_float(position_mgmt_cfg.get("green_bar_growing_probe_max_leverage"), 2)),
+                ),
+                volume_vwap_both_low_min_score_vol=self._to_float(
+                    filter_cfg.get("volume_vwap_both_low_min_score_vol"),
+                    0.05,
+                ),
+                volume_vwap_both_low_min_vwap_score=self._to_float(
+                    filter_cfg.get("volume_vwap_both_low_min_vwap_score"),
+                    0.10,
                 ),
                 rsi_spring_recent_extreme_lookback=max(2, int(self._to_float(rsi_cfg.get("spring_recent_extreme_lookback"), 6))),
                 rsi_spring_recent_oversold=self._to_float(rsi_cfg.get("spring_recent_oversold"), 40.0),

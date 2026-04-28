@@ -329,6 +329,60 @@ def test_build_strategy_config_reads_flip_bullish_sniper_settings() -> None:
     assert strategy_config.flip_bullish_cooling_reject_if_15m_rsi_above == pytest.approx(65.0, rel=1e-6)
 
 
+def test_build_strategy_config_reads_volume_vwap_combo_hotfix_settings() -> None:
+    runtime_cfg = {
+        "fund_flow": {
+            "macd_mtf_strategy_v2": {
+                "entry_filters": {
+                    "volume_vwap_both_low_min_score_vol": 0.0,
+                    "volume_vwap_both_low_min_vwap_score": 0.0,
+                    "disable_red_bar_shrinking_long_dual_support_entries": False,
+                    "disable_green_bar_shrinking_short_dual_pressure_entries": False,
+                    "flip_bullish_cooling": {
+                        "enabled": True,
+                        "reject_if_1h_rsi_above": 75.0,
+                        "soft_rsi_above": 72.0,
+                        "soft_discount": 0.90,
+                        "hard_rsi_buffer": 4.0,
+                        "reject_if_15m_no_spring_and_rsi_high": False,
+                        "reject_if_15m_rsi_above": 65.0,
+                    },
+                }
+            }
+        }
+    }
+
+    strategy_config = build_strategy_config(runtime_cfg)
+
+    assert strategy_config.volume_vwap_both_low_min_score_vol == pytest.approx(0.0, rel=1e-6)
+    assert strategy_config.volume_vwap_both_low_min_vwap_score == pytest.approx(0.0, rel=1e-6)
+    assert strategy_config.disable_red_bar_shrinking_long_dual_support_entries is False
+    assert strategy_config.disable_green_bar_shrinking_short_dual_pressure_entries is False
+    assert strategy_config.flip_bullish_cooling_hard_rsi_buffer == pytest.approx(4.0, rel=1e-6)
+    assert strategy_config.flip_bullish_cooling_reject_if_15m_no_spring_and_rsi_high is False
+
+
+def test_disable_short_filter_profile_relaxes_backtest_thresholds() -> None:
+    runtime_cfg = _load_live_runtime_config()
+
+    merged_cfg, active_profile = apply_backtest_profile(
+        runtime_cfg,
+        profile_name="macd_v2_disable_short_filter",
+    )
+    strategy_config = build_strategy_config(merged_cfg)
+
+    assert active_profile == "macd_v2_disable_short_filter"
+    assert merged_cfg["fund_flow"]["default_target_portion"] == pytest.approx(0.35, rel=1e-6)
+    assert merged_cfg["fund_flow"]["max_symbol_position_portion"] == pytest.approx(0.35, rel=1e-6)
+    assert strategy_config.min_signal_score == pytest.approx(0.68, rel=1e-6)
+    assert strategy_config.red_bar_growing_min_signal_score == pytest.approx(0.68, rel=1e-6)
+    assert strategy_config.green_bar_growing_min_signal_score == pytest.approx(0.69, rel=1e-6)
+    assert strategy_config.flip_bearish_min_signal_score == pytest.approx(0.66, rel=1e-6)
+    assert strategy_config.flip_bullish_min_signal_score == pytest.approx(0.64, rel=1e-6)
+    assert strategy_config.preflip_trial_min_signal_score == pytest.approx(0.66, rel=1e-6)
+    assert strategy_config.trial_short_below_structure_promotion_min_signal_score == pytest.approx(0.68, rel=1e-6)
+
+
 def test_trading_symbols_respect_symbol_blacklist() -> None:
     runtime_cfg = {
         "trading": {"symbols": ["BTCUSDT", "QNTUSDT", "ethusdt", "BTCUSDT"]},
