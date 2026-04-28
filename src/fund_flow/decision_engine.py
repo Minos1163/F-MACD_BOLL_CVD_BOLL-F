@@ -465,7 +465,6 @@ class FundFlowDecisionEngine:
         if self.macd_v2_enabled:
             v2_cfg = ff.get("macd_mtf_strategy_v2", {}) if isinstance(ff.get("macd_mtf_strategy_v2"), dict) else {}
             boll_cfg = v2_cfg.get("boll_config", {}) if isinstance(v2_cfg.get("boll_config"), dict) else {}
-            rsi_cfg = v2_cfg.get("rsi_config", {}) if isinstance(v2_cfg.get("rsi_config"), dict) else {}
             ema_cfg = v2_cfg.get("ema_config", {})
             leverage_cfg = v2_cfg.get("leverage_config", {}) if isinstance(v2_cfg.get("leverage_config"), dict) else {}
             vwap_cfg = v2_cfg.get("vwap_config", {})
@@ -474,10 +473,48 @@ class FundFlowDecisionEngine:
             stop_cfg = v2_cfg.get("stop_loss_config", {})
             macd_cfg = v2_cfg.get("macd_config", {})
             filter_cfg = v2_cfg.get("entry_filters", {}) if isinstance(v2_cfg.get("entry_filters"), dict) else {}
+            position_mgmt_cfg = v2_cfg.get("position_management", {}) if isinstance(v2_cfg.get("position_management"), dict) else {}
+            exit_mgmt_cfg = v2_cfg.get("exit_management", {}) if isinstance(v2_cfg.get("exit_management"), dict) else {}
             penalty_cfg = v2_cfg.get("penalty_config", {}) if isinstance(v2_cfg.get("penalty_config"), dict) else {}
+            rsi_cfg = v2_cfg.get("rsi_config", {}) if isinstance(v2_cfg.get("rsi_config"), dict) else {}
+            rsi_rhythm_cfg = rsi_cfg.get("rhythm", {}) if isinstance(rsi_cfg.get("rhythm"), dict) else {}
+            flip_bullish_sniper_cfg = (
+                filter_cfg.get("flip_bullish_sniper", {})
+                if isinstance(filter_cfg.get("flip_bullish_sniper"), dict)
+                else {}
+            )
+            flip_bullish_cooling_cfg = (
+                filter_cfg.get("flip_bullish_cooling", {})
+                if isinstance(filter_cfg.get("flip_bullish_cooling"), dict)
+                else {}
+            )
             session_risk_cfg = v2_cfg.get("session_risk_control", {}) if isinstance(v2_cfg.get("session_risk_control"), dict) else {}
             vwap_score_tier_cfg = v2_cfg.get("vwap_score_position_tiers", {}) if isinstance(v2_cfg.get("vwap_score_position_tiers"), dict) else {}
             symbol_risk_cfg = v2_cfg.get("symbol_risk_tiers", {}) if isinstance(v2_cfg.get("symbol_risk_tiers"), dict) else {}
+            legacy_rsi_15m_keys = []
+            for legacy_key in (
+                "enable_soft_15m_confirmation_when_4h_primary",
+                "soft_15m_entry_score",
+                "soft_15m_neutral_hist_multiple",
+                "soft_15m_max_adverse_hist_multiple",
+            ):
+                if legacy_key in filter_cfg:
+                    legacy_rsi_15m_keys.append(legacy_key)
+            for legacy_key in (
+                "enable_entry_refinement",
+                "spring_recent_extreme_lookback",
+                "spring_recent_oversold",
+                "spring_recent_overbought",
+                "spring_prev_max",
+                "spring_confirm",
+            ):
+                if legacy_key in rsi_cfg:
+                    legacy_rsi_15m_keys.append(f"rsi_config.{legacy_key}")
+            if legacy_rsi_15m_keys:
+                logger.warning(
+                    "[MACD_V2] deprecated soft_15m / RSI refinement config ignored in RSI rhythm mode: %s",
+                    ", ".join(sorted(set(legacy_rsi_15m_keys))),
+                )
             common_stable_continuation_min_signal_score = thresholds_cfg.get("stable_continuation_min_signal_score")
             common_stable_continuation_min_vwap_score = filter_cfg.get("stable_continuation_min_vwap_score")
             common_stable_continuation_min_adx_1h = filter_cfg.get("stable_continuation_min_adx_1h")
@@ -527,27 +564,54 @@ class FundFlowDecisionEngine:
                 structural_vwap_rolling_window=int(self._to_float(vwap_cfg.get("structural_vwap_rolling_window"), 20)),
                 vwap_retest_tolerance=self._to_float(vwap_cfg.get("vwap_retest_tolerance"), 0.003),
                 # 评分权重
-                weight_1h_direction=self._to_float(weights_cfg.get("weight_1h_direction"), 0.00),
-                weight_4h_direction=self._to_float(weights_cfg.get("weight_4h_direction", weights_cfg.get("weight_1h_direction")), 0.55),
+                weight_1h_direction=self._to_float(weights_cfg.get("weight_1h_direction"), 0.15),
+                weight_4h_direction=self._to_float(weights_cfg.get("weight_4h_direction", weights_cfg.get("weight_1h_direction")), 0.40),
                 weight_4h_enhancement=self._to_float(weights_cfg.get("weight_4h_enhancement"), 0.10),
-                weight_vwap=self._to_float(weights_cfg.get("weight_vwap"), 0.20),
-                weight_15m_entry=self._to_float(weights_cfg.get("weight_15m_entry"), 0.05),
-                weight_volume=self._to_float(weights_cfg.get("weight_volume"), 0.20),
+                weight_rsi_rhythm=self._to_float(weights_cfg.get("weight_rsi_rhythm"), 0.30),
+                weight_vwap=self._to_float(weights_cfg.get("weight_vwap"), 0.05),
+                weight_15m_entry=self._to_float(weights_cfg.get("weight_15m_entry"), 0.0),
+                weight_volume=self._to_float(weights_cfg.get("weight_volume"), 0.10),
                 # 入场阈值
                 min_entry_score=self._to_float(thresholds_cfg.get("min_entry_score"), 0.25),
-                min_signal_score=default_signal_threshold,
-                red_bar_growing_min_signal_score=self._to_float(thresholds_cfg.get("red_bar_growing"), default_signal_threshold),
-                flip_bearish_min_signal_score=self._to_float(thresholds_cfg.get("flip_bearish"), default_signal_threshold),
-                flip_bullish_min_signal_score=self._to_float(thresholds_cfg.get("flip_bullish"), default_signal_threshold),
+                min_signal_score=self._to_float(
+                    thresholds_cfg.get("default", thresholds_cfg.get("min_signal_score")),
+                    0.85,
+                ),
+                red_bar_growing_min_signal_score=self._to_float(thresholds_cfg.get("red_bar_growing"), 0.90),
+                green_bar_growing_min_signal_score=self._to_float(thresholds_cfg.get("green_bar_growing"), 0.87),
+                flip_bearish_min_signal_score=self._to_float(thresholds_cfg.get("flip_bearish"), 0.84),
+                flip_bullish_min_signal_score=self._to_float(thresholds_cfg.get("flip_bullish"), 0.82),
                 soft_long_min_signal_score=self._to_float(thresholds_cfg.get("soft_long_min_signal_score"), 0.0),
                 enable_flip_bullish_strict_filter=bool(filter_cfg.get("enable_flip_bullish_strict_filter", True)),
                 disable_flip_bullish_entries=bool(filter_cfg.get("disable_flip_bullish_entries", False)),
                 flip_bullish_min_vwap_score=self._to_float(filter_cfg.get("flip_bullish_min_vwap_score"), 0.12),
                 flip_bullish_require_pullback_bounce=bool(filter_cfg.get("flip_bullish_require_pullback_bounce", True)),
                 flip_bullish_require_15m_growing=bool(filter_cfg.get("flip_bullish_require_15m_growing", True)),
+                flip_bullish_no_momentum_reset_penalty=self._to_float(filter_cfg.get("flip_bullish_no_momentum_reset_penalty"), 0.06),
+                flip_bullish_spring_confirmation_bonus=self._to_float(filter_cfg.get("flip_bullish_spring_confirmation_bonus"), 0.08),
+                flip_bullish_no_spring_penalty=self._to_float(filter_cfg.get("flip_bullish_no_spring_penalty"), 0.05),
                 enable_flip_bullish_cvd_context_filter=bool(filter_cfg.get("enable_flip_bullish_cvd_context_filter", False)),
                 flip_bullish_max_cvd_upper_wick_ratio=self._to_float(filter_cfg.get("flip_bullish_max_cvd_upper_wick_ratio"), 0.0),
                 flip_bullish_min_cvd_1h_delta_ratio=self._to_float(filter_cfg.get("flip_bullish_min_cvd_1h_delta_ratio"), 0.0),
+                enable_flip_bullish_sniper=bool(flip_bullish_sniper_cfg.get("enabled", True)),
+                flip_bullish_require_momentum_reset=bool(flip_bullish_sniper_cfg.get("require_momentum_reset", True)),
+                flip_bullish_momentum_reset_max_bars_ago=max(1, int(self._to_float(flip_bullish_sniper_cfg.get("momentum_reset_max_bars_ago"), 12))),
+                flip_bullish_require_spring_confirmation=bool(flip_bullish_sniper_cfg.get("require_spring_confirmation", True)),
+                flip_bullish_spring_min_rsi_low=self._to_float(flip_bullish_sniper_cfg.get("spring_min_rsi_low"), 35.0),
+                flip_bullish_spring_require_price_break=bool(flip_bullish_sniper_cfg.get("spring_require_price_break", True)),
+                flip_bullish_require_trend_alignment=bool(flip_bullish_sniper_cfg.get("require_trend_alignment", True)),
+                flip_bullish_sniper_perfect_score_bonus=self._to_float(flip_bullish_sniper_cfg.get("perfect_score_bonus"), 0.08),
+                enable_flip_bullish_cooling=bool(flip_bullish_cooling_cfg.get("enabled", True)),
+                flip_bullish_cooling_reject_if_1h_rsi_above=self._to_float(flip_bullish_cooling_cfg.get("reject_if_1h_rsi_above"), 72.0),
+                flip_bullish_cooling_soft_rsi_above=self._to_float(flip_bullish_cooling_cfg.get("soft_rsi_above"), 72.0),
+                flip_bullish_cooling_soft_discount=self._to_float(flip_bullish_cooling_cfg.get("soft_discount"), 0.90),
+                flip_bullish_cooling_reject_if_15m_no_spring_and_rsi_high=bool(
+                    flip_bullish_cooling_cfg.get("reject_if_15m_no_spring_and_rsi_high", True)
+                ),
+                flip_bullish_cooling_reject_if_15m_rsi_above=self._to_float(
+                    flip_bullish_cooling_cfg.get("reject_if_15m_rsi_above"),
+                    65.0,
+                ),
                 flip_bearish_min_ema_multiplier=self._to_float(filter_cfg.get("flip_bearish_min_boll_multiplier", filter_cfg.get("flip_bearish_min_ema_multiplier")), 0.0),
                 flip_bearish_normal_ema_min_signal_score=self._to_float(filter_cfg.get("flip_bearish_normal_boll_min_signal_score", filter_cfg.get("flip_bearish_normal_ema_min_signal_score")), 0.0),
                 flip_bearish_normal_ema_max_leverage=int(self._to_float(filter_cfg.get("flip_bearish_normal_boll_max_leverage", filter_cfg.get("flip_bearish_normal_ema_max_leverage")), 0.0)),
@@ -581,6 +645,57 @@ class FundFlowDecisionEngine:
                 ),
                 enable_rsi_entry_refinement=bool(rsi_cfg.get("enable_entry_refinement", True)),
                 rsi_period=max(2, int(self._to_float(rsi_cfg.get("period"), 14))),
+                enable_priority_execution=bool(filter_cfg.get("enable_priority_execution", True)),
+                priority_exec_min_score=self._to_float(filter_cfg.get("priority_exec_min_score"), 0.90),
+                priority_exec_expire_seconds=max(1, int(self._to_float(filter_cfg.get("priority_exec_expire_seconds"), 15))),
+                priority_exec_vip_min_score=self._to_float(filter_cfg.get("priority_exec_vip_min_score"), 0.92),
+                priority_exec_vip_expire_seconds=max(
+                    1,
+                    int(self._to_float(filter_cfg.get("priority_exec_vip_expire_seconds"), 30)),
+                ),
+                priority_exec_vip_allow_retry=bool(filter_cfg.get("priority_exec_vip_allow_retry", True)),
+                enable_vwap_flip_exemption=bool(filter_cfg.get("enable_vwap_flip_exemption", True)),
+                enable_neutral_upgrade=bool(filter_cfg.get("enable_neutral_upgrade", True)),
+                neutral_upgrade_min_rsi_score=self._to_float(filter_cfg.get("neutral_upgrade_min_rsi_score"), 0.35),
+                neutral_upgrade_probe_rsi_score=self._to_float(filter_cfg.get("neutral_upgrade_probe_rsi_score"), 0.20),
+                neutral_upgrade_probe_threshold_score=self._to_float(filter_cfg.get("neutral_upgrade_probe_threshold_score"), 0.82),
+                neutral_upgrade_penalty_mult=self._to_float(filter_cfg.get("neutral_upgrade_penalty_mult"), 0.90),
+                enable_rsi_rhythm_scoring=bool(rsi_rhythm_cfg.get("enabled", True)),
+                enable_rsi_hard_veto=bool(rsi_rhythm_cfg.get("enable_hard_veto", True)),
+                enable_leading_rsi_conflict_pass=bool(rsi_rhythm_cfg.get("enable_leading_conflict_pass", True)),
+                leading_rsi_slope_threshold=self._to_float(rsi_rhythm_cfg.get("leading_slope_threshold"), 2.0),
+                rsi_conflict_penalty_mult=self._to_float(rsi_rhythm_cfg.get("conflict_penalty_mult"), 0.95),
+                rsi_conflict_threshold=self._to_float(rsi_rhythm_cfg.get("conflict_threshold"), 0.20),
+                rsi_leading_conflict_portion_mult=self._to_float(rsi_rhythm_cfg.get("leading_portion_mult"), 0.80),
+                rsi_divergence_conflict_portion_mult=self._to_float(rsi_rhythm_cfg.get("divergence_portion_mult"), 0.85),
+                rsi_rhythm_high_score_min=self._to_float(rsi_rhythm_cfg.get("high_score_min"), 0.30),
+                rsi_rhythm_block_score=self._to_float(rsi_rhythm_cfg.get("block_score"), -0.30),
+                rsi_probe_exposure_mult=self._to_float(rsi_rhythm_cfg.get("probe_exposure_mult"), 0.20),
+                rsi_probe_portion_scale=self._to_float(rsi_rhythm_cfg.get("probe_portion_scale"), 0.25),
+                rsi_probe_forced_leverage=max(1, int(self._to_float(rsi_rhythm_cfg.get("probe_forced_leverage"), 2))),
+                enable_15m_spring_threshold_override=bool(filter_cfg.get("enable_15m_spring_threshold_override", True)),
+                spring_override_min_signal_score=self._to_float(filter_cfg.get("spring_override_min_signal_score"), 0.82),
+                spring_override_score_bonus=self._to_float(filter_cfg.get("spring_override_score_bonus"), 0.10),
+                enable_priority_allocation=bool(filter_cfg.get("enable_priority_allocation", True)),
+                priority_allocation_overdraft_pct=self._to_float(filter_cfg.get("priority_allocation_overdraft_pct"), 0.08),
+                enable_red_bar_growing_probe_overlay=bool(position_mgmt_cfg.get("enable_red_bar_growing_probe_overlay", False)),
+                red_bar_growing_probe_position_penalty=self._to_float(
+                    position_mgmt_cfg.get("red_bar_growing_probe_position_penalty"),
+                    0.50,
+                ),
+                red_bar_growing_probe_max_leverage=max(
+                    1,
+                    int(self._to_float(position_mgmt_cfg.get("red_bar_growing_probe_max_leverage"), 2)),
+                ),
+                enable_green_bar_growing_probe_overlay=bool(position_mgmt_cfg.get("enable_green_bar_growing_probe_overlay", False)),
+                green_bar_growing_probe_position_penalty=self._to_float(
+                    position_mgmt_cfg.get("green_bar_growing_probe_position_penalty"),
+                    0.40,
+                ),
+                green_bar_growing_probe_max_leverage=max(
+                    1,
+                    int(self._to_float(position_mgmt_cfg.get("green_bar_growing_probe_max_leverage"), 2)),
+                ),
                 rsi_spring_recent_extreme_lookback=max(2, int(self._to_float(rsi_cfg.get("spring_recent_extreme_lookback"), 6))),
                 rsi_spring_recent_oversold=self._to_float(rsi_cfg.get("spring_recent_oversold"), 40.0),
                 rsi_spring_recent_overbought=self._to_float(rsi_cfg.get("spring_recent_overbought"), 60.0),
@@ -600,6 +715,51 @@ class FundFlowDecisionEngine:
                     rsi_cfg.get("extension_penalty_multiplier"),
                     0.60,
                 ),
+                enable_rsi_launch_sovereign_mode=bool(filter_cfg.get("enable_rsi_launch_sovereign_mode", True)),
+                rsi_launch_sovereign_score_bonus=self._to_float(
+                    filter_cfg.get("rsi_launch_sovereign_score_bonus"),
+                    0.12,
+                ),
+                rsi_launch_sovereign_min_signal_score=self._to_float(
+                    filter_cfg.get("rsi_launch_sovereign_min_signal_score"),
+                    0.80,
+                ),
+                rsi_launch_sovereign_competition_multiplier=self._to_float(
+                    filter_cfg.get("rsi_launch_sovereign_competition_multiplier"),
+                    1.15,
+                ),
+                rsi_launch_sovereign_reset_lookback=max(
+                    1,
+                    int(self._to_float(rsi_cfg.get("rsi_launch_sovereign_reset_lookback"), 12)),
+                ),
+                rsi_launch_sovereign_long_reset_ceiling=self._to_float(
+                    rsi_cfg.get("rsi_launch_sovereign_long_reset_ceiling"),
+                    45.0,
+                ),
+                rsi_launch_sovereign_short_reset_floor=self._to_float(
+                    rsi_cfg.get("rsi_launch_sovereign_short_reset_floor"),
+                    55.0,
+                ),
+                rsi_launch_sovereign_long_4h_rsi_min=self._to_float(
+                    rsi_cfg.get("rsi_launch_sovereign_long_4h_rsi_min"),
+                    50.0,
+                ),
+                rsi_launch_sovereign_short_4h_rsi_max=self._to_float(
+                    rsi_cfg.get("rsi_launch_sovereign_short_4h_rsi_max"),
+                    50.0,
+                ),
+                rsi_launch_sovereign_long_1h_rsi_max=self._to_float(
+                    rsi_cfg.get("rsi_launch_sovereign_long_1h_rsi_max"),
+                    78.0,
+                ),
+                rsi_launch_sovereign_short_1h_rsi_min=self._to_float(
+                    rsi_cfg.get("rsi_launch_sovereign_short_1h_rsi_min"),
+                    22.0,
+                ),
+                rsi_launch_sovereign_priority_expire_seconds=int(
+                    self._to_float(filter_cfg.get("rsi_launch_sovereign_priority_expire_seconds"), 30)
+                ),
+                rsi_launch_sovereign_allow_retry=bool(filter_cfg.get("rsi_launch_sovereign_allow_retry", True)),
                 enable_green_bar_growing_short_adx_1h_range_filter=bool(filter_cfg.get("enable_green_bar_growing_short_adx_1h_range_filter", False)),
                 green_bar_growing_short_min_adx_1h=self._to_float(filter_cfg.get("green_bar_growing_short_min_adx_1h"), 0.0),
                 green_bar_growing_short_max_adx_1h=self._to_float(filter_cfg.get("green_bar_growing_short_max_adx_1h"), 0.0),
@@ -728,7 +888,7 @@ class FundFlowDecisionEngine:
                 overheat_vwap_score_threshold=self._to_float(penalty_cfg.get("overheat_vwap_score_threshold"), 0.10),
                 min_vwap_score_for_entry=self._to_float(
                     filter_cfg.get("min_vwap_score_for_entry", penalty_cfg.get("min_vwap_score_for_entry")),
-                    0.12,
+                    0.10,
                 ),
                 # 止损配置
                 use_dynamic_stop=bool(stop_cfg.get("use_dynamic_stop", True)),
@@ -738,6 +898,15 @@ class FundFlowDecisionEngine:
                 enable_4h_shrink_exit=bool(stop_cfg.get("enable_4h_shrink_exit", False)),
                 exit_4h_shrink_bars=int(self._to_float(stop_cfg.get("exit_4h_shrink_bars"), 2)),
                 exit_4h_min_shrink_pct=self._to_float(stop_cfg.get("exit_4h_min_shrink_pct"), 0.20),
+                enable_priority_signal_shrink_exit=bool(exit_mgmt_cfg.get("enable_priority_signal_shrink_exit", True)),
+                priority_signal_shrink_exit_required_bars=max(
+                    1,
+                    int(self._to_float(exit_mgmt_cfg.get("priority_signal_shrink_exit_required_bars"), 3)),
+                ),
+                priority_signal_shrink_exit_required_pct=self._to_float(
+                    exit_mgmt_cfg.get("priority_signal_shrink_exit_required_pct"),
+                    0.40,
+                ),
                 exit_4h_require_profit=bool(stop_cfg.get("exit_4h_require_profit", True)),
                 exit_4h_weak_loss_threshold=self._to_float(stop_cfg.get("exit_4h_weak_loss_threshold"), -1.0),
                 session_risk_control_enabled=bool(session_risk_cfg.get("enabled", False)),
@@ -1172,6 +1341,38 @@ class FundFlowDecisionEngine:
         return MACDStrategyV2Engine(local_config), override
 
     @staticmethod
+    def _normalize_macd_v2_time_in_force(raw_value: Any) -> TimeInForce:
+        value = str(raw_value or "").strip().upper()
+        if value == "GTC":
+            return TimeInForce.GTC
+        return TimeInForce.IOC
+
+    def _extract_macd_v2_entry_routing(self, signal: MACDSignalV2) -> Tuple[TimeInForce, Dict[str, Any]]:
+        details = signal.details if isinstance(signal.details, dict) else {}
+        tif = self._normalize_macd_v2_time_in_force(details.get("entry_time_in_force"))
+        routing_metadata = {
+            "competition_score": float(details.get("competition_score", signal.signal_score) or signal.signal_score or 0.0),
+            "execution_route": str(details.get("execution_route", "standard") or "standard"),
+            "priority_execution_applied": bool(details.get("priority_execution_applied", False)),
+            "priority_signal": bool(details.get("priority_signal", False)),
+            "entry_time_in_force": "GTC" if tif == TimeInForce.GTC else "IOC",
+            "entry_expire_seconds": int(details.get("entry_expire_seconds", 0) or 0),
+            "entry_price_mode": str(details.get("entry_price_mode", "") or ""),
+            "entry_retry_enabled": bool(details.get("entry_retry_enabled", False)),
+            "entry_retry_max_attempts": int(details.get("entry_retry_max_attempts", 0) or 0),
+            "rsi_launch_sovereign_active": bool(details.get("rsi_launch_sovereign_active", False)),
+            "rsi_launch_sovereign_side": str(details.get("rsi_launch_sovereign_side", "") or ""),
+            "rsi_launch_sovereign_bonus_score": float(details.get("rsi_launch_sovereign_bonus_score", 0.0) or 0.0),
+            "rsi_launch_sovereign_threshold_override": float(
+                details.get("rsi_launch_sovereign_threshold_override", 0.0) or 0.0
+            ),
+            "rsi_launch_sovereign_competition_multiplier": float(
+                details.get("rsi_launch_sovereign_competition_multiplier", 1.0) or 1.0
+            ),
+        }
+        return tif, routing_metadata
+
+    @staticmethod
     def _normalize_signal_side(value: Any) -> str:
         raw = str(value or "").strip().lower()
         if raw in {"long", "buy", "bull", "bullish"}:
@@ -1410,6 +1611,7 @@ class FundFlowDecisionEngine:
             signal.signal_type_1h,
             signal.vwap_state,
         )
+        rsi_probe_mode = self._resolve_macd_v2_probe_mode(signal, macd_v2_engine)
         portion = macd_v2_engine.calculate_position_portion(
             score=score,
             base_default_portion=self.default_portion,
@@ -1421,6 +1623,10 @@ class FundFlowDecisionEngine:
             is_trial_entry=is_trial_entry,
             entry_scale=entry_scale,
             session_scale=session_position_scale,
+            rsi_exposure_mult=float((signal.details or {}).get("rsi_exposure_mult", 1.0) or 1.0),
+            rsi_conflict=bool((signal.details or {}).get("rsi_macd_conflict", False)),
+            rsi_conflict_portion_mult=float((signal.details or {}).get("rsi_conflict_portion_mult", 0.70) or 0.70),
+            rsi_probe_mode=rsi_probe_mode,
         )
         leverage = macd_v2_engine.calculate_leverage(
             score,
@@ -1428,6 +1634,8 @@ class FundFlowDecisionEngine:
             signal.signal_type_1h,
             symbol=symbol,
             is_trial_entry=is_trial_entry,
+            rsi_conflict=bool((signal.details or {}).get("rsi_macd_conflict", False)),
+            rsi_probe_mode=rsi_probe_mode,
         )
         leverage = min(leverage, max(1, int(regime_state.get("max_leverage", leverage))))
         leverage = max(self.min_leverage, min(self.max_leverage, leverage))
@@ -1437,6 +1645,10 @@ class FundFlowDecisionEngine:
         local_metadata["signal_score"] = score
         local_metadata["is_trial_entry"] = is_trial_entry
         local_metadata["entry_scale"] = entry_scale
+        local_metadata["rsi_probe_mode"] = rsi_probe_mode
+        local_metadata["competition_score"] = self._resolve_macd_v2_competition_score(signal, macd_v2_engine)
+        local_metadata["final_leverage_after_rsi"] = leverage
+        local_metadata["final_portion_after_rsi"] = portion
         local_metadata["entry_type_15m"] = local_metadata.get("entry_type_15m") or f"regime_{regime_state.get('phase', 'neutral')}"
         local_metadata["macd_4h_regime_entry"] = True
         local_metadata["macd_4h_regime_entry_mode"] = regime_state.get("entry_mode", "")
@@ -1450,6 +1662,28 @@ class FundFlowDecisionEngine:
                 macd_v2_engine.resolve_symbol_risk_session_scale(symbol, session_position_scale)
             ),
         }
+        priority_execution_metadata = self._resolve_macd_v2_priority_metadata(signal, macd_v2_engine)
+        local_metadata.update(priority_execution_metadata)
+        priority_signal = bool(
+            getattr(macd_v2_engine, "_resolve_priority_signal", lambda *_args, **_kwargs: False)(
+                signal.signal_type_1h,
+                signal.vwap_state,
+            )
+        )
+        local_metadata["priority_signal"] = priority_signal
+        local_metadata["priority_allocation_applied"] = bool(
+            priority_signal and getattr(self.macd_v2_config, "enable_priority_allocation", False)
+        )
+        local_metadata["priority_portion_bonus_mult"] = 1.10 if local_metadata["priority_allocation_applied"] else 1.0
+        local_metadata["priority_soft_cap"] = (
+            min(
+                1.0,
+                float(self.max_symbol_position_portion)
+                + float(getattr(self.macd_v2_config, "priority_allocation_overdraft_pct", 0.0)),
+            )
+            if local_metadata["priority_allocation_applied"]
+            else float(self.max_symbol_position_portion)
+        )
 
         stop_loss_pct = self._normalize_pct_ratio(signal.stop_loss_pct, self.stop_loss_pct)
         suggested_stop = self._to_optional_float(signal.suggested_stop_price)
@@ -1473,7 +1707,7 @@ class FundFlowDecisionEngine:
                 max_price=price * (1.0 + self.entry_slippage),
                 take_profit_price=take_profit_price,
                 stop_loss_price=stop_loss_price,
-                time_in_force=TimeInForce.IOC,
+                time_in_force=TimeInForce.GTC if priority_execution_metadata["priority_execution_applied"] else TimeInForce.IOC,
                 tp_execution=ExecutionMode.LIMIT,
                 sl_execution=ExecutionMode.LIMIT,
                 reason=f"macd_v2_regime_long_{regime_state.get('state')}_vwap_{signal.vwap_score:.2f}",
@@ -1498,12 +1732,95 @@ class FundFlowDecisionEngine:
             min_price=price * (1.0 - self.entry_slippage),
             take_profit_price=take_profit_price,
             stop_loss_price=stop_loss_price,
-            time_in_force=TimeInForce.IOC,
+            time_in_force=TimeInForce.GTC if priority_execution_metadata["priority_execution_applied"] else TimeInForce.IOC,
             tp_execution=ExecutionMode.LIMIT,
             sl_execution=ExecutionMode.LIMIT,
             reason=f"macd_v2_regime_short_{regime_state.get('state')}_vwap_{signal.vwap_score:.2f}",
             metadata=local_metadata,
         )
+
+    def _macd_v2_engine_config(self, macd_v2_engine: Any) -> Any:
+        return getattr(macd_v2_engine, "config", None) or self.macd_v2_config
+
+    def _resolve_macd_v2_probe_mode(self, signal: MACDSignalV2, macd_v2_engine: Any) -> bool:
+        engine_config = self._macd_v2_engine_config(macd_v2_engine)
+        exposure_mult = float((signal.details or {}).get("rsi_exposure_mult", 1.0) or 1.0)
+        probe_threshold = float(getattr(engine_config, "rsi_probe_exposure_mult", 0.20) or 0.20)
+        red_bar_overlay = bool(
+            getattr(engine_config, "enable_red_bar_growing_probe_overlay", False)
+            and str(signal.signal_type_1h or "").strip().lower() == "red_bar_growing"
+        )
+        green_bar_overlay = bool(
+            getattr(engine_config, "enable_green_bar_growing_probe_overlay", False)
+            and str(signal.signal_type_1h or "").strip().lower() == "green_bar_growing"
+        )
+        return (
+            exposure_mult <= probe_threshold
+            or red_bar_overlay
+            or green_bar_overlay
+            or bool((signal.details or {}).get("rsi_probe_mode", False))
+        )
+
+    def _resolve_macd_v2_priority_metadata(self, signal: MACDSignalV2, macd_v2_engine: Any) -> Dict[str, Any]:
+        engine_config = self._macd_v2_engine_config(macd_v2_engine)
+        if not engine_config:
+            return {
+                "execution_route": "ioc",
+                "priority_execution_applied": False,
+                "priority_execution_tier": "none",
+                "entry_time_in_force": "IOC",
+                "entry_expire_seconds": 0,
+                "entry_price_mode": "ioc",
+                "entry_retry_enabled": False,
+                "entry_retry_max_attempts": 0,
+            }
+        priority_execution_applied = bool(
+            getattr(engine_config, "enable_priority_execution", False)
+            and float(signal.signal_score) >= float(getattr(engine_config, "priority_exec_min_score", 0.90))
+        )
+        vip_applied = bool(
+            priority_execution_applied
+            and float(signal.signal_score) >= float(getattr(engine_config, "priority_exec_vip_min_score", 0.92))
+        )
+        retry_enabled = bool(vip_applied and getattr(engine_config, "priority_exec_vip_allow_retry", True))
+        return {
+            "execution_route": "priority_execution_vip"
+            if vip_applied
+            else ("priority_execution" if priority_execution_applied else "ioc"),
+            "priority_execution_applied": priority_execution_applied,
+            "priority_execution_tier": "vip" if vip_applied else ("standard" if priority_execution_applied else "none"),
+            "entry_time_in_force": "GTC" if priority_execution_applied else "IOC",
+            "entry_expire_seconds": int(
+                getattr(engine_config, "priority_exec_vip_expire_seconds", 30)
+                if vip_applied
+                else (getattr(engine_config, "priority_exec_expire_seconds", 0) if priority_execution_applied else 0)
+            ),
+            "entry_price_mode": "elastic_limit" if priority_execution_applied else "ioc",
+            "entry_retry_enabled": retry_enabled,
+            "entry_retry_max_attempts": 1 if retry_enabled else 0,
+        }
+
+    def _resolve_macd_v2_competition_score(self, signal: MACDSignalV2, macd_v2_engine: Any) -> float:
+        details = getattr(signal, "details", {}) or {}
+        if "competition_score" in details:
+            return float(details.get("competition_score", signal.signal_score) or signal.signal_score)
+        engine_config = self._macd_v2_engine_config(macd_v2_engine)
+        resolver = getattr(engine_config, "resolve_competition_score", None)
+        if callable(resolver):
+            return float(
+                resolver(
+                    getattr(signal, "signal_type_1h", None),
+                    float(signal.signal_score),
+                    getattr(signal, "entry_type_15m", None),
+                )
+            )
+        signal_type = str(getattr(signal, "signal_type_1h", "") or "").strip().lower()
+        entry_type = str(getattr(signal, "entry_type_15m", "") or "").strip().lower()
+        score = float(signal.signal_score)
+        if signal_type == "flip_bullish":
+            multiplier = 1.10 + (0.05 if entry_type in {"rsi_spring", "rsi_neutral_resume"} else 0.0)
+            return score * multiplier
+        return score
 
     def _apply_symbol_side_override(
         self,
@@ -3708,6 +4025,7 @@ class FundFlowDecisionEngine:
             funding_rate=funding_rate,
             oi_delta_ratio=oi_delta_ratio,
         )
+        entry_tif, entry_routing_metadata = self._extract_macd_v2_entry_routing(signal)
         
         # 构建元数据
         metadata = {
@@ -3751,6 +4069,7 @@ class FundFlowDecisionEngine:
             "last_close": regime_info.get("last_close", 0.0),
             "macd_v2_debug": signal.details if isinstance(signal.details, dict) else {},
         }
+        metadata.update(entry_routing_metadata)
         if symbol_signal_override:
             metadata["symbol_signal_override"] = symbol_signal_override
         regime_state = self._build_macd_v2_4h_regime_state(
@@ -3767,7 +4086,13 @@ class FundFlowDecisionEngine:
         short_allowed_by_regime = regime_runtime_mode in {"BOTH", "SHORT_ONLY"}
         take_profit_pct = self.take_profit_pct
         stop_loss_pct = self._normalize_pct_ratio(signal.stop_loss_pct, self.stop_loss_pct)
-        
+        priority_execution_metadata = self._resolve_macd_v2_priority_metadata(signal, macd_v2_engine)
+        priority_execution_applied = bool(priority_execution_metadata["priority_execution_applied"])
+        entry_time_in_force = TimeInForce.GTC if priority_execution_applied else TimeInForce.IOC
+        metadata.update(priority_execution_metadata)
+        entry_time_in_force = TimeInForce.GTC if priority_execution_applied else entry_time_in_force
+        metadata["entry_time_in_force"] = "GTC" if entry_time_in_force == TimeInForce.GTC else "IOC"
+
         # 无明确信号
         if signal.direction == 'neutral':
             if (
@@ -3901,6 +4226,8 @@ class FundFlowDecisionEngine:
                 signal.signal_type_1h,
                 symbol=symbol,
                 is_trial_entry=bool(signal.is_trial_entry),
+                rsi_conflict=bool((signal.details or {}).get("rsi_macd_conflict", False)),
+                rsi_probe_mode=self._resolve_macd_v2_probe_mode(signal, macd_v2_engine),
             )
             session_position_scale = macd_v2_engine.resolve_session_position_scale(
                 current_time,
@@ -3918,6 +4245,10 @@ class FundFlowDecisionEngine:
                 is_trial_entry=bool(signal.is_trial_entry),
                 entry_scale=float(signal.entry_scale or 1.0),
                 session_scale=session_position_scale,
+                rsi_exposure_mult=float((signal.details or {}).get("rsi_exposure_mult", 1.0) or 1.0),
+                rsi_conflict=bool((signal.details or {}).get("rsi_macd_conflict", False)),
+                rsi_conflict_portion_mult=float((signal.details or {}).get("rsi_conflict_portion_mult", 0.70) or 0.70),
+                rsi_probe_mode=self._resolve_macd_v2_probe_mode(signal, macd_v2_engine),
             )
             metadata["session_risk"] = {
                 "position_scale": float(session_position_scale),
@@ -3929,6 +4260,30 @@ class FundFlowDecisionEngine:
                     macd_v2_engine.resolve_symbol_risk_session_scale(symbol, session_position_scale)
                 ),
             }
+            priority_signal = bool(
+                getattr(macd_v2_engine, "_resolve_priority_signal", lambda *_args, **_kwargs: False)(
+                    signal.signal_type_1h,
+                    signal.vwap_state,
+                )
+            )
+            metadata["final_leverage_after_rsi"] = int(leverage)
+            metadata["final_portion_after_rsi"] = float(portion)
+            metadata["rsi_probe_mode"] = self._resolve_macd_v2_probe_mode(signal, macd_v2_engine)
+            metadata["competition_score"] = self._resolve_macd_v2_competition_score(signal, macd_v2_engine)
+            metadata["priority_signal"] = priority_signal
+            metadata["priority_allocation_applied"] = bool(
+                priority_signal and getattr(self.macd_v2_config, "enable_priority_allocation", False)
+            )
+            metadata["priority_portion_bonus_mult"] = 1.10 if metadata["priority_allocation_applied"] else 1.0
+            metadata["priority_soft_cap"] = (
+                min(
+                    1.0,
+                    float(self.max_symbol_position_portion)
+                    + float(getattr(self.macd_v2_config, "priority_allocation_overdraft_pct", 0.0)),
+                )
+                if metadata["priority_allocation_applied"]
+                else float(self.max_symbol_position_portion)
+            )
             suggested_stop = self._to_optional_float(signal.suggested_stop_price)
             stop_loss_price = suggested_stop
             if stop_loss_price is None or stop_loss_price <= 0 or stop_loss_price >= price:
@@ -3950,7 +4305,7 @@ class FundFlowDecisionEngine:
                     max_price=price * (1.0 + self.entry_slippage),
                     take_profit_price=take_profit_price,
                     stop_loss_price=stop_loss_price,
-                    time_in_force=TimeInForce.IOC,
+                    time_in_force=entry_time_in_force,
                     tp_execution=ExecutionMode.LIMIT,
                     sl_execution=ExecutionMode.LIMIT,
                     reason=f"macd_v2_long_1h_{signal.signal_type_1h}_15m_{signal.entry_type_15m}_vwap_{signal.vwap_score:.2f}",
@@ -3995,6 +4350,8 @@ class FundFlowDecisionEngine:
                 signal.signal_type_1h,
                 symbol=symbol,
                 is_trial_entry=bool(signal.is_trial_entry),
+                rsi_conflict=bool((signal.details or {}).get("rsi_macd_conflict", False)),
+                rsi_probe_mode=self._resolve_macd_v2_probe_mode(signal, macd_v2_engine),
             )
             session_position_scale = macd_v2_engine.resolve_session_position_scale(
                 current_time,
@@ -4012,6 +4369,10 @@ class FundFlowDecisionEngine:
                 is_trial_entry=bool(signal.is_trial_entry),
                 entry_scale=float(signal.entry_scale or 1.0),
                 session_scale=session_position_scale,
+                rsi_exposure_mult=float((signal.details or {}).get("rsi_exposure_mult", 1.0) or 1.0),
+                rsi_conflict=bool((signal.details or {}).get("rsi_macd_conflict", False)),
+                rsi_conflict_portion_mult=float((signal.details or {}).get("rsi_conflict_portion_mult", 0.70) or 0.70),
+                rsi_probe_mode=self._resolve_macd_v2_probe_mode(signal, macd_v2_engine),
             )
             metadata["session_risk"] = {
                 "position_scale": float(session_position_scale),
@@ -4023,6 +4384,30 @@ class FundFlowDecisionEngine:
                     macd_v2_engine.resolve_symbol_risk_session_scale(symbol, session_position_scale)
                 ),
             }
+            priority_signal = bool(
+                getattr(macd_v2_engine, "_resolve_priority_signal", lambda *_args, **_kwargs: False)(
+                    signal.signal_type_1h,
+                    signal.vwap_state,
+                )
+            )
+            metadata["final_leverage_after_rsi"] = int(leverage)
+            metadata["final_portion_after_rsi"] = float(portion)
+            metadata["rsi_probe_mode"] = self._resolve_macd_v2_probe_mode(signal, macd_v2_engine)
+            metadata["competition_score"] = self._resolve_macd_v2_competition_score(signal, macd_v2_engine)
+            metadata["priority_signal"] = priority_signal
+            metadata["priority_allocation_applied"] = bool(
+                priority_signal and getattr(self.macd_v2_config, "enable_priority_allocation", False)
+            )
+            metadata["priority_portion_bonus_mult"] = 1.10 if metadata["priority_allocation_applied"] else 1.0
+            metadata["priority_soft_cap"] = (
+                min(
+                    1.0,
+                    float(self.max_symbol_position_portion)
+                    + float(getattr(self.macd_v2_config, "priority_allocation_overdraft_pct", 0.0)),
+                )
+                if metadata["priority_allocation_applied"]
+                else float(self.max_symbol_position_portion)
+            )
             suggested_stop = self._to_optional_float(signal.suggested_stop_price)
             stop_loss_price = suggested_stop
             if stop_loss_price is None or stop_loss_price <= 0 or stop_loss_price <= price:
@@ -4044,7 +4429,7 @@ class FundFlowDecisionEngine:
                     min_price=price * (1.0 - self.entry_slippage),
                     take_profit_price=take_profit_price,
                     stop_loss_price=stop_loss_price,
-                    time_in_force=TimeInForce.IOC,
+                    time_in_force=entry_time_in_force,
                     tp_execution=ExecutionMode.LIMIT,
                     sl_execution=ExecutionMode.LIMIT,
                     reason=f"macd_v2_short_1h_{signal.signal_type_1h}_15m_{signal.entry_type_15m}_vwap_{signal.vwap_score:.2f}",

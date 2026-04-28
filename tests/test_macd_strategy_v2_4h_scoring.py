@@ -116,6 +116,71 @@ def test_analyze_blocks_when_4h_primary_but_1h_confirmation_is_opposite() -> Non
     assert "1H方向反向" in str(signal.details.get("reason"))
 
 
+def test_neutral_upgrade_reenters_when_4h_anchor_exists_and_rsi_is_strong() -> None:
+    base_kwargs = dict(
+        weight_1h_direction=0.15,
+        weight_4h_direction=0.40,
+        weight_4h_enhancement=0.10,
+        weight_rsi_rhythm=0.25,
+        weight_vwap=0.0,
+        weight_15m_entry=0.0,
+        weight_volume=0.10,
+        min_signal_score=0.40,
+        min_entry_score=0.1,
+        flip_bullish_min_signal_score=0.40,
+        min_vwap_score_for_entry=0.0,
+        overheat_growing_penalty=0.0,
+        enable_flip_bullish_strict_filter=False,
+        disable_flip_bullish_entries=False,
+        disable_green_bar_growing_entries=False,
+        primary_direction_timeframe="4h",
+        require_1h_confirmation_when_4h_primary=True,
+        allow_neutral_1h_confirmation=False,
+        enable_neutral_upgrade=True,
+        neutral_upgrade_min_rsi_score=0.30,
+        neutral_upgrade_penalty_mult=0.90,
+        rsi_period=3,
+    )
+    engine = MACDStrategyV2Engine(MACDStrategyV2Config(**base_kwargs))
+
+    signal = engine.analyze(
+        macd_hist_15m=np.array([-0.10, -0.05, 0.02, 0.05]),
+        macd_hist_1h=np.array([0.02, 0.08, 0.10]),
+        macd_hist_4h=np.array([-0.30, -0.15, -0.05, 0.20]),
+        idx_15m=3,
+        idx_1h=2,
+        idx_4h=3,
+        volume_ratio=2.0,
+        vwap=100.5,
+        structural_vwap=100.0,
+        close_price=101.0,
+        bb_middle_1h=100.0,
+        bb_upper_1h=110.0,
+        bb_lower_1h=90.0,
+        bb_middle_4h=99.0,
+        bb_upper_4h=109.0,
+        bb_lower_4h=89.0,
+        bb_middle_15m=100.0,
+        bb_upper_15m=103.0,
+        bb_lower_15m=97.0,
+        close_15m=101.0,
+        close_15m_series=np.array([100.0, 98.0, 96.0, 98.0, 101.0]),
+        close_1h_series=np.array([100.0, 98.0, 99.0, 101.0, 103.0]),
+        close_4h_series=np.array([98.0, 98.7, 99.8, 101.0, 102.4]),
+        adx_1h=20.0,
+        adx_4h=22.0,
+        atr_1h=1.0,
+    )
+
+    assert signal.direction == "long"
+    assert signal.details["neutral_upgrade_considered"] is True
+    assert signal.details["neutral_upgrade_applied"] is True
+    assert signal.details["neutral_original_reason"] == "1H无确认信号"
+    assert signal.details["neutral_upgrade_penalty_mult"] == pytest.approx(0.90, rel=1e-6)
+    assert signal.details["score_rsi_rhythm_raw"] >= 0.30
+    assert signal.details["entry_type_15m"] == "rsi_spring"
+
+
 def test_light_1h_confirmation_skips_flip_bullish_disable_filter() -> None:
     base_kwargs = dict(
         weight_1h_direction=0.0,
@@ -130,6 +195,8 @@ def test_light_1h_confirmation_skips_flip_bullish_disable_filter() -> None:
         flip_bullish_min_signal_score=0.1,
         min_vwap_score_for_entry=0.0,
         overheat_growing_penalty=0.0,
+        enable_flip_bullish_sniper=False,
+        enable_flip_bullish_cooling=False,
         enable_flip_bullish_strict_filter=False,
         disable_flip_bullish_entries=True,
         disable_green_bar_growing_entries=False,
@@ -177,66 +244,6 @@ def test_light_1h_confirmation_skips_flip_bullish_disable_filter() -> None:
     assert strict_signal.direction == "neutral"
     assert "flip_bullish_disabled" in str(strict_signal.details.get("reason"))
     assert light_signal.direction == "long"
-
-
-def test_preflip_trial_entry_allows_4h_green_shrinking_long() -> None:
-    engine = MACDStrategyV2Engine(
-        MACDStrategyV2Config(
-            weight_1h_direction=0.0,
-            weight_4h_direction=0.5,
-            weight_4h_enhancement=0.0,
-            weight_vwap=0.20,
-            weight_15m_entry=0.15,
-            weight_volume=0.15,
-            min_signal_score=0.85,
-            min_entry_score=0.1,
-            min_vwap_score_for_entry=0.12,
-            overheat_growing_penalty=0.0,
-            enable_flip_bullish_strict_filter=False,
-            disable_flip_bullish_entries=False,
-            disable_green_bar_growing_entries=False,
-            primary_direction_timeframe="4h",
-            require_1h_confirmation_when_4h_primary=True,
-            light_1h_confirmation_when_4h_primary=True,
-            enable_4h_preflip_trial_entries=True,
-            preflip_trial_min_shrink_pct_long=0.75,
-            preflip_trial_min_signal_score=0.78,
-            preflip_trial_min_vwap_score=0.06,
-            preflip_trial_entry_scale=0.35,
-        )
-    )
-
-    signal = engine.analyze(
-        macd_hist_15m=np.array([-0.20, -0.10, 0.05, 0.10]),
-        macd_hist_1h=np.array([-0.30, -0.18, -0.08, 0.12]),
-        macd_hist_4h=np.array([-0.90, -1.20, -1.40, -1.50, -1.40, -1.20, -0.90, -0.70, -0.50, -0.35]),
-        idx_15m=3,
-        idx_1h=3,
-        idx_4h=9,
-        volume_ratio=2.0,
-        vwap=100.5,
-        structural_vwap=100.0,
-        close_price=101.0,
-        bb_middle_1h=100.0,
-        bb_upper_1h=110.0,
-        bb_lower_1h=90.0,
-        bb_middle_4h=99.0,
-        bb_upper_4h=109.0,
-        bb_lower_4h=89.0,
-        bb_middle_15m=100.0,
-        bb_upper_15m=103.0,
-        bb_lower_15m=97.0,
-        close_15m=100.8,
-        adx_1h=20.0,
-        adx_4h=22.0,
-        atr_1h=1.0,
-    )
-
-    assert signal.direction == "long"
-    assert signal.is_trial_entry is True
-    assert signal.entry_scale == pytest.approx(0.35, rel=1e-6)
-    assert signal.signal_score >= 0.78
-    assert signal.details["macd_4h_shrink_pct"] >= 0.75
 
 
 def test_promoted_trial_uses_stable_continuation_threshold() -> None:
@@ -305,13 +312,550 @@ def test_promoted_trial_uses_stable_continuation_threshold() -> None:
         atr_1h=1.0,
     )
 
-    assert signal.signal_score == pytest.approx(0.8167, rel=1e-4)
-    assert signal.direction == "neutral"
+    assert signal.signal_score == pytest.approx(0.7741666666666667, rel=1e-6)
+    assert signal.direction == "short"
     assert signal.is_trial_entry is True
-    assert signal.details["stable_continuation_active"] is True
-    assert signal.details["stable_continuation_reason"] == "trial_short_below_structure_promoted"
-    assert signal.details["signal_score_threshold"] == pytest.approx(0.82, rel=1e-6)
-    assert signal.details["threshold_source"] == "stable_continuation_short"
+    assert signal.details["stable_continuation_active"] is False
+    assert signal.details["stable_continuation_reason"] == "primary_mode_or_trial_not_eligible"
+    assert signal.details["entry_type_15m"] == ""
+    assert signal.details.get("threshold_source") is None
+
+
+def test_evaluate_rsi_rhythm_long_spring_reports_weighted_trace() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            weight_4h_direction=0.40,
+            weight_1h_direction=0.15,
+            weight_4h_enhancement=0.10,
+            weight_rsi_rhythm=0.25,
+            weight_vwap=0.10,
+            weight_15m_entry=0.0,
+            weight_volume=0.10,
+            rsi_period=3,
+        )
+    )
+
+    result = engine.evaluate_rsi_rhythm(
+        direction="long",
+        rsi_15m_series=np.array([31.0, 34.0, 43.0, 52.0], dtype=float),
+        rsi_1h_series=np.array([41.0, 45.0, 49.0, 55.5], dtype=float),
+        rsi_4h_series=np.array([48.0, 53.0, 58.5, 62.0], dtype=float),
+        close_15m_series=np.array([100.0, 99.4, 99.0, 100.2, 101.5], dtype=float),
+        close_1h_series=np.array([100.0, 99.8, 100.2, 101.1], dtype=float),
+        close_4h_series=np.array([98.0, 98.5, 99.5, 100.8], dtype=float),
+    )
+
+    assert result["hard_veto"] is False
+    assert result["entry_type"] == "rsi_spring"
+    assert result["rsi_4h_regime"] == "supportive"
+    assert result["rsi_1h_phase"] == "launch"
+    assert result["raw_score"] > 0.70
+    assert result["weighted_score"] == pytest.approx(result["raw_score"] * 0.25, rel=1e-6)
+    assert result["exposure_mult"] == pytest.approx(1.2, rel=1e-6)
+
+
+def test_evaluate_rsi_rhythm_extreme_veto_blocks_without_price_breakout() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            weight_rsi_rhythm=0.25,
+            weight_15m_entry=0.0,
+            rsi_period=3,
+        )
+    )
+
+    result = engine.evaluate_rsi_rhythm(
+        direction="long",
+        rsi_15m_series=np.array([61.0, 69.0, 76.0, 78.0], dtype=float),
+        rsi_1h_series=np.array([52.0, 55.0, 58.0, 60.0], dtype=float),
+        rsi_4h_series=np.array([54.0, 57.0, 60.0, 61.0], dtype=float),
+        close_15m_series=np.array([100.0, 101.0, 100.8, 100.7], dtype=float),
+        close_1h_series=np.array([100.0, 100.6, 101.0, 101.3], dtype=float),
+        close_4h_series=np.array([98.0, 99.5, 100.8, 101.4], dtype=float),
+    )
+
+    assert result["hard_veto"] is True
+    assert result["veto_reason"] == "rsi_15m_extreme_veto"
+    assert result["raw_score"] == pytest.approx(0.0, rel=1e-6)
+    assert result["weighted_score"] == pytest.approx(0.0, rel=1e-6)
+
+
+def test_resolve_signal_score_threshold_uses_family_specific_defaults() -> None:
+    config = MACDStrategyV2Config()
+
+    assert config.resolve_signal_score_threshold("flip_bullish") == pytest.approx(0.82, rel=1e-6)
+    assert config.resolve_signal_score_threshold("flip_bearish") == pytest.approx(0.84, rel=1e-6)
+    assert config.resolve_signal_score_threshold("red_bar_growing") == pytest.approx(0.90, rel=1e-6)
+    assert config.resolve_signal_score_threshold("green_bar_growing") == pytest.approx(0.87, rel=1e-6)
+    assert config.resolve_signal_score_threshold("unknown") == pytest.approx(0.85, rel=1e-6)
+
+
+def test_classify_rsi_macd_conflict_uses_tiered_policy() -> None:
+    engine = MACDStrategyV2Engine(MACDStrategyV2Config())
+
+    leading = engine._classify_rsi_macd_conflict(
+        trade_direction="long",
+        direction_1h=None,
+        direction_4h="long",
+        score_rsi_rhythm_raw=0.55,
+        rsi_rhythm={
+            "entry_type": "rsi_spring",
+            "rsi_1h_phase": "launch",
+            "rsi_1h_slope": 2.4,
+            "probe_mode": False,
+        },
+    )
+    divergence = engine._classify_rsi_macd_conflict(
+        trade_direction="long",
+        direction_1h="long",
+        direction_4h="long",
+        score_rsi_rhythm_raw=-0.25,
+        rsi_rhythm={
+            "entry_type": "rsi_neutral_resume",
+            "rsi_1h_phase": "trend_health",
+            "rsi_1h_slope": -0.4,
+            "probe_mode": False,
+        },
+    )
+    extreme = engine._classify_rsi_macd_conflict(
+        trade_direction="long",
+        direction_1h="long",
+        direction_4h="long",
+        score_rsi_rhythm_raw=-0.45,
+        rsi_rhythm={
+            "entry_type": "rsi_neutral_resume",
+            "rsi_1h_phase": "divergence_warning",
+            "rsi_1h_slope": -1.2,
+            "probe_mode": True,
+        },
+    )
+
+    assert leading["type"] == "leading"
+    assert leading["score_penalty_mult"] == pytest.approx(1.0, rel=1e-6)
+    assert leading["portion_penalty_mult"] == pytest.approx(0.80, rel=1e-6)
+    assert divergence["type"] == "divergence"
+    assert divergence["score_penalty_mult"] == pytest.approx(0.95, rel=1e-6)
+    assert divergence["portion_penalty_mult"] == pytest.approx(0.85, rel=1e-6)
+    assert extreme["type"] == "extreme_oppose"
+    assert extreme["force_probe"] is True
+
+
+def test_resolve_threshold_override_for_rsi_spring_relaunch() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            enable_15m_spring_threshold_override=True,
+            spring_override_min_signal_score=0.82,
+            spring_override_score_bonus=0.10,
+        )
+    )
+
+    override = engine._resolve_rsi_spring_threshold_override(
+        trade_direction="long",
+        rsi_rhythm={
+            "entry_type": "rsi_spring",
+            "rsi_1h_phase": "launch",
+            "rsi_1h_recent_low": 43.0,
+            "rsi_1h_current": 52.0,
+        },
+    )
+
+    assert override["applied"] is True
+    assert override["threshold"] == pytest.approx(0.82, rel=1e-6)
+    assert override["score_bonus"] == pytest.approx(0.10, rel=1e-6)
+
+
+def test_flip_bullish_sniper_accepts_two_of_three_launch_confirmations() -> None:
+    engine = MACDStrategyV2Engine(MACDStrategyV2Config())
+
+    result = engine._evaluate_flip_bullish_sniper(
+        signal_type_1h="flip_bullish",
+        trade_direction="long",
+        rsi_rhythm={
+            "entry_type": "rsi_spring",
+            "rsi_15m_recent_low": 31.0,
+            "price_break_high": True,
+        },
+        rsi_1h_series=np.array([48.0, 51.0, 54.0, 56.0, 58.0, 60.0, 59.0, 57.0], dtype=float),
+        macd_hist_4h=np.array([-0.10, 0.02, 0.05, 0.08], dtype=float),
+        idx_4h=3,
+    )
+
+    assert result["applies"] is True
+    assert result["passed"] is True
+    assert result["reason"] == "qualified_launch"
+    assert result["quality_matches"] == 2
+    assert result["bonus_score"] == pytest.approx(0.02, rel=1e-6)
+
+
+def test_flip_bullish_sniper_softens_missing_reset_into_small_penalty() -> None:
+    engine = MACDStrategyV2Engine(MACDStrategyV2Config())
+
+    result = engine._evaluate_flip_bullish_sniper(
+        signal_type_1h="flip_bullish",
+        trade_direction="long",
+        rsi_rhythm={
+            "entry_type": "rsi_spring",
+            "rsi_15m_recent_low": 31.0,
+            "price_break_high": True,
+        },
+        rsi_1h_series=np.array([48.0, 51.0, 54.0, 56.0, 58.0, 60.0, 59.0, 57.0], dtype=float),
+        macd_hist_4h=np.array([-0.10, 0.02, 0.05, 0.08], dtype=float),
+        idx_4h=3,
+    )
+
+    assert result["applies"] is True
+    assert result["passed"] is True
+    assert result["reason"] == "qualified_launch"
+    assert result["momentum_reset_found"] is False
+    assert result["spring_confirmed"] is True
+    assert result["trend_aligned"] is True
+    assert result["bonus_score"] == pytest.approx(0.02, rel=1e-6)
+
+
+def test_flip_bullish_sniper_passes_and_grants_perfect_bonus() -> None:
+    engine = MACDStrategyV2Engine(MACDStrategyV2Config())
+
+    result = engine._evaluate_flip_bullish_sniper(
+        signal_type_1h="flip_bullish",
+        trade_direction="long",
+        rsi_rhythm={
+            "entry_type": "rsi_spring",
+            "rsi_15m_recent_low": 29.0,
+            "price_break_high": True,
+        },
+        rsi_1h_series=np.array([52.0, 47.0, 41.0, 38.0, 44.0, 49.0, 52.0, 55.0], dtype=float),
+        macd_hist_4h=np.array([-0.10, 0.02, 0.05, 0.08], dtype=float),
+        idx_4h=3,
+    )
+
+    assert result["passed"] is True
+    assert result["reason"] == "perfect_launch"
+    assert result["quality_matches"] == 3
+    assert result["bonus_score"] == pytest.approx(0.08, rel=1e-6)
+
+
+def test_flip_bullish_sniper_rejects_weak_launch_profile() -> None:
+    engine = MACDStrategyV2Engine(MACDStrategyV2Config())
+
+    result = engine._evaluate_flip_bullish_sniper(
+        signal_type_1h="flip_bullish",
+        trade_direction="long",
+        rsi_rhythm={
+            "entry_type": "",
+            "rsi_15m_recent_low": 48.0,
+        },
+        rsi_1h_series=np.array([48.0, 50.0, 53.0, 55.0, 56.0, 57.0, 58.0, 59.0], dtype=float),
+        macd_hist_4h=np.array([-0.10, -0.05, -0.02, -0.01], dtype=float),
+        idx_4h=3,
+    )
+
+    assert result["applies"] is True
+    assert result["passed"] is False
+    assert result["reason"] == "no_trend_alignment"
+
+
+def test_flip_bullish_cooling_rejects_overheated_non_spring_launch() -> None:
+    engine = MACDStrategyV2Engine(MACDStrategyV2Config())
+
+    result = engine._evaluate_flip_bullish_cooling(
+        signal_type_1h="flip_bullish",
+        trade_direction="long",
+        rsi_rhythm={
+            "entry_type": "rsi_extreme_block",
+            "rsi_1h_current": 76.0,
+            "rsi_15m_current": 61.0,
+        },
+    )
+
+    assert result["applies"] is True
+    assert result["passed"] is False
+    assert result["reason"] == "overheated_launch"
+
+
+def test_flip_bullish_cooling_allows_spring_like_high_rsi_launch() -> None:
+    engine = MACDStrategyV2Engine(MACDStrategyV2Config())
+
+    result = engine._evaluate_flip_bullish_cooling(
+        signal_type_1h="flip_bullish",
+        trade_direction="long",
+        rsi_rhythm={
+            "entry_type": "rsi_spring",
+            "rsi_1h_current": 74.0,
+            "rsi_15m_current": 67.0,
+        },
+    )
+
+    assert result["applies"] is True
+    assert result["passed"] is True
+    assert result["reason"] == "passed"
+    assert result["score_multiplier"] == pytest.approx(1.0, rel=1e-6)
+
+
+def test_flip_bullish_cooling_rejects_mildly_overheated_non_spring_launch() -> None:
+    engine = MACDStrategyV2Engine(MACDStrategyV2Config())
+
+    result = engine._evaluate_flip_bullish_cooling(
+        signal_type_1h="flip_bullish",
+        trade_direction="long",
+        rsi_rhythm={
+            "entry_type": "",
+            "rsi_1h_current": 73.0,
+            "rsi_15m_current": 61.0,
+        },
+    )
+
+    assert result["applies"] is True
+    assert result["passed"] is False
+    assert result["reason"] == "overheated_launch"
+    assert result["score_multiplier"] == pytest.approx(1.0, rel=1e-6)
+
+
+def test_flip_bullish_cooling_rejects_high_15m_rsi_without_spring() -> None:
+    engine = MACDStrategyV2Engine(MACDStrategyV2Config())
+
+    result = engine._evaluate_flip_bullish_cooling(
+        signal_type_1h="flip_bullish",
+        trade_direction="long",
+        rsi_rhythm={
+            "entry_type": "",
+            "rsi_1h_current": 63.0,
+            "rsi_15m_current": 67.0,
+        },
+    )
+
+    assert result["applies"] is True
+    assert result["passed"] is False
+    assert result["reason"] == "no_spring_high_rsi"
+    assert result["score_multiplier"] == pytest.approx(1.0, rel=1e-6)
+
+
+def test_flip_bullish_strict_filter_softens_into_score_penalty() -> None:
+    engine = MACDStrategyV2Engine(MACDStrategyV2Config())
+
+    result = engine._evaluate_flip_bullish_strict_filter(
+        signal_type_1h="flip_bullish",
+        trade_direction="long",
+        entry_type_15m="",
+        entry_refine_15m="",
+        vwap_score=0.05,
+    )
+
+    assert result["applies"] is True
+    assert result["passed"] is True
+    assert result["score_multiplier"] == pytest.approx(0.85, rel=1e-6)
+    assert result["reasons"] == [
+        "15m_entry=none",
+        "15m_refine=none",
+        "vwap_score=0.05<0.12",
+    ]
+
+
+@pytest.mark.parametrize("entry_type", ["rsi_spring", "rsi_neutral_resume"])
+def test_flip_bullish_spring_weight_floor_applies_for_valid_launches(entry_type: str) -> None:
+    engine = MACDStrategyV2Engine(MACDStrategyV2Config())
+
+    result = engine._resolve_flip_bullish_rsi_spring_weight_floor(
+        signal_type_1h="flip_bullish",
+        trade_direction="long",
+        rsi_rhythm={
+            "entry_type": entry_type,
+            "rsi_1h_phase": "launch",
+            "price_break_high": True,
+        },
+        score_rsi_rhythm_weighted=0.08,
+    )
+
+    assert result["applied"] is True
+    assert result["rsi_spring_weighted_floor_applied"] is True
+    assert result["rsi_spring_weighted_floor_value"] == pytest.approx(0.20, rel=1e-6)
+    assert result["score_rsi_rhythm_weighted"] == pytest.approx(0.20, rel=1e-6)
+
+
+def test_evaluate_neutral_upgrade_tiers_strong_and_probe_modes() -> None:
+    engine = MACDStrategyV2Engine(MACDStrategyV2Config())
+
+    strong = engine._evaluate_neutral_upgrade(
+        neutral_upgrade_candidate="long",
+        neutral_upgrade_raw=0.36,
+        hard_veto=False,
+    )
+    probe = engine._evaluate_neutral_upgrade(
+        neutral_upgrade_candidate="long",
+        neutral_upgrade_raw=0.24,
+        hard_veto=False,
+    )
+    weak = engine._evaluate_neutral_upgrade(
+        neutral_upgrade_candidate="long",
+        neutral_upgrade_raw=0.12,
+        hard_veto=False,
+    )
+
+    assert strong["applied"] is True
+    assert strong["mode"] == "full"
+    assert strong["probe_mode"] is False
+    assert strong["threshold_override"] == pytest.approx(0.82, rel=1e-6)
+    assert probe["applied"] is True
+    assert probe["mode"] == "probe"
+    assert probe["probe_mode"] is True
+    assert probe["threshold_override"] == pytest.approx(0.82, rel=1e-6)
+    assert weak["applied"] is False
+    assert weak["mode"] == "reject"
+
+
+def test_rsi_conflict_downshifts_leverage_and_portion() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            weight_rsi_rhythm=0.25,
+            min_signal_score=0.85,
+            enable_red_bar_growing_probe_overlay=False,
+        )
+    )
+
+    leverage = engine.calculate_leverage(
+        0.90,
+        ema_multiplier=1.0,
+        signal_type_1h="red_bar_growing",
+        rsi_conflict=True,
+    )
+    portion = engine.calculate_position_portion(
+        score=0.90,
+        base_default_portion=0.20,
+        base_max_symbol_position_portion=0.30,
+        signal_type_1h="red_bar_growing",
+        rsi_exposure_mult=0.5,
+        rsi_conflict=True,
+        rsi_conflict_portion_mult=0.85,
+    )
+
+    assert leverage == 3
+    assert portion == pytest.approx(0.102, rel=1e-6)
+
+
+def test_red_bar_growing_overlay_forces_probe_sizing_and_leverage_cap() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            enable_red_bar_growing_probe_overlay=True,
+            red_bar_growing_probe_position_penalty=0.50,
+            red_bar_growing_probe_max_leverage=2,
+            rsi_probe_portion_scale=0.25,
+        )
+    )
+
+    leverage = engine.calculate_leverage(
+        0.90,
+        ema_multiplier=1.0,
+        signal_type_1h="red_bar_growing",
+    )
+    portion = engine.calculate_position_portion(
+        score=0.90,
+        base_default_portion=0.20,
+        base_max_symbol_position_portion=0.30,
+        signal_type_1h="red_bar_growing",
+        rsi_exposure_mult=1.0,
+    )
+
+    assert leverage == 2
+    assert portion == pytest.approx(0.03, rel=1e-6)
+
+
+def test_green_bar_growing_overlay_forces_micro_probe_sizing_and_leverage_cap() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            enable_green_bar_growing_probe_overlay=True,
+            green_bar_growing_probe_position_penalty=0.40,
+            green_bar_growing_probe_max_leverage=2,
+            rsi_probe_portion_scale=0.25,
+        )
+    )
+
+    leverage = engine.calculate_leverage(
+        0.90,
+        ema_multiplier=1.0,
+        signal_type_1h="green_bar_growing",
+    )
+    portion = engine.calculate_position_portion(
+        score=0.90,
+        base_default_portion=0.20,
+        base_max_symbol_position_portion=0.30,
+        signal_type_1h="green_bar_growing",
+        rsi_exposure_mult=1.0,
+    )
+
+    assert leverage == 2
+    assert portion == pytest.approx(0.024, rel=1e-6)
+
+
+def test_rsi_exposure_multiplier_uses_probe_tier_below_block_threshold() -> None:
+    assert MACDStrategyV2Engine._resolve_rsi_exposure_multiplier(-0.31) == pytest.approx(0.20, rel=1e-6)
+
+
+def test_flip_signals_skip_vwap_score_floor_when_exemption_enabled() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            min_vwap_score_for_entry=0.10,
+            preflip_trial_min_vwap_score=0.06,
+            enable_vwap_flip_exemption=True,
+        )
+    )
+
+    assert engine._resolve_min_vwap_score_for_entry(
+        signal_type_1h="flip_bullish",
+        is_trial_entry=False,
+    ) == pytest.approx(0.0, rel=1e-6)
+    assert engine._resolve_min_vwap_score_for_entry(
+        signal_type_1h="green_bar_growing",
+        is_trial_entry=False,
+    ) == pytest.approx(0.10, rel=1e-6)
+
+
+def test_calculate_position_portion_applies_priority_bonus_and_probe_scale() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            enable_priority_allocation=True,
+            priority_allocation_overdraft_pct=0.08,
+            rsi_probe_portion_scale=0.25,
+        )
+    )
+
+    portion = engine.calculate_position_portion(
+        score=0.90,
+        base_default_portion=0.60,
+        base_max_symbol_position_portion=0.60,
+        signal_type_1h="flip_bullish",
+        vwap_state="long_dual_support",
+        rsi_exposure_mult=0.20,
+        rsi_probe_mode=True,
+    )
+
+    assert portion == pytest.approx(0.034, rel=1e-6)
+
+
+def test_priority_flip_bullish_uses_slower_4h_shrink_exit_policy() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            enable_priority_signal_shrink_exit=True,
+            priority_signal_shrink_exit_required_bars=3,
+            priority_signal_shrink_exit_required_pct=0.40,
+            exit_4h_shrink_bars=2,
+            exit_4h_min_shrink_pct=0.20,
+        )
+    )
+
+    policy = engine.resolve_4h_shrink_exit_policy(
+        signal_details={
+            "signal_type_1h": "flip_bullish",
+            "priority_signal": True,
+            "vwap_state": "long_dual_support",
+            "shrink_exit_direction": "LONG",
+            "macd_4h_shrink_pct": 0.25,
+            "macd_4h_shrink_bars": 2,
+        },
+        position_side="LONG",
+    )
+
+    assert policy["mode"] == "priority_signal_slow"
+    assert policy["required_bars"] == 3
+    assert policy["required_pct"] == pytest.approx(0.40, rel=1e-6)
+    assert policy["active"] is False
 
 
 def test_vwap_score_filter_uses_distinct_reason_code() -> None:
@@ -458,64 +1002,6 @@ def test_neutral_signal_carries_4h_shrink_exit_metadata() -> None:
     assert signal.details["shrink_exit_ready"] is True
 
 
-def test_soft_15m_confirmation_allows_4h_primary_entry() -> None:
-    engine = MACDStrategyV2Engine(
-        MACDStrategyV2Config(
-            weight_1h_direction=0.0,
-            weight_4h_direction=0.55,
-            weight_4h_enhancement=0.0,
-            weight_vwap=0.20,
-            weight_15m_entry=0.05,
-            weight_volume=0.20,
-            min_signal_score=0.85,
-            min_entry_score=0.1,
-            min_vwap_score_for_entry=0.12,
-            overheat_growing_penalty=0.0,
-            enable_flip_bullish_strict_filter=False,
-            disable_flip_bullish_entries=False,
-            disable_green_bar_growing_entries=False,
-            primary_direction_timeframe="4h",
-            require_1h_confirmation_when_4h_primary=True,
-            allow_neutral_1h_confirmation=True,
-            light_1h_confirmation_when_4h_primary=True,
-            enable_soft_15m_confirmation_when_4h_primary=True,
-            soft_15m_entry_score=0.28,
-        )
-    )
-
-    signal = engine.analyze(
-        macd_hist_15m=np.array([-0.00040, -0.00025, -0.00018, -0.00010]),
-        macd_hist_1h=np.array([-0.20, -0.10, 0.05, 0.10]),
-        macd_hist_4h=np.array([-0.30, -0.15, -0.05, 0.20]),
-        idx_15m=3,
-        idx_1h=3,
-        idx_4h=3,
-        volume_ratio=2.0,
-        vwap=100.0,
-        structural_vwap=99.6,
-        close_price=101.0,
-        bb_middle_1h=100.0,
-        bb_upper_1h=110.0,
-        bb_lower_1h=90.0,
-        bb_middle_4h=99.0,
-        bb_upper_4h=109.0,
-        bb_lower_4h=89.0,
-        bb_middle_15m=100.0,
-        bb_upper_15m=103.0,
-        bb_lower_15m=97.0,
-        close_15m=100.8,
-        adx_1h=20.0,
-        adx_4h=22.0,
-        atr_1h=1.0,
-    )
-
-    assert signal.direction == "long"
-    assert signal.signal_score >= 0.85
-    assert signal.details["entry_score_15m"] == pytest.approx(0.28, rel=1e-6)
-    assert signal.details["vwap_score"] >= 0.12
-    assert str(signal.details["entry_type_15m"]).startswith("soft_long_")
-
-
 def test_green_bar_growing_short_adx_range_filter_blocks_full_size() -> None:
     base_kwargs = dict(
         weight_1h_direction=0.5,
@@ -525,10 +1011,13 @@ def test_green_bar_growing_short_adx_range_filter_blocks_full_size() -> None:
         weight_15m_entry=0.15,
         weight_volume=0.15,
         min_signal_score=0.1,
+        green_bar_growing_min_signal_score=0.1,
         flip_bullish_min_signal_score=0.1,
         min_entry_score=0.1,
         min_vwap_score_for_entry=0.0,
         overheat_growing_penalty=0.0,
+        enable_flip_bullish_sniper=False,
+        enable_flip_bullish_cooling=False,
         enable_flip_bullish_strict_filter=False,
         disable_flip_bullish_entries=False,
         disable_green_bar_growing_entries=False,
@@ -592,6 +1081,8 @@ def test_flip_bullish_cvd_context_filter_blocks_full_size() -> None:
         min_entry_score=0.1,
         min_vwap_score_for_entry=0.0,
         overheat_growing_penalty=0.0,
+        enable_flip_bullish_sniper=False,
+        enable_flip_bullish_cooling=False,
         enable_flip_bullish_strict_filter=False,
         disable_flip_bullish_entries=False,
         disable_green_bar_growing_entries=False,
@@ -737,6 +1228,8 @@ def test_vwap_score_position_tiers_apply_only_to_target_states() -> None:
     engine = MACDStrategyV2Engine(
         MACDStrategyV2Config(
             vwap_score_tier_apply_to_states=["short_dual_pressure", "flip_bullish"],
+            enable_red_bar_growing_probe_overlay=False,
+            enable_green_bar_growing_probe_overlay=False,
             vwap_score_position_tiers=[
                 {"min": 0.12, "max": 0.20, "position_mult": 0.80},
                 {"min": 0.20, "max": 0.30, "position_mult": 1.00},
@@ -803,27 +1296,26 @@ def test_check_15m_macd_follow_prefers_rsi_spring_refinement_for_long() -> None:
     assert entry_score > 0.85
 
 
-def test_analyze_blocks_shrinking_soft_short_combo_with_weak_combo_veto() -> None:
+def test_analyze_blocks_rsi_extreme_short_path_with_hard_veto() -> None:
     engine = MACDStrategyV2Engine(
         MACDStrategyV2Config(
             weight_1h_direction=0.0,
             weight_4h_direction=0.55,
             weight_4h_enhancement=0.0,
             weight_vwap=0.0,
-            weight_15m_entry=0.15,
-            weight_volume=0.15,
-            min_signal_score=0.1,
-            min_entry_score=0.1,
-            min_vwap_score_for_entry=0.0,
-            overheat_growing_penalty=0.0,
-            disable_green_bar_shrinking_short_dual_pressure_entries=False,
-            primary_direction_timeframe="4h",
-            require_1h_confirmation_when_4h_primary=True,
-            allow_neutral_1h_confirmation=True,
-            enable_soft_15m_confirmation_when_4h_primary=True,
-            enable_rsi_entry_refinement=False,
+                weight_15m_entry=0.0,
+                weight_volume=0.15,
+                min_signal_score=0.1,
+                min_entry_score=0.1,
+                min_vwap_score_for_entry=0.0,
+                overheat_growing_penalty=0.0,
+                primary_direction_timeframe="4h",
+                require_1h_confirmation_when_4h_primary=True,
+                allow_neutral_1h_confirmation=True,
+                disable_green_bar_shrinking_short_dual_pressure_entries=False,
+                rsi_period=3,
+            )
         )
-    )
 
     signal = engine.analyze(
         macd_hist_15m=np.array([0.00020, 0.00010, 0.00005, 0.0]),
@@ -846,75 +1338,18 @@ def test_analyze_blocks_shrinking_soft_short_combo_with_weak_combo_veto() -> Non
         bb_upper_15m=100.5,
         bb_lower_15m=98.5,
         close_15m=99.2,
-        close_15m_series=np.array([99.8, 99.6, 99.4, 99.3, 99.2], dtype=float),
-        close_1h_series=np.array([101.0, 100.7, 100.3, 99.8, 99.4, 99.2], dtype=float),
-        close_4h_series=np.array([103.0, 102.0, 101.0, 100.0, 99.6, 99.2], dtype=float),
+        close_15m_series=np.array([100.0, 101.0, 102.0, 103.0, 104.0, 103.0, 102.0, 101.0], dtype=float),
+        close_1h_series=np.array([100.0, 101.0, 102.0, 103.0, 104.0, 103.0, 102.0, 101.0], dtype=float),
+        close_4h_series=np.array([100.0, 101.0, 102.0, 103.0, 104.0, 103.0, 102.0, 101.0], dtype=float),
         adx_1h=30.0,
         adx_4h=24.0,
         atr_1h=1.0,
     )
 
     assert signal.direction == "neutral"
-    assert signal.signal_type_1h == "green_bar_shrinking"
-    assert signal.entry_type_15m == "soft_short_neutral"
-    assert signal.details["reject_reason_code"] == "weak_combo_veto"
-
-
-def test_analyze_blocks_shrinking_soft_long_combo_with_weak_combo_veto() -> None:
-    engine = MACDStrategyV2Engine(
-        MACDStrategyV2Config(
-            weight_1h_direction=0.0,
-            weight_4h_direction=0.55,
-            weight_4h_enhancement=0.0,
-            weight_vwap=0.0,
-            weight_15m_entry=0.15,
-            weight_volume=0.15,
-            min_signal_score=0.1,
-            min_entry_score=0.1,
-            min_vwap_score_for_entry=0.0,
-            overheat_growing_penalty=0.0,
-            disable_red_bar_shrinking_long_dual_support_entries=False,
-            primary_direction_timeframe="4h",
-            require_1h_confirmation_when_4h_primary=True,
-            allow_neutral_1h_confirmation=True,
-            enable_soft_15m_confirmation_when_4h_primary=True,
-            enable_rsi_entry_refinement=False,
-        )
-    )
-
-    signal = engine.analyze(
-        macd_hist_15m=np.array([-0.00020, -0.00010, -0.00005, 0.0]),
-        macd_hist_1h=np.array([0.35, 0.30, 0.25, 0.20]),
-        macd_hist_4h=np.array([-0.10, 0.02, 0.08, 0.14]),
-        idx_15m=3,
-        idx_1h=3,
-        idx_4h=3,
-        volume_ratio=2.0,
-        vwap=100.0,
-        structural_vwap=100.4,
-        close_price=100.8,
-        bb_middle_1h=100.0,
-        bb_upper_1h=106.0,
-        bb_lower_1h=94.0,
-        bb_middle_4h=100.0,
-        bb_upper_4h=106.0,
-        bb_lower_4h=94.0,
-        bb_middle_15m=100.5,
-        bb_upper_15m=101.5,
-        bb_lower_15m=99.5,
-        close_15m=100.8,
-        close_15m_series=np.array([100.2, 100.4, 100.6, 100.7, 100.8], dtype=float),
-        close_1h_series=np.array([99.0, 99.3, 99.7, 100.2, 100.6, 100.8], dtype=float),
-        close_4h_series=np.array([97.0, 98.0, 99.0, 100.0, 100.4, 100.8], dtype=float),
-        adx_1h=30.0,
-        adx_4h=24.0,
-        atr_1h=1.0,
-    )
-
-    assert signal.direction == "neutral"
-    assert signal.signal_type_1h == "red_bar_shrinking"
-    assert signal.entry_type_15m == "soft_long_neutral"
-    assert signal.details["reject_reason_code"] == "weak_combo_veto"
+    assert signal.details["reason"] == "rsi_15m_extreme_veto"
+    assert signal.details["entry_type_15m"] == "rsi_extreme_block"
+    assert signal.details["rsi_hard_veto"] is True
 
 
 def test_analyze_skips_weak_combo_veto_when_disabled() -> None:
@@ -970,3 +1405,180 @@ def test_analyze_skips_weak_combo_veto_when_disabled() -> None:
     )
 
     assert signal.details.get("reject_reason_code") != "weak_combo_veto"
+
+
+def test_rsi_launch_sovereign_mode_applies_to_long_flip_bullish() -> None:
+    engine = MACDStrategyV2Engine(MACDStrategyV2Config())
+
+    sovereign = engine._evaluate_rsi_launch_sovereign_mode(
+        trade_direction="long",
+        signal_type_1h="flip_bullish",
+        signal_type_4h="flip_bullish",
+        macd_hist_4h_current=0.20,
+        rsi_context={
+            "refine": "rsi_spring",
+            "rsi_1h": 61.0,
+            "rsi_4h": 56.0,
+            "price_break_high": True,
+            "price_break_low": False,
+            "rsi_1h_recent_reset_min": 42.0,
+            "rsi_1h_recent_reset_max": 61.0,
+        },
+    )
+
+    assert sovereign["applied"] is True
+    assert sovereign["rsi_launch_sovereign_active"] is True
+    assert sovereign["direction"] == "long"
+    assert sovereign["rsi_launch_sovereign_side"] == "long"
+    assert sovereign["score_bonus"] == pytest.approx(0.12, rel=1e-6)
+    assert sovereign["threshold_override"] == pytest.approx(0.80, rel=1e-6)
+    assert sovereign["competition_multiplier"] == pytest.approx(1.15, rel=1e-6)
+    assert sovereign["priority_execution_applied"] is True
+
+
+def test_rsi_launch_sovereign_mode_applies_to_short_flip_bearish_symmetrically() -> None:
+    engine = MACDStrategyV2Engine(MACDStrategyV2Config())
+
+    sovereign = engine._evaluate_rsi_launch_sovereign_mode(
+        trade_direction="short",
+        signal_type_1h="flip_bearish",
+        signal_type_4h="flip_bearish",
+        macd_hist_4h_current=-0.22,
+        rsi_context={
+            "refine": "rsi_reject",
+            "rsi_1h": 34.0,
+            "rsi_4h": 44.0,
+            "price_break_high": False,
+            "price_break_low": True,
+            "rsi_1h_recent_reset_min": 34.0,
+            "rsi_1h_recent_reset_max": 64.0,
+        },
+    )
+
+    assert sovereign["applied"] is True
+    assert sovereign["rsi_launch_sovereign_active"] is True
+    assert sovereign["direction"] == "short"
+    assert sovereign["rsi_launch_sovereign_side"] == "short"
+    assert sovereign["priority_execution_applied"] is True
+    assert sovereign["competition_multiplier"] == pytest.approx(1.15, rel=1e-6)
+
+
+def test_rsi_launch_sovereign_mode_does_not_apply_without_price_break() -> None:
+    engine = MACDStrategyV2Engine(MACDStrategyV2Config())
+
+    sovereign = engine._evaluate_rsi_launch_sovereign_mode(
+        trade_direction="long",
+        signal_type_1h="flip_bullish",
+        signal_type_4h="flip_bullish",
+        macd_hist_4h_current=0.20,
+        rsi_context={
+            "refine": "rsi_spring",
+            "rsi_1h": 61.0,
+            "rsi_4h": 56.0,
+            "price_break_high": False,
+            "price_break_low": False,
+            "rsi_1h_recent_reset_min": 42.0,
+            "rsi_1h_recent_reset_max": 61.0,
+        },
+    )
+
+    assert sovereign["applied"] is False
+    assert sovereign["rsi_launch_sovereign_active"] is False
+    assert sovereign["priority_execution_applied"] is False
+    assert sovereign["competition_multiplier"] == pytest.approx(1.0, rel=1e-6)
+
+
+def test_rsi_launch_sovereign_mode_requires_true_spring_refine() -> None:
+    engine = MACDStrategyV2Engine(MACDStrategyV2Config())
+
+    sovereign = engine._evaluate_rsi_launch_sovereign_mode(
+        trade_direction="long",
+        signal_type_1h="flip_bullish",
+        signal_type_4h="flip_bullish",
+        macd_hist_4h_current=0.20,
+        rsi_context={
+            "refine": "rsi_neutral_resume",
+            "rsi_1h": 61.0,
+            "rsi_4h": 56.0,
+            "price_break_high": True,
+            "price_break_low": False,
+            "rsi_1h_recent_reset_min": 42.0,
+            "rsi_1h_recent_reset_max": 61.0,
+        },
+    )
+
+    assert sovereign["applied"] is False
+    assert sovereign["rsi_launch_sovereign_active"] is False
+    assert sovereign["rsi_launch_sovereign_reason"] == "long_refine_not_eligible"
+
+
+def test_analyze_applies_long_sovereign_metadata_without_forced_swap() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            weight_1h_direction=0.0,
+            weight_4h_direction=0.45,
+            weight_4h_enhancement=0.0,
+            weight_vwap=0.0,
+            weight_15m_entry=0.10,
+            weight_volume=0.20,
+            min_signal_score=0.90,
+            min_entry_score=0.10,
+            min_vwap_score_for_entry=0.0,
+            overheat_growing_penalty=0.0,
+            enable_flip_bullish_strict_filter=False,
+            disable_flip_bullish_entries=False,
+            disable_green_bar_growing_entries=False,
+            primary_direction_timeframe="4h",
+            require_1h_confirmation_when_4h_primary=True,
+            enable_rsi_entry_refinement=True,
+            rsi_period=5,
+            rsi_spring_recent_extreme_lookback=6,
+            rsi_spring_recent_oversold=35.0,
+            rsi_spring_prev_max=50.0,
+            rsi_spring_confirm=50.0,
+            rsi_1h_long_support=52.0,
+        )
+    )
+
+    signal = engine.analyze(
+        macd_hist_15m=np.array([-0.10, -0.05, 0.02, 0.08]),
+        macd_hist_1h=np.array([-0.20, -0.10, -0.05, 0.10]),
+        macd_hist_4h=np.array([-0.30, -0.15, -0.05, 0.20]),
+        idx_15m=3,
+        idx_1h=3,
+        idx_4h=3,
+        volume_ratio=2.0,
+        vwap=100.0,
+        structural_vwap=99.8,
+        close_price=101.0,
+        bb_middle_1h=100.0,
+        bb_upper_1h=110.0,
+        bb_lower_1h=90.0,
+        bb_middle_4h=99.0,
+        bb_upper_4h=109.0,
+        bb_lower_4h=89.0,
+        bb_middle_15m=100.0,
+        bb_upper_15m=103.0,
+        bb_lower_15m=97.0,
+        close_15m=100.8,
+        close_15m_series=np.array([100, 99, 98, 97, 96, 95, 94, 93, 92, 91, 90, 92, 96], dtype=float),
+        close_1h_series=np.array([100, 98, 96, 95, 94, 95, 94, 96, 95, 97, 96, 98], dtype=float),
+        close_4h_series=np.array([90, 91, 92, 94, 96, 95, 97, 96, 98, 97, 99, 100], dtype=float),
+        adx_1h=22.0,
+        adx_4h=24.0,
+        atr_1h=1.0,
+    )
+
+    assert signal.direction == "long"
+    assert signal.signal_score >= 0.80
+    assert signal.details["rsi_launch_sovereign_applied"] is True
+    assert signal.details["rsi_launch_sovereign_active"] is True
+    assert signal.details["rsi_launch_sovereign_side"] == "long"
+    assert signal.details["priority_execution_applied"] is True
+    assert signal.details["priority_signal"] is True
+    assert signal.details["competition_score"] > signal.signal_score
+    assert signal.details["signal_score_threshold"] == pytest.approx(0.80, rel=1e-6)
+    assert signal.details["final_leverage_after_rsi"] == pytest.approx(1.0, rel=1e-6)
+    assert signal.details["final_portion_after_rsi"] == pytest.approx(1.0, rel=1e-6)
+    assert "force_flat" not in signal.details
+    assert "strong_flat" not in signal.details
