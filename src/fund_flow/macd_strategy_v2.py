@@ -25,6 +25,11 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
+DEFAULT_COMPETITION_CLUSTER_BONUS_MAP = {
+    "flip_bullish": 0.12,
+}
+
+
 class VetoType(Enum):
     """否决类型"""
     NONE = "none"
@@ -146,6 +151,11 @@ class MACDStrategyV2Config:
     priority_exec_vip_min_score: float = 0.92
     priority_exec_vip_expire_seconds: int = 30
     priority_exec_vip_allow_retry: bool = True
+    competition_ranking_enabled: bool = False
+    competition_cluster_bonus_map: Dict[str, float] = field(default_factory=lambda: dict(DEFAULT_COMPETITION_CLUSTER_BONUS_MAP))
+    entry_market_fallback_min_score: float = 0.68
+    entry_market_fallback_timeout_ms: int = 2000
+    entry_market_fallback_max_slippage_bps: int = 5
     enable_vwap_flip_exemption: bool = True
     enable_neutral_upgrade: bool = True
     neutral_upgrade_min_rsi_score: float = 0.35
@@ -173,8 +183,8 @@ class MACDStrategyV2Config:
     enable_red_bar_growing_probe_overlay: bool = False
     red_bar_growing_probe_position_penalty: float = 0.50
     red_bar_growing_probe_max_leverage: int = 2
-    enable_green_bar_growing_probe_overlay: bool = False
-    green_bar_growing_probe_position_penalty: float = 0.40
+    enable_green_bar_growing_probe_overlay: bool = True
+    green_bar_growing_probe_position_penalty: float = 0.10
     green_bar_growing_probe_max_leverage: int = 2
     rsi_4h_long_support: float = 55.0
     rsi_4h_short_support: float = 45.0
@@ -256,6 +266,17 @@ class MACDStrategyV2Config:
     enable_priority_signal_shrink_exit: bool = True
     priority_signal_shrink_exit_required_bars: int = 3
     priority_signal_shrink_exit_required_pct: float = 0.40
+    enable_macd_1h_flip_exit: bool = False
+    macd_1h_flip_exit_confirm_bars: int = 2
+    macd_1h_flip_exit_min_magnitude: float = 0.0003
+    macd_1h_flip_exit_min_profit_to_exit: float = 0.006
+    enable_rsi_overheat_exit: bool = False
+    rsi_overheat_exit_threshold: float = 78.0
+    rsi_overheat_exit_min_mfe: float = 0.012
+    rsi_overheat_exit_partial_ratio: float = 0.50
+    enable_holding_time_exit: bool = False
+    holding_time_exit_max_hours: float = 96.0
+    holding_time_exit_min_pnl_to_hold: float = 0.005
     exit_4h_require_profit: bool = True
     exit_4h_weak_loss_threshold: float = -1.0
     session_risk_control_enabled: bool = False
@@ -390,7 +411,13 @@ class MACDStrategyV2Config:
         entry_type_15m: Optional[str] = None,
     ) -> float:
         score = float(signal_score or 0.0)
-        if str(signal_type_1h or "").strip().lower() == "flip_bullish":
+        signal_type = str(signal_type_1h or "").strip().lower()
+        if self.competition_ranking_enabled:
+            bonus_map = self.competition_cluster_bonus_map or {}
+            if signal_type in bonus_map:
+                return score + float(bonus_map.get(signal_type, 0.0) or 0.0)
+            return score
+        if signal_type == "flip_bullish":
             multiplier = 1.10
             if str(entry_type_15m or "").strip().lower() in {"rsi_spring", "rsi_neutral_resume"}:
                 multiplier += 0.05
@@ -577,6 +604,10 @@ class MACDStrategyV2Engine:
         payload.setdefault("entry_price_mode", "ioc_limit")
         payload.setdefault("entry_retry_enabled", False)
         payload.setdefault("entry_retry_max_attempts", 0)
+        payload.setdefault("entry_market_fallback_enabled", False)
+        payload.setdefault("entry_market_fallback_timeout_ms", 0)
+        payload.setdefault("entry_market_fallback_max_slippage_bps", 0)
+        payload.setdefault("entry_execution_policy", "ioc")
         payload.setdefault("final_leverage_after_rsi", 1.0)
         payload.setdefault("final_portion_after_rsi", 1.0)
         if veto_type != VetoType.NONE and "veto_type" not in payload:
@@ -1367,11 +1398,19 @@ class MACDStrategyV2Engine:
             priority_execution_applied and float(score) >= float(self.config.priority_exec_vip_min_score)
         )
         retry_enabled = bool(vip_applied and self.config.priority_exec_vip_allow_retry)
+        standard_market_fallback = bool(
+            not priority_execution_applied
+            and float(score) >= float(self.config.entry_market_fallback_min_score)
+        )
         return {
             "execution_route": (
                 "priority_execution_vip"
                 if vip_applied
-                else ("priority_execution" if priority_execution_applied else "ioc")
+                else (
+                    "priority_execution"
+                    if priority_execution_applied
+                    else ("ioc_market_fallback" if standard_market_fallback else "ioc")
+                )
             ),
             "priority_execution_applied": priority_execution_applied,
             "priority_execution_tier": "vip" if vip_applied else ("standard" if priority_execution_applied else "none"),
@@ -1381,9 +1420,25 @@ class MACDStrategyV2Engine:
                 if vip_applied
                 else (int(self.config.priority_exec_expire_seconds) if priority_execution_applied else 0)
             ),
-            "entry_price_mode": "elastic_limit" if priority_execution_applied else "ioc",
+            "entry_price_mode": "elastic_limit" if priority_execution_applied else "ioc_limit",
             "entry_retry_enabled": retry_enabled,
             "entry_retry_max_attempts": 1 if retry_enabled else 0,
+            "entry_market_fallback_enabled": standard_market_fallback,
+            "entry_market_fallback_timeout_ms": (
+                int(self.config.entry_market_fallback_timeout_ms) if standard_market_fallback else 0
+            ),
+            "entry_market_fallback_max_slippage_bps": (
+                int(self.config.entry_market_fallback_max_slippage_bps) if standard_market_fallback else 0
+            ),
+            "entry_execution_policy": (
+                "priority_execution_vip"
+                if vip_applied
+                else (
+                    "priority_execution"
+                    if priority_execution_applied
+                    else ("ioc_market_fallback" if standard_market_fallback else "ioc")
+                )
+            ),
         }
 
     def evaluate_rsi_rhythm(
@@ -3965,8 +4020,7 @@ class MACDStrategyV2Engine:
         )
 
         if (
-            strict_1h_filters_enabled
-            and not stable_continuation_active
+            not stable_continuation_active
             and self.config.disable_flip_bullish_entries
             and signal_type_1h == 'flip_bullish'
         ):
@@ -4673,6 +4727,10 @@ class MACDStrategyV2Engine:
                 "entry_price_mode": "elastic_limit",
                 "entry_retry_enabled": bool(self.config.rsi_launch_sovereign_allow_retry),
                 "entry_retry_max_attempts": 1 if bool(self.config.rsi_launch_sovereign_allow_retry) else 0,
+                "entry_market_fallback_enabled": False,
+                "entry_market_fallback_timeout_ms": 0,
+                "entry_market_fallback_max_slippage_bps": 0,
+                "entry_execution_policy": "priority_execution_vip",
             }
         rsi_probe_mode = self._resolve_effective_probe_mode(
             signal_type_1h,
@@ -4788,6 +4846,10 @@ class MACDStrategyV2Engine:
             'entry_price_mode': priority_execution_plan['entry_price_mode'],
             'entry_retry_enabled': priority_execution_plan['entry_retry_enabled'],
             'entry_retry_max_attempts': priority_execution_plan['entry_retry_max_attempts'],
+            'entry_market_fallback_enabled': priority_execution_plan['entry_market_fallback_enabled'],
+            'entry_market_fallback_timeout_ms': priority_execution_plan['entry_market_fallback_timeout_ms'],
+            'entry_market_fallback_max_slippage_bps': priority_execution_plan['entry_market_fallback_max_slippage_bps'],
+            'entry_execution_policy': priority_execution_plan['entry_execution_policy'],
             'neutral_upgrade_considered': neutral_upgrade_considered,
             'neutral_upgrade_applied': neutral_upgrade_applied,
             'neutral_upgrade_penalty_mult': neutral_upgrade_penalty_mult,
@@ -4879,7 +4941,7 @@ class MACDStrategyV2Engine:
             leverage = min(leverage, max(1, int(self.config.red_bar_growing_probe_max_leverage or 2)))
         if green_bar_probe_mode:
             leverage = min(leverage, max(1, int(self.config.green_bar_growing_probe_max_leverage or 2)))
-        if rsi_probe_mode or red_bar_probe_mode or green_bar_probe_mode:
+        if rsi_probe_mode or red_bar_probe_mode:
             leverage = min(leverage, max(1, int(self.config.rsi_probe_forced_leverage or 2)))
         elif rsi_conflict and leverage > 2:
             leverage -= 1
@@ -4975,12 +5037,15 @@ class MACDStrategyV2Engine:
         portion *= self._clamp(rsi_exposure_mult, 0.0, 1.2)
         red_bar_probe_mode = self._is_red_bar_growing_probe_overlay(signal_type_1h)
         green_bar_probe_mode = self._is_green_bar_growing_probe_overlay(signal_type_1h)
-        if rsi_probe_mode or red_bar_probe_mode or green_bar_probe_mode:
+        if rsi_probe_mode or red_bar_probe_mode:
             portion *= self._clamp(float(self.config.rsi_probe_portion_scale), 0.0, 1.0)
         if red_bar_probe_mode:
             portion *= self._clamp(float(self.config.red_bar_growing_probe_position_penalty), 0.0, 1.0)
         if green_bar_probe_mode:
-            portion *= self._clamp(float(self.config.green_bar_growing_probe_position_penalty), 0.0, 1.0)
+            green_penalty = self._clamp(float(self.config.green_bar_growing_probe_position_penalty), 0.0, 1.0)
+            if green_penalty > 0.10:
+                green_penalty *= self._clamp(float(self.config.rsi_probe_portion_scale), 0.0, 1.0)
+            portion *= green_penalty
         if rsi_conflict:
             portion *= self._clamp(float(rsi_conflict_portion_mult), 0.0, 1.0)
         portion *= self.resolve_symbol_risk_session_scale(symbol, session_scale)

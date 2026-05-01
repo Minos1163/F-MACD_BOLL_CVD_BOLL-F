@@ -1,6 +1,6 @@
 # MACD V2 30天回测归因与实盘开仓链路审计
 
-- 日期: `2026-04-28`
+- 更新日期: `2026-04-29`
 - 回测窗口: `2026-02-23 -> 2026-03-24T23:59:59`
 - 回测命令:
 
@@ -8,418 +8,526 @@
 python scripts/backtest_macd_v2.py --config config/trading_config_fund_flow.json --start 2026-02-23 --end 2026-03-24T23:59:59
 ```
 
-- 本轮最终工件:
-  - `output/backtest/v2_summary_20260428_220648.json`
-  - `output/backtest/v2_trades_20260428_220648.csv`
-  - `output/backtest/v2_equity_curve_20260428_220648.csv`
+- 最新工件:
+  - `output/backtest/v2_summary_20260429_012003.json`
+  - `output/backtest/v2_trades_20260429_012003.csv`
+  - `output/backtest/v2_equity_curve_20260429_012003.csv`
 
-## 1. 执行结论
+## 1. 本轮结论
 
-这轮修复已经把系统从 `0` 交易的前端塌缩状态救回到可用吞吐:
+当前 HEAD 已经稳定脱离此前的 `0 笔交易` 塌缩态，也优于上一轮 `119 笔 / PF 3.48 / DD 10.20%` 的“修复但不精炼”状态。最新 30 天结果为:
 
-- `total_trades = 119`
-- `return_pct = +38.19%`
-- `win_rate_pct = 81.51%`
-- `profit_factor = 3.48`
-- `signals_generated = 756`
-- `candidate_entries = 495`
-- `orders_submitted = 285`
-- `orders_filled = 119`
-- `max_drawdown_pct = 10.20%`
-
-结论分成两层:
-
-1. “前端漏斗锁死”已经解除，系统不再是 `0 -> 0 -> 0` 的静默状态。
-2. 当前结果已经满足交易数 `90-120` 区间和 `80%+` 胜率要求，但仍有两个残留缺口:
-   - `profit_factor = 3.48`，低于希望的 `4.0+`
-   - `max_drawdown_pct = 10.20%`，略高于 `10%` 红线
-
-这意味着本轮是“修复成功，但还有优化空间”，不是最终最优态。
-
-## 2. 三个状态的对照
-
-### 2.1 同日参考工件
-
-来源: `output/backtest/v2_summary_20260428_082355.json`
-
-| 指标 | 数值 |
+| 指标 | 最新值 |
 |---|---:|
-| total_trades | 96 |
-| return_pct | 82.17% |
-| win_rate_pct | 79.17% |
-| profit_factor | 6.09 |
-| candidate_entries | 390 |
-| orders_submitted | 209 |
-| orders_filled | 96 |
+| `total_trades` | `94` |
+| `return_pct` | `+44.37%` |
+| `win_rate_pct` | `87.23%` |
+| `profit_factor` | `7.20` |
+| `max_drawdown_pct` | `6.12%` |
+| `signals_generated` | `766` |
+| `candidate_entries` | `558` |
+| `orders_submitted` | `224` |
+| `orders_filled` | `94` |
+| `orders_canceled` | `130` |
+| `orders_filled / orders_submitted` | `41.96%` |
 
-### 2.2 塌缩态
+这轮结果已经满足:
 
-来源: `output/backtest/v2_summary_head_20260428_133557.json`
+- `total_trades` 维持在 `90-120`
+- `win_rate_pct >= 80%`
+- `profit_factor >= 4.0`
+- `max_drawdown_pct <= 10.0%`
 
-| 指标 | 数值 |
-|---|---:|
-| total_trades | 0 |
-| return_pct | 0.00% |
-| signals_generated | 0 |
-| candidate_entries | 0 |
-| orders_submitted | 0 |
-| orders_filled | 0 |
+仍未满足的仅剩两项:
 
-### 2.3 本轮修复后最终结果
+- `flip_bullish` 成交仅 `4` 笔，未达到 `>=10`
+- `orders_filled / orders_submitted = 41.96%`，仍低于 `55%`
 
-来源: `output/backtest/v2_summary_20260428_220648.json`
+## 2. 回测结果归因
 
-| 指标 | 数值 |
-|---|---:|
-| total_trades | 119 |
-| return_pct | 38.19% |
-| win_rate_pct | 81.51% |
-| profit_factor | 3.48 |
-| signals_generated | 756 |
-| candidate_entries | 495 |
-| orders_submitted | 285 |
-| orders_filled | 119 |
-| orders_canceled | 166 |
-| max_drawdown_pct | 10.20% |
+### 2.1 改善来自哪里
 
-## 3. 根因归因
+最新收益曲线改善，主要不是来自“更多交易”，而是来自“更干净的成交结构”:
 
-### 3.1 第一阶段根因: 前端信号塌缩
+| 信号族 | 笔数 | 胜率 | PnL |
+|---|---:|---:|---:|
+| `red_bar_growing` | `72` | `86.11%` | `+3187.85` |
+| `flip_bearish` | `18` | `100.00%` | `+1555.09` |
+| `flip_bullish` | `4` | `50.00%` | `-79.02` |
 
-塌缩态的真实问题不是成交率，也不是容量，而是前端根本没有生成可执行信号。
+关键事实:
 
-关键证据:
+- 本轮没有任何成交的 `green_bar_growing`，因此上一轮对 PF 和回撤的主要拖累项已从成交结构里基本退出。
+- 组合主收益来源已经转为 `red_bar_growing + flip_bearish`。
+- `flip_bullish` 没有恢复为主引擎，它当前仍是薄弱环节，且最新窗口内为负收益。
 
-- `signals_generated = 0`
-- `candidate_entries = 0`
-- `orders_submitted = 0`
-- `orders_filled = 0`
+### 2.2 漏斗已经恢复，但最后一公里仍然粗糙
 
-### 3.2 直接触发塌缩的三个技术原因
-
-1. `4H shrinking` 预翻转链路会把大量 bar 直接送进 `HOLD`
-   - `shrink_pct = 0` 时也会触发 `preflip` 检查
-   - `shrink_pct` 不足时也会直接 neutral，而不是回退到常规主方向解析
-
-2. 回测/运行时配置传播不完整
-   - `volume_vwap_both_low_*`
-   - shrinking-state disable flag
-   - `green_bar_growing_min_signal_score`
-   这些字段在回测构建链路里并非全部真实生效
-
-3. 评分阈值与仓位门槛组合成“数学不可成交”
-   - 信号分数上限大约在 `0.69`
-   - 原 profile 阈值在 `0.82~0.90`
-   - `calculate_portion_multiplier()` 在 `<0.75` 时直接返回 `0.0`
-   - 结果是即使恢复了 signal/candidate，也会被 `position_value_zero` 再次静默拦截
-
-### 3.3 修复后的剩余瓶颈
-
-当前已不再是前端完全锁死，但执行漏斗里仍有两个明显瓶颈:
-
-- `pending_cancel_reasons.ioc_no_fill = 166`
-- `capacity_full_precheck_candidates = 134`
-- `capacity_competition_dropped = 73`
-
-以及一个结构性弱项:
-
-- `green_bar_growing: 34 笔, 67.65% 胜率, 盈亏 +331.34`
-
-它仍然是当前 PF 被拉低的主要拖累项。
-
-## 4. 本轮实际修复项
-
-### 4.1 代码修复
-
-文件: `src/fund_flow/macd_strategy_v2.py`
-
-- 修复 `4H preflip` 零缩短误触发
-  - `shrink_pct == 0` / `shrink_bars == 0` 时回退到常规主方向解析
-- 修复 `4H preflip` 非充分缩短时的硬阻断
-  - 不再把“缩短不足”直接当作最终 neutral
-  - 只在满足真实 trial 条件时激活 preflip
-- 下调仓位乘数地板
-  - `score >= 0.80 -> 1.0`
-  - `score >= 0.65 -> 0.8`
-  - `score >= 0.55 -> 0.6`
-  - `< 0.55 -> 0.0`
-
-文件: `scripts/backtest_macd_v2.py`
-
-- 补全 `green_bar_growing_min_signal_score` 的回测配置传播
-- 补全前期 hotfix 字段传播:
-  - `volume_vwap_both_low_min_score_vol`
-  - `volume_vwap_both_low_min_vwap_score`
-  - shrinking-state disable flag
-  - `flip_bullish_cooling_hard_rsi_buffer`
-
-文件: `src/fund_flow/decision_engine.py`
-
-- 保持与回测构建链路同口径的配置传播
-- 确保 live/backtest 元数据字段一致
-
-### 4.2 回测 profile 热修口径
-
-文件: `config/trading_config_fund_flow.json`
-
-本轮运行使用默认 backtest profile:
-
-- `fund_flow.backtest.default_profile = macd_v2_disable_short_filter`
-
-该 profile 的关键覆盖项:
-
-- 仓位上限
-  - `default_target_portion = 0.35`
-  - `max_symbol_position_portion = 0.35`
-- 阈值
-  - `default / min_signal_score = 0.68`
-  - `red_bar_growing = 0.68`
-  - `green_bar_growing = 0.69`
-  - `flip_bearish = 0.66`
-  - `flip_bullish = 0.64`
-  - `soft_long_min_signal_score = 0.66`
-  - `stable_bear_continuation_min_signal_score = 0.68`
-  - `stable_bull_continuation_min_signal_score = 0.68`
-  - `preflip_trial_min_signal_score = 0.66`
-  - `trial_short_below_structure_promotion_min_signal_score = 0.68`
-- VWAP/缩短态放行
-  - `min_vwap_score_for_entry = 0.0`
-  - `flip_bullish_min_vwap_score = 0.0`
-  - `preflip_trial_min_vwap_score = 0.0`
-  - `trial_short_below_structure_promotion_min_vwap_score = 0.0`
-  - `stable_bear_continuation_min_vwap_score = 0.0`
-  - `stable_bull_continuation_min_vwap_score = 0.0`
-  - `flip_bearish_retest_reject_min_vwap_score = 0.0`
-  - `volume_vwap_both_low_min_score_vol = 0.0`
-  - `volume_vwap_both_low_min_vwap_score = 0.0`
-  - `disable_green_bar_shrinking_short_dual_pressure_entries = false`
-  - `disable_red_bar_shrinking_long_dual_support_entries = false`
-- `flip_bullish_cooling`
-  - `reject_if_1h_rsi_above = 75`
-  - `reject_if_15m_no_spring_and_rsi_high = false`
-
-## 5. 当前真实门槛与打分
-
-### 5.1 基础权重
-
-当前 live/base 策略权重:
-
-| 项 | 权重 |
-|---|---:|
-| `weight_4h_direction` | 0.40 |
-| `weight_1h_direction` | 0.15 |
-| `weight_4h_enhancement` | 0.10 |
-| `weight_rsi_rhythm` | 0.30 |
-| `weight_vwap` | 0.05 |
-| `weight_15m_entry` | 0.00 |
-| `weight_volume` | 0.10 |
-
-核心事实:
-
-- `VWAP` 权重只有 `0.05`
-- `15m` 已不再有独立权重层
-- `RSI rhythm` 是主要节奏层
-
-### 5.2 分数聚合
-
-总分在 `macd_strategy_v2.py::analyze()` 内按下列主干聚合:
+最新执行漏斗为:
 
 ```text
-score
-= score_4h
+signals_generated = 766
+-> candidate_entries = 558
+-> orders_submitted = 224
+-> orders_filled = 94
+```
+
+这说明:
+
+- 前端信号生成链路已经恢复，`analyze()` 不再静默。
+- 候选生成能力充足，当前不再是“信号枯竭”问题。
+- 当前瓶颈主要转移到:
+  - `capacity_competition_dropped = 71`
+  - `pending_cancel_reasons.ioc_no_fill = 130`
+
+换言之，当前系统已经从“前端塌缩”阶段，进入“候选足够但成交转化仍不高”的阶段。
+
+### 2.3 `flip_bullish` 的真实阻塞层
+
+新增归因字段已经把 `flip_bullish` 的问题定位得很清楚:
+
+| 归因字段 | 数值 |
+|---|---:|
+| `flip_bullish_seen` | `2652` |
+| `flip_bullish_passed_threshold` | `6` |
+| `flip_bullish_blocked_by_sniper` | `396` |
+| `flip_bullish_blocked_by_cooling` | `0` |
+| `flip_bullish_blocked_by_capacity` | `1` |
+| `flip_bullish_ioc_canceled` | `1` |
+| 实际成交 | `4` |
+
+解读:
+
+- `flip_bullish_seen -> passed_threshold` 的通过率只有 `0.23%`。
+- `cooling` 不是当前主阻塞点，最新窗口里它没有挡掉任何一笔。
+- `capacity` 和 `IOC` 也不是主阻塞点，分别只损失了 `1` 笔。
+- 当前 `flip_bullish` 的真正问题在更上游:
+  - 大量样本无法跨过总分阈值
+  - 其中 `sniper` 仍挡掉了 `396` 次
+
+因此，下一轮若继续追 `flip_bullish >= 10`，优先级应该是:
+
+1. 审计 `sniper` 的 3 轴过滤和总分注入是否过于苛刻。
+2. 审计 `flip_bullish` 在 RSI rhythm / spring bonus / sovereign path 中是否拿到足够分数。
+3. 不是先去放宽 `cooling`，因为当前数据已经证明它并非主阻塞。
+
+### 2.4 IOC 市价补单安全网本轮没有产生实际贡献
+
+本轮已经把“标准 IOC -> 真市价补单”路径接入代码和回测近似，但最新 summary 显示:
+
+| 字段 | 数值 |
+|---|---:|
+| `market_fallback_attempted` | `0` |
+| `market_fallback_filled` | `0` |
+| `market_fallback_slippage_blocked` | `0` |
+| `market_fallback_disabled_by_policy` | `0` |
+
+这说明:
+
+- 代码路径已经接通。
+- 但在 `2026-02-23` 到 `2026-03-24` 这一个窗口里，它没有实际参与成交。
+- 当前 `94` 笔成绩不是 IOC safety net 带来的，而主要是信号漏斗恢复、阈值 profile 放松和成交结构优化带来的。
+
+因此，不能把本轮结果误归因为“market fallback 已经显著提升了 fill ratio”。事实不是这样。
+
+## 3. 当前实盘开仓链路
+
+这里写的是当前代码真实链路，不是理想化设计。
+
+### 3.1 策略信号生成
+
+入口在 `src/fund_flow/macd_strategy_v2.py` 的 `analyze()` 主链。当前总分主干是:
+
+```text
+final_score
+= score_4h_trend
 + score_1h
 + score_4h_enhancement
 + score_rsi_rhythm_weighted
 + score_vwap
 + score_volume
-+ spring_override / sovereign bonus
++ spring_override_score_bonus
++ rsi_launch_sovereign_score_bonus
++ other path-specific adjustments
 ```
 
-### 5.3 当前回测 profile 有效阈值
+核心层次:
 
-本轮真实有效阈值不是 base config，而是 backtest profile 覆盖后的值:
+1. `4H` 决定主方向与强弱。
+2. `1H` 提供方向确认或健康度补分。
+3. `RSI rhythm` 负责节奏、spring、neutral upgrade、conflict 处理。
+4. `VWAP` 只保留轻权重与 `3%` 硬偏离否决。
+5. `volume` 作为确认项而非主导项。
 
-| 信号族/路径 | 阈值 |
+### 3.2 过滤与升级顺序
+
+当前重要路径如下:
+
+1. 先做 `VWAP hard block`、方向识别、RSI 节奏评分。
+2. `flip_bullish` 仍保留:
+   - `sniper`
+   - `cooling`
+   - 但 `strict_filter = false`
+   - `cvd_context_filter = false`
+3. `neutral_upgrade` 仍然开启:
+   - `rsi >= 0.35` 可 full upgrade
+   - `0.20 <= rsi < 0.35` 可 probe upgrade
+4. `spring_override` 仍然开启:
+   - 满足 spring 条件时给 bonus，并可降低局部阈值
+5. `rsi_launch_sovereign_mode` 仍然开启:
+   - 触发后可注入 bonus、改写阈值并强制 priority execution
+
+### 3.3 决策引擎元数据
+
+`src/fund_flow/decision_engine.py` 会把策略层细节统一写入 live/backtest 元数据，当前关键字段包括:
+
+- `competition_score`
+- `priority_execution_applied`
+- `priority_execution_tier`
+- `entry_market_fallback_enabled`
+- `entry_market_fallback_timeout_ms`
+- `entry_market_fallback_max_slippage_bps`
+- `entry_execution_policy`
+- `rsi_launch_sovereign_active`
+
+这一步的意义是:
+
+- 实盘和回测共享同一套执行路由语义。
+- 后续归因时可以明确区分普通 IOC、priority execution、VIP、sovereign。
+
+### 3.4 执行路由
+
+`src/fund_flow/execution_router.py` 当前开仓路径分为三类:
+
+1. 普通路径: `IOC`
+2. 高分优先路径: `GTC + elastic_limit`
+3. 主权/最高优先路径: `priority_execution_vip`
+
+标准 IOC 的新增安全网规则是:
+
+- 只有 `entry_execution_policy == "ioc_market_fallback"` 时才走这条路。
+- 还必须同时满足:
+  - 全局 `fund_flow.execution_degradation.open_market_fallback_enabled = true`
+  - 本次 signal metadata 的 `entry_market_fallback_enabled = true`
+  - 且 `disable_market_fallback != true`
+- live 侧会先尝试 IOC，再在滑点保护范围内决定是否允许 `MARKET` 补单。
+
+当前优先路径保持不变:
+
+- `priority_exec_min_score = 0.90`
+- `priority_exec_vip_min_score = 0.92`
+- `VIP` 继续使用 `30s + retry`
+- 本轮没有把 IOC 真市价补单混入 VIP / sovereign 路径
+
+## 4. 当前真实权重与门槛
+
+### 4.1 Base 默认权重
+
+当前 base 默认权重是:
+
+| 项 | 权重 |
 |---|---:|
-| default | 0.68 |
-| red_bar_growing | 0.68 |
-| green_bar_growing | 0.69 |
-| flip_bearish | 0.66 |
-| flip_bullish | 0.64 |
-| soft_long override | 0.66 |
-| preflip trial | 0.66 |
-| short-below-structure promotion | 0.68 |
-| stable continuation | 0.68 |
+| `weight_4h_direction` | `0.40` |
+| `weight_1h_direction` | `0.15` |
+| `weight_4h_enhancement` | `0.10` |
+| `weight_rsi_rhythm` | `0.30` |
+| `weight_vwap` | `0.05` |
+| `weight_15m_entry` | `0.00` |
+| `weight_volume` | `0.10` |
 
-### 5.4 当前分数上限与策略含义
+结论很明确:
 
-这轮排查里最关键的发现之一:
+- `RSI rhythm` 已是主节奏层。
+- `VWAP` 已被永久降级为轻权重。
+- `15m` 不再有独立权重层，而是通过 RSI rhythm / spring / refine 并入。
 
-- 当前信号实际得分天花板大约在 `0.69`
-- 因此原来的 `0.82~0.90` 阈值会把系统推入“数学上不可能成交”的状态
+### 4.2 Base 默认阈值
 
-也就是说，本轮并不是“简单放量”，而是先把阈值修回到与当前真实打分尺度匹配的区间。
+当前 base 默认阈值:
 
-## 6. 当前实盘开仓链路
+| 路径 | 阈值 |
+|---|---:|
+| `default` | `0.85` |
+| `red_bar_growing` | `0.90` |
+| `green_bar_growing` | `0.87` |
+| `flip_bearish` | `0.84` |
+| `flip_bullish` | `0.82` |
+| `soft_long` | `0.85` |
+| `stable_bear_continuation` | `0.85` |
+| `stable_bull_continuation` | `0.85` |
 
-### 6.1 Bot 主循环
+### 4.3 本次回测实际生效的 profile 阈值
 
-文件: `src/app/fund_flow_bot.py`
+本轮不是直接用 base 跑的，而是使用 backtest 默认 profile `macd_v2_disable_short_filter`。该 profile 实际覆盖为:
 
-主链路:
+| 路径 | 生效阈值 |
+|---|---:|
+| `default` | `0.68` |
+| `soft_long` | `0.66` |
+| `red_bar_growing` | `0.68` |
+| `green_bar_growing` | `0.69` |
+| `flip_bearish` | `0.66` |
+| `flip_bullish` | `0.64` |
+| `preflip_trial` | `0.66` |
+| `trial_short_below_structure_promotion` | `0.68` |
+| `stable_bear_continuation` | `0.68` |
+| `stable_bull_continuation` | `0.68` |
 
-1. `_run_cycle_impl(...)`
-2. `_prepare_cycle_context(...)`
-3. 逐 symbol 组装行情/持仓/风控上下文
-4. 调用 `FundFlowDecisionEngine.decide(...)`
-5. 通过 bot 侧方向/频控/持仓 gate
-6. `_execute_and_log_decision(...)`
-7. 执行器下单
-8. 保护单 / 保本 / 减仓 / 平仓
+同一个 profile 还放宽了:
 
-### 6.2 决策引擎
+- `min_vwap_score_for_entry = 0.0`
+- `flip_bullish_min_vwap_score = 0.0`
+- `stable_*_min_vwap_score = 0.0`
+- `flip_bearish_retest_reject_min_vwap_score = 0.0`
+- `volume_vwap_both_low_min_score_vol = 0.0`
+- `volume_vwap_both_low_min_vwap_score = 0.0`
+- `flip_bullish_cooling.reject_if_1h_rsi_above = 75`
+- `flip_bullish_cooling.reject_if_15m_no_spring_and_rsi_high = false`
 
-文件: `src/fund_flow/decision_engine.py`
+所以，任何对这轮回测的审阅，都必须建立在“profile 已放松”这一前提上。
 
-核心入口:
+### 4.4 `flip_bullish` 当前过滤链状态
 
-- `_decide_macd_v2_strategy(...)`
+当前 base 与 active profile 都已经关闭:
 
-主过程:
+- `enable_flip_bullish_strict_filter = false`
+- `enable_flip_bullish_cvd_context_filter = false`
 
-1. 取 `15m/1h/4h` 数据
-2. 过 `TimeWindowFilter`
-3. 构造 MACD / BOLL / VWAP / RSI / volume / CVD 输入
-4. 调用 `macd_v2_engine.analyze(...)`
-5. 把策略信号映射为 `BUY / SELL / HOLD / CLOSE`
-6. 注入 execution metadata
-7. 经过 regime gating 和方向锁
+当前仍保留:
 
-### 6.3 策略 analyze 主顺序
+- `enable_flip_bullish_sniper = true`
+- `momentum_reset_max_bars_ago = 12`
+- `spring_confirmation_bonus = 0.08`
+- `no_momentum_reset_penalty = 0.06`
+- `no_spring_penalty = 0.05`
+- `require_trend_alignment = true`
+- `cooling.reject_if_1h_rsi_above = 75` for active backtest profile
+- `cooling.reject_if_15m_no_spring_and_rsi_high = false` for active backtest profile
 
-文件: `src/fund_flow/macd_strategy_v2.py`
+这解释了为什么当前 `flip_bullish` 的主阻塞点仍然是“过不了上游评分和 sniper”，而不是 strict/cooling。
 
-真实顺序:
+## 5. 仓位管理与杠杆
 
-1. 计算 `1H MACD` 方向
-2. 计算 `4H MACD` 方向
-3. 构造 `4H shrinking / stable trend` 上下文
-4. 决定 `trade_direction`
-   - 正常 `4H primary`
-   - `preflip trial`
-   - `stable continuation`
-   - `neutral_upgrade`
-5. BOLL 结构检查
-6. VWAP 打分与 `3% hard block`
-7. 15m/RSI 节奏检查
-8. `flip_bullish` sniper/cooling/strict
-9. RSI-MACD conflict / sovereign / spring override
-10. 总分聚合
-11. 阈值检查
-12. 杠杆、仓位、止损、执行 metadata
+### 5.1 本轮回测实际仓位框架
 
-## 7. 当前仓位与执行逻辑
+profile 覆盖后的回测仓位上限为:
 
-### 7.1 当前回测运行时仓位口径
+| 项 | 值 |
+|---|---:|
+| `default_target_portion` | `0.35` |
+| `max_symbol_position_portion` | `0.35` |
+| `max_active_symbols` | `3` |
+| `reserve_pct` | `0.20` |
+| `min_open_portion` | `0.06` |
 
-来源: `runtime_limits`
+含义:
+
+- 单笔目标保证金基线是账户可部署资金的 `35%`。
+- 每个 symbol 上限也是 `35%`。
+- 账户最多同时持有 `3` 个 active symbols。
+- 有 `20%` 资金保留，不参与新开仓。
+- 任何最终仓位比例低于 `6%`，回测直接拒单。
+
+### 5.2 评分到仓位乘数
+
+当前 `calculate_portion_multiplier()` 逻辑是:
+
+| score 区间 | 仓位乘数 |
+|---|---:|
+| `>= 0.90` | `1.20` |
+| `>= 0.80` | `1.00` |
+| `>= 0.65` | `0.80` |
+| `>= 0.55` | `0.60` |
+| `< 0.55` | `0.00` |
+
+结合本轮 profile 的 `default_target_portion = 0.35`，未加其他修正前的大致基线是:
+
+| score 区间 | 基础目标仓位 |
+|---|---:|
+| `>= 0.90` | `42%` |
+| `>= 0.80` | `35%` |
+| `>= 0.65` | `28%` |
+| `>= 0.55` | `21%` |
+
+之后还会继续乘以下列修正:
+
+- `vwap_score_position_multiplier`
+- `entry_scale` for trial entry
+- `rsi_exposure_mult`
+- `probe overlay`
+- `session risk scale`
+- `watchlist throttle`
+
+### 5.3 杠杆逻辑
+
+当前 `calculate_leverage()` 真实逻辑是:
+
+| score 区间 | 基础杠杆 |
+|---|---:|
+| `>= 0.90` | `4x` |
+| `>= 0.85` | `3x` |
+| `>= 0.75` | `2x` |
+| `< 0.75` | `0` |
+
+随后再叠加:
+
+- `ema_multiplier >= 1.2` 时，强趋势降杠杆
+- `rsi_conflict` 会降一档
+- `preflip_trial_max_leverage = 2`
+- `green_bar_growing_probe_max_leverage = 2`
+- `red_bar_growing_probe_max_leverage = 2`
+- 全局回测再 clamp 到 `min=2 / default=3 / max=4`
+
+### 5.4 `green_bar_growing` 微探针化
+
+本轮没有新增新的抽象层，而是复用现有 overlay:
 
 | 项 | 当前值 |
 |---|---:|
-| `max_positions` | 3 |
-| `default_target_portion` | 0.35 |
-| `max_symbol_position_portion` | 0.35 |
-| `min_open_portion` | 0.06 |
-| `reserve_pct` | 0.20 |
-| `min_leverage` | 2 |
-| `default_leverage` | 3 |
-| `max_leverage` | 4 |
+| `enable_green_bar_growing_probe_overlay` | `true` |
+| `green_bar_growing_probe_position_penalty` | `0.10` |
+| `green_bar_growing_probe_max_leverage` | `2` |
 
-### 7.2 仓位乘数
+真实效果:
 
-当前 `calculate_portion_multiplier(score)`:
+- 若出现 `green_bar_growing`，最终仓位会被压到当前路径原始仓位的 `10%`
+- 杠杆上限被压到 `2x`
 
-| 分数段 | 仓位乘数 |
+但必须强调:
+
+- 在最新 `v2_summary_20260429_005509.json` 中，`green_bar_growing` 没有任何成交单
+- 所以本轮 PF 改善不能简单归因成“green probe 生效后减少了亏损”
+- 更准确的说法是: 当前成交结构已经不再被 `green_bar_growing` 主导
+
+## 6. 当前风控链
+
+### 6.1 不变的核心硬风控
+
+这些红线本轮没有被放松:
+
+- `VWAP 3%` 硬偏离否决
+- `max_active_symbols = 3`
+- 止损 / 保本 / shrink exit 链
+- 连续亏损冷却
+- 账户级 circuit breaker
+
+### 6.2 VWAP 风控
+
+当前 `VWAP` 仍承担两个职责:
+
+1. 轻权重评分: `weight_vwap = 0.05`
+2. 结构性硬否决:
+   - `optimal = 0.5%`
+   - `warning = 1.5%`
+   - `hard_block = 3.0%`
+
+也就是说:
+
+- `VWAP` 不再主导总分
+- 但价格离价值区太远时仍会被直接 veto
+
+### 6.3 止损与保本
+
+当前回测执行层风险参数是:
+
+| 项 | 当前值 |
 |---|---:|
-| `>= 0.90` | 1.2 |
-| `>= 0.80` | 1.0 |
-| `>= 0.65` | 0.8 |
-| `>= 0.55` | 0.6 |
-| `< 0.55` | 0.0 |
+| `stop_loss_pct` floor | `0.5%` |
+| `take_profit_pct` | `0.0` |
+| `breakeven_enabled` | `true` |
+| `breakeven_trigger_pnl_ratio` | `0.8%` |
+| `breakeven_lock_ratio` | `0.2%` |
+| `max_stop_loss_pct` | `2.5%` |
 
-这是本轮最关键的执行修复之一。没有这条修复，即使候选恢复，仍会因为 `position_value_zero` 无法下单。
+注意这里有两层:
 
-### 7.3 执行路由
+- 回测开仓层有一个全局 `stop_loss_pct` floor，当前来自 `fund_flow.stop_loss_pct = 0.005`
+- MACD V2 内部还有动态止损结构，`max_stop_loss_pct = 0.025`
 
-当前回测与 live 使用同一条执行 metadata 语义:
+实际开仓时:
 
-- 普通信号:
-  - `IOC`
-  - `limit`
-- priority signal:
-  - 仍走 priority metadata
-  - 当前这轮大部分成交并未走 VIP 分支
-- 本轮执行漏斗:
-  - `orders_submitted = 285`
-  - `orders_filled = 119`
-  - `orders_canceled = 166`
-  - `ioc_no_fill = 166`
-  - `wsr = 0.335`
+1. 优先使用策略给出的 `suggested_stop_price`
+2. 否则用 `ATR / 结构 + stop_loss_pct floor`
+3. 最终不会放大到超过 `2.5%` 的最大容忍止损
 
-说明当前吞吐恢复后，第二大问题已经转移成:
+### 6.4 趋势收缩退出
 
-- `IOC` 取消仍然偏高
+当前仍启用:
 
-## 8. 当前风控链
+- `enable_priority_signal_shrink_exit = true`
+- `priority_signal_shrink_exit_required_bars = 3`
+- `priority_signal_shrink_exit_required_pct = 0.40`
+- `enable_stable_continuation_slow_4h_shrink_exit = true`
+- `stable_continuation_exit_4h_shrink_bars = 3`
+- `stable_continuation_exit_4h_min_shrink_pct = 0.35`
 
-本轮没有改动以下核心风控:
+这类规则的作用不是抢利润，而是防止高优先级和 continuation 类信号在 4H 动量明显衰减时继续持有。
 
-- `VWAP 3% hard block`
-- `stop_loss_pct = 0.50%`
-- `breakeven_enabled = true`
-- `breakeven_trigger_pnl_ratio = 0.80%`
-- `breakeven_lock_ratio = 0.20%`
-- `max_positions = 3`
-- `reserve_pct = 20%`
-- 账户冷却/连续亏损控制
+### 6.5 连亏冷却与账户级保护
 
-当前风险结果:
+当前配置仍保留:
 
-- `max_drawdown_value = 1335.96`
-- `max_drawdown_pct = 10.20%`
-- 回撤区间:
-  - `2026-02-28 17:30:00 -> 2026-03-04 00:30:00`
+| 项 | 当前值 |
+|---|---:|
+| `max_consecutive_losses` | `2` |
+| `consecutive_loss_cooldown_seconds` | `1800` |
+| `account_circuit_enabled` | `true` |
 
-## 9. 本轮结果怎么理解
+回测 summary 也记录了:
 
-### 9.1 已经解决的问题
+- `execute_reject_reasons.entry_cooldown = 3`
 
-- 不再是 `0` 交易塌缩
-- `candidate -> submitted -> filled` 漏斗恢复
-- 交易数恢复到目标区间: `119`
-- 胜率恢复到目标区间: `81.5%`
-- 收益率恢复到目标区间: `38.19%`
+这表明冷却链是实际触发过的，不是死配置。
 
-### 9.2 仍然没有解决的问题
+## 7. 新增归因字段定义
 
-- `flip_bullish` 本轮仍然没有恢复成主要盈利引擎
-- `green_bar_growing` 仍然是当前最弱信号家族
-- `profit_factor = 3.48`，未回到 `4+`
-- `max_drawdown_pct = 10.20%`，略高于 `10%`
-- `IOC` 取消率依旧高
+### 7.1 `flip_bullish_*`
 
-### 9.3 对 Claude / DeepSeek 最有价值的问题
+- `flip_bullish_seen`
+  - 被识别为 `flip_bullish` 场景的总样本数
+- `flip_bullish_passed_threshold`
+  - 成功跨过阈值并进入候选竞争的次数
+- `flip_bullish_blocked_by_sniper`
+  - 被 sniper 质检链直接否决的次数
+- `flip_bullish_blocked_by_cooling`
+  - 被 cooling 直接否决的次数
+- `flip_bullish_blocked_by_capacity`
+  - 已进入候选后，被容量竞争淘汰的次数
+- `flip_bullish_ioc_canceled`
+  - 已下单但最终 IOC 未成交取消的次数
 
-建议重点评审这三件事:
+### 7.2 `market_fallback_*`
 
-1. `green_bar_growing` 是否还应继续存在于当前强度下
-   - 它提供了吞吐，但显著拖累 PF
-2. `flip_bullish` 为什么在吞吐恢复后仍然缺席
-   - 当前结构恢复的是“总吞吐”，不是“多头核心 Alpha”
-3. `IOC no fill` 是否应该针对高分单改为更积极的成交路径
-   - 当前 `orders_submitted -> orders_filled = 119 / 285`
-   - 执行层仍有明显优化空间
+- `market_fallback_attempted`
+  - 标准 IOC 路径触发市价补单尝试的次数
+- `market_fallback_filled`
+  - 市价补单成功成交的次数
+- `market_fallback_slippage_blocked`
+  - 因超出允许滑点而被阻止的次数
+- `market_fallback_disabled_by_policy`
+  - 因 metadata 或全局门控未满足而被禁用的次数
 
-## 10. 一句话总结
+## 8. 当前状态判断
 
-**这轮修复已经完成了“从 0 笔回测塌缩恢复到 119 笔可交易状态”的核心任务，当前 HEAD 的真实状态是：吞吐恢复、胜率合格、收益合格，但 PF 仍偏低、回撤略高、`flip_bullish` 仍未回归主引擎。后续优化应从削弱 `green_bar_growing` 噪音、恢复 `flip_bullish` 产能、以及降低 `IOC no fill` 三个方向继续推进。**
+这轮代码已经把系统推进到一个更健康的位置:
+
+- 不是 `0` 笔塌缩
+- 也不是 `119` 笔但 `PF` 偏低、`DD` 偏高的粗放状态
+- 而是 `94` 笔、`+44.37%`、`87.23%` 胜率、`PF 7.20`、`DD 6.12%` 的高质量状态
+
+但当前还不能说“多头主引擎已修复”。
+
+最新数据给出的精确结论是:
+
+1. 漏斗已恢复，当前不缺候选。
+2. `green_bar_growing` 已不再拖累成交结构。
+3. `flip_bullish` 仍未恢复，它的主问题在阈值前和 sniper，而不是 cooling。
+4. IOC 市价补单代码已接通，但本窗口里尚未产生实际成交贡献。
+
+如果下一轮继续优化，最值得做的不是再动 `VWAP` 或 `cooling`，而是专项审计:
+
+- `flip_bullish` 的上游得分注入
+- `sniper` 的命中密度与误杀率
+- 普通 IOC 未成交样本为什么没有进入 `market_fallback_attempted`
+
+这是当前代码和本轮工件共同给出的真实结论。

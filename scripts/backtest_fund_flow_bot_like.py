@@ -572,7 +572,11 @@ class BotLikeReplayEngine(BacktestEngine):
     def pick_open_candidates(open_candidates: List[Dict[str, Any]], active_count: int) -> List[Dict[str, Any]]:
         selected: List[Dict[str, Any]] = []
         current_active = int(active_count)
-        for item in sorted(open_candidates, key=lambda x: float(x.get("score", 0.0)), reverse=True):
+        for item in sorted(
+            open_candidates,
+            key=lambda x: float(x.get("competition_score", x.get("score", 0.0))),
+            reverse=True,
+        ):
             cap = max(1, int(item.get("max_active_symbols", 1) or 1))
             if current_active >= cap:
                 continue

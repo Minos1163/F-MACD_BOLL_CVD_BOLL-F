@@ -5,6 +5,7 @@ from collections import deque
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Deque, Dict, Optional, Sequence, Tuple
+import pandas as pd
 
 from src.config.config_loader import ConfigLoader
 from src.fund_flow.models import ExecutionMode, FundFlowDecision, Operation, TimeInForce
@@ -664,6 +665,12 @@ class FundFlowDecisionEngine:
                     int(self._to_float(filter_cfg.get("priority_exec_vip_expire_seconds"), 30)),
                 ),
                 priority_exec_vip_allow_retry=bool(filter_cfg.get("priority_exec_vip_allow_retry", True)),
+                competition_ranking_enabled=bool(
+                    (ff.get("competition_ranking", {}) or {}).get("enabled", False)
+                ),
+                competition_cluster_bonus_map=dict(
+                    ((ff.get("competition_ranking", {}) or {}).get("cluster_bonus_map", {}) or {"flip_bullish": 0.12})
+                ),
                 enable_vwap_flip_exemption=bool(filter_cfg.get("enable_vwap_flip_exemption", True)),
                 enable_neutral_upgrade=bool(filter_cfg.get("enable_neutral_upgrade", True)),
                 neutral_upgrade_min_rsi_score=self._to_float(filter_cfg.get("neutral_upgrade_min_rsi_score"), 0.35),
@@ -924,6 +931,41 @@ class FundFlowDecisionEngine:
                 priority_signal_shrink_exit_required_pct=self._to_float(
                     exit_mgmt_cfg.get("priority_signal_shrink_exit_required_pct"),
                     0.40,
+                ),
+                enable_macd_1h_flip_exit=bool((exit_mgmt_cfg.get("macd_1h_flip_exit", {}) or {}).get("enabled", False)),
+                macd_1h_flip_exit_confirm_bars=max(
+                    1,
+                    int(self._to_float(((exit_mgmt_cfg.get("macd_1h_flip_exit", {}) or {}).get("confirm_bars")), 2)),
+                ),
+                macd_1h_flip_exit_min_magnitude=self._to_float(
+                    ((exit_mgmt_cfg.get("macd_1h_flip_exit", {}) or {}).get("flip_min_magnitude")),
+                    0.0003,
+                ),
+                macd_1h_flip_exit_min_profit_to_exit=self._to_float(
+                    ((exit_mgmt_cfg.get("macd_1h_flip_exit", {}) or {}).get("min_profit_to_early_exit")),
+                    0.006,
+                ),
+                enable_rsi_overheat_exit=bool((exit_mgmt_cfg.get("rsi_overheat_exit", {}) or {}).get("enabled", False)),
+                rsi_overheat_exit_threshold=self._to_float(
+                    ((exit_mgmt_cfg.get("rsi_overheat_exit", {}) or {}).get("rsi_1h_overheat")),
+                    78.0,
+                ),
+                rsi_overheat_exit_min_mfe=self._to_float(
+                    ((exit_mgmt_cfg.get("rsi_overheat_exit", {}) or {}).get("min_mfe_to_trigger")),
+                    0.012,
+                ),
+                rsi_overheat_exit_partial_ratio=self._to_float(
+                    ((exit_mgmt_cfg.get("rsi_overheat_exit", {}) or {}).get("partial_exit_ratio")),
+                    0.50,
+                ),
+                enable_holding_time_exit=bool((exit_mgmt_cfg.get("holding_time_exit", {}) or {}).get("enabled", False)),
+                holding_time_exit_max_hours=self._to_float(
+                    ((exit_mgmt_cfg.get("holding_time_exit", {}) or {}).get("max_holding_hours")),
+                    96.0,
+                ),
+                holding_time_exit_min_pnl_to_hold=self._to_float(
+                    ((exit_mgmt_cfg.get("holding_time_exit", {}) or {}).get("min_pnl_to_hold")),
+                    0.005,
                 ),
                 exit_4h_require_profit=bool(stop_cfg.get("exit_4h_require_profit", True)),
                 exit_4h_weak_loss_threshold=self._to_float(stop_cfg.get("exit_4h_weak_loss_threshold"), -1.0),
@@ -1378,6 +1420,14 @@ class FundFlowDecisionEngine:
             "entry_price_mode": str(details.get("entry_price_mode", "") or ""),
             "entry_retry_enabled": bool(details.get("entry_retry_enabled", False)),
             "entry_retry_max_attempts": int(details.get("entry_retry_max_attempts", 0) or 0),
+            "entry_market_fallback_enabled": bool(details.get("entry_market_fallback_enabled", False)),
+            "entry_market_fallback_timeout_ms": int(details.get("entry_market_fallback_timeout_ms", 0) or 0),
+            "entry_market_fallback_max_slippage_bps": int(
+                details.get("entry_market_fallback_max_slippage_bps", 0) or 0
+            ),
+            "entry_execution_policy": str(details.get("entry_execution_policy", "") or ""),
+            "disable_market_fallback": bool(details.get("disable_market_fallback", False)),
+            "entry_reference_price": self._to_optional_float(details.get("entry_reference_price")),
             "rsi_launch_sovereign_active": bool(details.get("rsi_launch_sovereign_active", False)),
             "rsi_launch_sovereign_side": str(details.get("rsi_launch_sovereign_side", "") or ""),
             "rsi_launch_sovereign_bonus_score": float(details.get("rsi_launch_sovereign_bonus_score", 0.0) or 0.0),
@@ -1775,7 +1825,6 @@ class FundFlowDecisionEngine:
         return (
             exposure_mult <= probe_threshold
             or red_bar_overlay
-            or green_bar_overlay
             or bool((signal.details or {}).get("rsi_probe_mode", False))
         )
 
@@ -1788,9 +1837,13 @@ class FundFlowDecisionEngine:
                 "priority_execution_tier": "none",
                 "entry_time_in_force": "IOC",
                 "entry_expire_seconds": 0,
-                "entry_price_mode": "ioc",
+                "entry_price_mode": "ioc_limit",
                 "entry_retry_enabled": False,
                 "entry_retry_max_attempts": 0,
+                "entry_market_fallback_enabled": False,
+                "entry_market_fallback_timeout_ms": 0,
+                "entry_market_fallback_max_slippage_bps": 0,
+                "entry_execution_policy": "ioc",
             }
         priority_execution_applied = bool(
             getattr(engine_config, "enable_priority_execution", False)
@@ -1801,10 +1854,18 @@ class FundFlowDecisionEngine:
             and float(signal.signal_score) >= float(getattr(engine_config, "priority_exec_vip_min_score", 0.92))
         )
         retry_enabled = bool(vip_applied and getattr(engine_config, "priority_exec_vip_allow_retry", True))
+        standard_market_fallback = bool(
+            not priority_execution_applied
+            and float(signal.signal_score) >= float(getattr(engine_config, "entry_market_fallback_min_score", 0.68))
+        )
         return {
             "execution_route": "priority_execution_vip"
             if vip_applied
-            else ("priority_execution" if priority_execution_applied else "ioc"),
+            else (
+                "priority_execution"
+                if priority_execution_applied
+                else ("ioc_market_fallback" if standard_market_fallback else "ioc")
+            ),
             "priority_execution_applied": priority_execution_applied,
             "priority_execution_tier": "vip" if vip_applied else ("standard" if priority_execution_applied else "none"),
             "entry_time_in_force": "GTC" if priority_execution_applied else "IOC",
@@ -1813,9 +1874,29 @@ class FundFlowDecisionEngine:
                 if vip_applied
                 else (getattr(engine_config, "priority_exec_expire_seconds", 0) if priority_execution_applied else 0)
             ),
-            "entry_price_mode": "elastic_limit" if priority_execution_applied else "ioc",
+            "entry_price_mode": "elastic_limit" if priority_execution_applied else "ioc_limit",
             "entry_retry_enabled": retry_enabled,
             "entry_retry_max_attempts": 1 if retry_enabled else 0,
+            "entry_market_fallback_enabled": standard_market_fallback,
+            "entry_market_fallback_timeout_ms": int(
+                getattr(engine_config, "entry_market_fallback_timeout_ms", 2000)
+                if standard_market_fallback
+                else 0
+            ),
+            "entry_market_fallback_max_slippage_bps": int(
+                getattr(engine_config, "entry_market_fallback_max_slippage_bps", 5)
+                if standard_market_fallback
+                else 0
+            ),
+            "entry_execution_policy": (
+                "priority_execution_vip"
+                if vip_applied
+                else (
+                    "priority_execution"
+                    if priority_execution_applied
+                    else ("ioc_market_fallback" if standard_market_fallback else "ioc")
+                )
+            ),
         }
 
     def _resolve_macd_v2_competition_score(self, signal: MACDSignalV2, macd_v2_engine: Any) -> float:
@@ -3584,6 +3665,16 @@ class FundFlowDecisionEngine:
             return (entry_price - current_price) / entry_price
         return 0.0
 
+    def _rule_position_hold_seconds(self, current_pos: Optional[Dict[str, Any]], current_time: Any) -> float:
+        entry_time = (current_pos or {}).get("entry_time")
+        if entry_time is None or current_time is None:
+            return 0.0
+        try:
+            delta = pd.Timestamp(current_time) - pd.Timestamp(entry_time)
+            return max(0.0, float(delta.total_seconds()))
+        except Exception:
+            return 0.0
+
     def _rule_build_risk_plan(
         self,
         *,
@@ -4172,6 +4263,94 @@ class FundFlowDecisionEngine:
                         reason=f"macd_v2_4h_shrink_exit_{pos_side.lower()}",
                         metadata=metadata,
                     )
+            if pos_side and self.macd_v2_config and self.macd_v2_config.enable_macd_1h_flip_exit:
+                pnl_ratio = self._rule_position_pnl_ratio(pos_side, current_pos, price)
+                hist_current = self._to_float(
+                    (signal.details or {}).get("macd_histogram_1h_current"),
+                    self._to_float(tf_1h.get("macd_hist"), 0.0),
+                )
+                hist_history = (signal.details or {}).get("macd_histogram_1h_history")
+                if not isinstance(hist_history, list):
+                    hist_history = list(macd_hist_1h[-self.macd_v2_config.macd_1h_flip_exit_confirm_bars :])
+                confirm_bars = max(1, int(self.macd_v2_config.macd_1h_flip_exit_confirm_bars))
+                flip_confirmed = False
+                if pos_side == "LONG":
+                    flip_confirmed = len(hist_history) >= confirm_bars and all(self._to_float(x, 0.0) < 0 for x in hist_history[-confirm_bars:])
+                elif pos_side == "SHORT":
+                    flip_confirmed = len(hist_history) >= confirm_bars and all(self._to_float(x, 0.0) > 0 for x in hist_history[-confirm_bars:])
+                if (
+                    pnl_ratio >= float(self.macd_v2_config.macd_1h_flip_exit_min_profit_to_exit)
+                    and abs(hist_current) >= float(self.macd_v2_config.macd_1h_flip_exit_min_magnitude)
+                    and flip_confirmed
+                ):
+                    metadata["macd_1h_flip_exit"] = {
+                        "pnl_ratio": pnl_ratio,
+                        "hist_current": hist_current,
+                        "confirm_bars": confirm_bars,
+                    }
+                    return FundFlowDecision(
+                        operation=Operation.CLOSE,
+                        symbol=symbol,
+                        target_portion_of_balance=1.0,
+                        reason=f"macd_v2_macd_1h_flip_exit_{pos_side.lower()}",
+                        metadata=metadata,
+                    )
+            if pos_side and self.macd_v2_config and self.macd_v2_config.enable_rsi_overheat_exit:
+                rsi_1h = self._to_float((signal.details or {}).get("rsi_1h"), self._to_float(tf_1h.get("rsi"), 0.0))
+                hist_current = self._to_float(
+                    (signal.details or {}).get("macd_histogram_1h_current"),
+                    self._to_float(tf_1h.get("macd_hist"), 0.0),
+                )
+                hist_prev = self._to_float(
+                    (signal.details or {}).get("macd_histogram_1h_prev"),
+                    self._to_float(tf_1h.get("macd_hist_prev"), hist_current),
+                )
+                entry_price = self._to_float((current_pos or {}).get("entry_price"), 0.0)
+                mfe_ratio = 0.0
+                if entry_price > 0:
+                    if pos_side == "LONG":
+                        mfe_ratio = max(0.0, (self._to_float(tf_15m.get("high"), price) - entry_price) / entry_price)
+                    elif pos_side == "SHORT":
+                        mfe_ratio = max(0.0, (entry_price - self._to_float(tf_15m.get("low"), price)) / entry_price)
+                if (
+                    rsi_1h >= float(self.macd_v2_config.rsi_overheat_exit_threshold)
+                    and mfe_ratio >= float(self.macd_v2_config.rsi_overheat_exit_min_mfe)
+                    and hist_current < hist_prev
+                ):
+                    partial_ratio = max(0.0, min(1.0, float(self.macd_v2_config.rsi_overheat_exit_partial_ratio)))
+                    if partial_ratio > 0:
+                        metadata["rsi_overheat_exit"] = {
+                            "rsi_1h": rsi_1h,
+                            "mfe_ratio": mfe_ratio,
+                            "partial_ratio": partial_ratio,
+                        }
+                        return FundFlowDecision(
+                            operation=Operation.CLOSE,
+                            symbol=symbol,
+                            target_portion_of_balance=partial_ratio,
+                            reason=f"macd_v2_rsi_overheat_exit_{pos_side.lower()}",
+                            metadata=metadata,
+                        )
+            if pos_side and self.macd_v2_config and self.macd_v2_config.enable_holding_time_exit:
+                pnl_ratio = self._rule_position_pnl_ratio(pos_side, current_pos, price)
+                hold_seconds = self._rule_position_hold_seconds(current_pos, current_time)
+                max_hold_seconds = max(0.0, float(self.macd_v2_config.holding_time_exit_max_hours) * 3600.0)
+                if (
+                    max_hold_seconds > 0
+                    and hold_seconds >= max_hold_seconds
+                    and pnl_ratio < float(self.macd_v2_config.holding_time_exit_min_pnl_to_hold)
+                ):
+                    metadata["holding_time_exit"] = {
+                        "hold_seconds": hold_seconds,
+                        "pnl_ratio": pnl_ratio,
+                    }
+                    return FundFlowDecision(
+                        operation=Operation.CLOSE,
+                        symbol=symbol,
+                        target_portion_of_balance=1.0,
+                        reason=f"macd_v2_holding_time_exit_{pos_side.lower()}",
+                        metadata=metadata,
+                    )
             hold_reason = ""
             if isinstance(signal.details, dict):
                 hold_reason = str(signal.details.get("reason", "") or "")
@@ -4302,6 +4481,7 @@ class FundFlowDecisionEngine:
                 if metadata["priority_allocation_applied"]
                 else float(self.max_symbol_position_portion)
             )
+            metadata["entry_reference_price"] = float(price)
             suggested_stop = self._to_optional_float(signal.suggested_stop_price)
             stop_loss_price = suggested_stop
             if stop_loss_price is None or stop_loss_price <= 0 or stop_loss_price >= price:
@@ -4426,6 +4606,7 @@ class FundFlowDecisionEngine:
                 if metadata["priority_allocation_applied"]
                 else float(self.max_symbol_position_portion)
             )
+            metadata["entry_reference_price"] = float(price)
             suggested_stop = self._to_optional_float(signal.suggested_stop_price)
             stop_loss_price = suggested_stop
             if stop_loss_price is None or stop_loss_price <= 0 or stop_loss_price <= price:

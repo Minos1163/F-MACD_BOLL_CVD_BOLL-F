@@ -181,7 +181,7 @@ def test_neutral_upgrade_reenters_when_4h_anchor_exists_and_rsi_is_strong() -> N
     assert signal.details["entry_type_15m"] == "rsi_spring"
 
 
-def test_light_1h_confirmation_skips_flip_bullish_disable_filter() -> None:
+def test_light_1h_confirmation_still_respects_flip_bullish_disable_filter() -> None:
     base_kwargs = dict(
         weight_1h_direction=0.0,
         weight_4h_direction=0.5,
@@ -243,7 +243,8 @@ def test_light_1h_confirmation_skips_flip_bullish_disable_filter() -> None:
 
     assert strict_signal.direction == "neutral"
     assert "flip_bullish_disabled" in str(strict_signal.details.get("reason"))
-    assert light_signal.direction == "long"
+    assert light_signal.direction == "neutral"
+    assert "flip_bullish_disabled" in str(light_signal.details.get("reason"))
 
 
 def test_promoted_trial_uses_stable_continuation_threshold() -> None:
@@ -1510,6 +1511,35 @@ def test_calculate_position_portion_applies_session_scale_after_trial_scale() ->
     )
 
     assert portion == pytest.approx(0.60 * 0.35 * 0.65, rel=1e-6)
+
+
+def test_green_bar_growing_probe_overlay_caps_leverage_and_base_portion() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            enable_green_bar_growing_probe_overlay=True,
+            green_bar_growing_probe_position_penalty=0.10,
+            green_bar_growing_probe_max_leverage=2,
+        )
+    )
+
+    leverage = engine.calculate_leverage(
+        score=0.85,
+        ema_multiplier=1.0,
+        signal_type_1h="green_bar_growing",
+        symbol="SOLUSDT",
+        rsi_probe_mode=False,
+    )
+    portion = engine.calculate_position_portion(
+        score=0.80,
+        base_default_portion=0.60,
+        base_max_symbol_position_portion=0.60,
+        signal_type_1h="green_bar_growing",
+        vwap_state="short_dual_pressure",
+        rsi_probe_mode=False,
+    )
+
+    assert leverage == 2
+    assert portion == pytest.approx(0.06, rel=1e-6)
 
 
 def test_watchlist_symbol_risk_caps_leverage_and_session_scaled_portion() -> None:

@@ -142,14 +142,49 @@ def test_live_runtime_config_uses_rsi_rhythm_defaults() -> None:
     assert v2_cfg["scoring_weights"]["weight_rsi_rhythm"] == 0.30
     assert v2_cfg["scoring_weights"]["weight_vwap"] == 0.05
     assert v2_cfg["scoring_weights"]["weight_15m_entry"] == 0.0
-    assert v2_cfg["entry_thresholds"]["min_signal_score"] == 0.85
-    assert v2_cfg["entry_thresholds"]["red_bar_growing"] == 0.90
-    assert v2_cfg["entry_thresholds"]["green_bar_growing"] == 0.87
-    assert v2_cfg["entry_thresholds"]["flip_bearish"] == 0.84
-    assert v2_cfg["entry_thresholds"]["flip_bullish"] == 0.82
-    assert v2_cfg["entry_filters"]["min_vwap_score_for_entry"] == 0.10
+    assert v2_cfg["entry_thresholds"]["min_signal_score"] == 0.68
+    assert v2_cfg["entry_thresholds"]["red_bar_growing"] == 0.68
+    assert v2_cfg["entry_thresholds"]["green_bar_growing"] == 0.69
+    assert v2_cfg["entry_thresholds"]["flip_bearish"] == 0.66
+    assert v2_cfg["entry_thresholds"]["flip_bullish"] == 0.64
+    assert v2_cfg["entry_filters"]["min_vwap_score_for_entry"] == 0.0
+    assert v2_cfg["entry_filters"]["enable_flip_bullish_strict_filter"] is False
+    assert v2_cfg["entry_filters"]["enable_flip_bullish_cvd_context_filter"] is False
+    assert v2_cfg["entry_filters"]["disable_flip_bullish_entries"] is True
+    assert v2_cfg["entry_filters"]["priority_exec_expire_seconds"] == 25
+    assert v2_cfg["entry_filters"]["priority_exec_vip_expire_seconds"] == 45
     assert v2_cfg["position_management"]["enable_red_bar_growing_probe_overlay"] is False
-    assert v2_cfg["position_management"]["enable_green_bar_growing_probe_overlay"] is False
+    assert v2_cfg["position_management"]["enable_green_bar_growing_probe_overlay"] is True
+    assert v2_cfg["position_management"]["green_bar_growing_probe_position_penalty"] == 0.10
+    assert v2_cfg["position_management"]["green_bar_growing_probe_max_leverage"] == 2
+    assert runtime_cfg["fund_flow"]["execution_degradation"]["open_market_fallback_enabled"] is True
+    assert runtime_cfg["fund_flow"]["execution_degradation"]["open_ioc_retry_times"] == 4
+    assert runtime_cfg["fund_flow"]["execution_degradation"]["open_ioc_dynamic_step_enabled"] is True
+    assert runtime_cfg["fund_flow"]["execution_degradation"]["open_ioc_max_total_slippage_bps"] == 60
+    assert runtime_cfg["fund_flow"]["execution_degradation"]["open_market_fallback_max_slippage_bps"] == 8
+    assert runtime_cfg["fund_flow"]["execution_degradation"]["force_market_fallback_on_ioc_remainder"] is True
+    assert runtime_cfg["fund_flow"]["max_active_symbols"] == 3
+    assert runtime_cfg["fund_flow"]["competition_ranking"]["enabled"] is False
+    assert runtime_cfg["fund_flow"]["pretrade_risk_gate"]["enabled"] is False
+    assert runtime_cfg["fund_flow"]["pretrade_risk_gate"]["force_exit_on_gate"] is False
+    assert runtime_cfg["fund_flow"]["pretrade_risk_gate"]["phase1_entry_only"] is True
+
+
+def test_disable_short_filter_profile_includes_flip_bullish_relief_and_green_overlay() -> None:
+    runtime_cfg = _load_live_runtime_config()
+
+    merged, active_profile = apply_backtest_profile(
+        runtime_cfg,
+        profile_name="macd_v2_disable_short_filter",
+    )
+
+    assert active_profile == "macd_v2_disable_short_filter"
+    v2_cfg = merged["fund_flow"]["macd_mtf_strategy_v2"]
+    assert v2_cfg["entry_filters"]["enable_flip_bullish_strict_filter"] is False
+    assert v2_cfg["entry_filters"]["enable_flip_bullish_cvd_context_filter"] is False
+    assert v2_cfg["position_management"]["enable_green_bar_growing_probe_overlay"] is True
+    assert v2_cfg["position_management"]["green_bar_growing_probe_position_penalty"] == 0.10
+    assert v2_cfg["position_management"]["green_bar_growing_probe_max_leverage"] == 2
 
 
 def test_build_strategy_config_keeps_rsi_rhythm_enabled_when_legacy_15m_flags_exist() -> None:
@@ -1026,6 +1061,304 @@ def test_backtest_execute_trade_uses_signal_level_priority_execution_metadata() 
     assert order["priority_execution_applied"] is True
 
 
+def test_backtest_execute_trade_persists_standard_ioc_market_fallback_metadata() -> None:
+    config = BacktestConfig(symbols=["SOLUSDT"], initial_capital=10000.0, entry_time_in_force="IOC", entry_slippage=0.0)
+    engine = BacktestEngine(config, MACDStrategyV2Config(), runtime_config={})
+    signal = MACDSignalV2(
+        direction="long",
+        signal_score=0.70,
+        signal_type_1h="red_bar_growing",
+        entry_type_15m="rsi_spring",
+        vwap_score=0.20,
+        vwap_state="long_dual_support",
+        ema_multiplier=1.0,
+        ema_structure_status="normal",
+        details={
+            "entry_time_in_force": "IOC",
+            "entry_price_mode": "ioc_limit",
+            "entry_market_fallback_enabled": True,
+            "entry_market_fallback_timeout_ms": 2000,
+            "entry_market_fallback_max_slippage_bps": 5,
+            "entry_execution_policy": "ioc_market_fallback",
+        },
+    )
+    analysis = {
+        "signal": signal,
+        "price": 100.0,
+        "time": pd.Timestamp("2026-04-25 14:00:00"),
+        "row_1h": pd.Series({"atr": 1.0}),
+        "cvd_veto_context": {},
+        "cvd_context": {},
+    }
+
+    accepted = engine.execute_trade("SOLUSDT", analysis, data={})
+
+    assert accepted is True
+    order = engine.pending_orders["SOLUSDT"]
+    assert order["time_in_force"] == "IOC"
+    assert order["entry_market_fallback_enabled"] is True
+    assert order["entry_market_fallback_timeout_ms"] == 2000
+    assert order["entry_market_fallback_max_slippage_bps"] == 5
+    assert order["entry_execution_policy"] == "ioc_market_fallback"
+
+
+def test_backtest_standard_ioc_market_fallback_fills_within_slippage_band() -> None:
+    config = BacktestConfig(
+        symbols=["SOLUSDT"],
+        initial_capital=10000.0,
+        entry_time_in_force="IOC",
+        entry_slippage=0.0,
+    )
+    engine = BacktestEngine(config, MACDStrategyV2Config(), runtime_config={})
+    signal = MACDSignalV2(
+        direction="long",
+        signal_score=0.90,
+        signal_type_1h="red_bar_growing",
+        entry_type_15m="rsi_spring",
+        vwap_score=0.20,
+        vwap_state="long_dual_support",
+        ema_multiplier=1.0,
+        ema_structure_status="normal",
+        details={
+            "entry_time_in_force": "IOC",
+            "entry_price_mode": "ioc_limit",
+            "entry_market_fallback_enabled": True,
+            "entry_market_fallback_timeout_ms": 2000,
+            "entry_market_fallback_max_slippage_bps": 5,
+            "entry_execution_policy": "ioc_market_fallback",
+        },
+    )
+    entry_analysis = {
+        "signal": signal,
+        "price": 100.0,
+        "time": pd.Timestamp("2026-04-25 14:00:00"),
+        "row_1h": pd.Series({"atr": 1.0}),
+        "cvd_veto_context": {},
+        "cvd_context": {},
+    }
+
+    assert engine.execute_trade("SOLUSDT", entry_analysis, data={}) is True
+
+    filled = engine.process_pending_orders(
+        {
+            "SOLUSDT": {
+                "signal": signal,
+                "price": 100.0,
+                "time": pd.Timestamp("2026-04-25 14:15:00"),
+                "row_15m": pd.Series({"open": 100.20, "high": 100.30, "low": 100.18, "close": 100.00}),
+            }
+        }
+    )
+
+    assert filled == {"SOLUSDT"}
+    assert "SOLUSDT" not in engine.pending_orders
+    assert engine.positions["SOLUSDT"]["entry_price"] == pytest.approx(100.05, rel=1e-6)
+    assert engine.execution_audit["market_fallback_attempted"] == 1
+    assert engine.execution_audit["market_fallback_filled"] == 1
+
+
+def test_backtest_force_market_fallback_defaults_from_execution_degradation() -> None:
+    runtime_config = {
+        "fund_flow": {
+            "execution_degradation": {
+                "open_market_fallback_enabled": True,
+                "open_market_fallback_max_slippage_bps": 8,
+                "force_market_fallback_on_ioc_remainder": True,
+            }
+        }
+    }
+    config = BacktestConfig(
+        symbols=["SOLUSDT"],
+        initial_capital=10000.0,
+        entry_time_in_force="IOC",
+        entry_slippage=0.0,
+    )
+    engine = BacktestEngine(config, MACDStrategyV2Config(), runtime_config=runtime_config)
+    signal = MACDSignalV2(
+        direction="long",
+        signal_score=0.86,
+        signal_type_1h="red_bar_growing",
+        entry_type_15m="rsi_spring",
+        vwap_score=0.20,
+        vwap_state="long_dual_support",
+        ema_multiplier=1.0,
+        ema_structure_status="normal",
+        details={
+            "entry_time_in_force": "IOC",
+            "entry_price_mode": "ioc_limit",
+            "entry_execution_policy": "ioc",
+        },
+    )
+    entry_analysis = {
+        "signal": signal,
+        "price": 100.0,
+        "time": pd.Timestamp("2026-04-25 14:00:00"),
+        "row_1h": pd.Series({"atr": 1.0}),
+        "cvd_veto_context": {},
+        "cvd_context": {},
+    }
+
+    assert engine.execute_trade("SOLUSDT", entry_analysis, data={}) is True
+    order = engine.pending_orders["SOLUSDT"]
+    assert order["entry_execution_policy"] == "ioc"
+    assert order["entry_market_fallback_enabled"] is True
+    assert order["entry_market_fallback_max_slippage_bps"] == 8
+    assert order["force_market_fallback_on_ioc_remainder"] is True
+
+    filled = engine.process_pending_orders(
+        {
+            "SOLUSDT": {
+                "signal": signal,
+                "price": 100.0,
+                "time": pd.Timestamp("2026-04-25 14:15:00"),
+                "row_15m": pd.Series({"open": 100.02, "high": 100.08, "low": 100.01, "close": 100.02}),
+            }
+        }
+    )
+
+    assert filled == {"SOLUSDT"}
+    assert engine.execution_audit["market_fallback_attempted"] == 1
+    assert engine.execution_audit["market_fallback_filled"] == 1
+
+
+def test_backtest_force_market_fallback_survives_followup_signal_below_threshold() -> None:
+    runtime_config = {
+        "fund_flow": {
+            "execution_degradation": {
+                "open_market_fallback_enabled": True,
+                "open_market_fallback_max_slippage_bps": 8,
+                "force_market_fallback_on_ioc_remainder": True,
+            }
+        }
+    }
+    config = BacktestConfig(
+        symbols=["SOLUSDT"],
+        initial_capital=10000.0,
+        entry_time_in_force="IOC",
+        entry_slippage=0.0,
+    )
+    engine = BacktestEngine(config, MACDStrategyV2Config(), runtime_config=runtime_config)
+    entry_signal = MACDSignalV2(
+        direction="long",
+        signal_score=0.86,
+        signal_type_1h="red_bar_growing",
+        entry_type_15m="rsi_spring",
+        vwap_score=0.20,
+        vwap_state="long_dual_support",
+        ema_multiplier=1.0,
+        ema_structure_status="normal",
+        details={"entry_time_in_force": "IOC", "entry_price_mode": "ioc_limit", "entry_execution_policy": "ioc"},
+    )
+
+    assert engine.execute_trade(
+        "SOLUSDT",
+        {
+            "signal": entry_signal,
+            "price": 100.0,
+            "time": pd.Timestamp("2026-04-25 14:00:00"),
+            "row_1h": pd.Series({"atr": 1.0}),
+            "cvd_veto_context": {},
+            "cvd_context": {},
+        },
+        data={},
+    ) is True
+
+    followup_signal = MACDSignalV2(
+        direction="long",
+        signal_score=0.60,
+        signal_type_1h="red_bar_growing",
+        entry_type_15m="rsi_spring",
+        vwap_score=0.20,
+        vwap_state="long_dual_support",
+        ema_multiplier=1.0,
+        ema_structure_status="normal",
+    )
+    filled = engine.process_pending_orders(
+        {
+            "SOLUSDT": {
+                "signal": followup_signal,
+                "price": 100.0,
+                "time": pd.Timestamp("2026-04-25 14:15:00"),
+                "row_15m": pd.Series({"open": 99.98, "high": 100.08, "low": 99.97, "close": 100.02}),
+            }
+        }
+    )
+
+    assert filled == {"SOLUSDT"}
+    assert engine.execution_audit["pending_cancel_reasons"] == {}
+    assert engine.execution_audit["market_fallback_attempted"] == 1
+    assert engine.positions["SOLUSDT"]["entry_price"] == pytest.approx(100.07001, rel=1e-6)
+
+
+def test_backtest_force_market_fallback_survives_followup_signal_reversal() -> None:
+    runtime_config = {
+        "fund_flow": {
+            "execution_degradation": {
+                "open_market_fallback_enabled": True,
+                "open_market_fallback_max_slippage_bps": 8,
+                "force_market_fallback_on_ioc_remainder": True,
+            }
+        }
+    }
+    config = BacktestConfig(
+        symbols=["SOLUSDT"],
+        initial_capital=10000.0,
+        entry_time_in_force="IOC",
+        entry_slippage=0.0,
+    )
+    engine = BacktestEngine(config, MACDStrategyV2Config(), runtime_config=runtime_config)
+    entry_signal = MACDSignalV2(
+        direction="long",
+        signal_score=0.86,
+        signal_type_1h="red_bar_growing",
+        entry_type_15m="rsi_spring",
+        vwap_score=0.20,
+        vwap_state="long_dual_support",
+        ema_multiplier=1.0,
+        ema_structure_status="normal",
+        details={"entry_time_in_force": "IOC", "entry_price_mode": "ioc_limit", "entry_execution_policy": "ioc"},
+    )
+
+    assert engine.execute_trade(
+        "SOLUSDT",
+        {
+            "signal": entry_signal,
+            "price": 100.0,
+            "time": pd.Timestamp("2026-04-25 14:00:00"),
+            "row_1h": pd.Series({"atr": 1.0}),
+            "cvd_veto_context": {},
+            "cvd_context": {},
+        },
+        data={},
+    ) is True
+
+    reversed_signal = MACDSignalV2(
+        direction="short",
+        signal_score=0.86,
+        signal_type_1h="flip_bearish",
+        entry_type_15m="rsi_spring",
+        vwap_score=0.20,
+        vwap_state="short_dual_pressure",
+        ema_multiplier=1.0,
+        ema_structure_status="normal",
+    )
+    filled = engine.process_pending_orders(
+        {
+            "SOLUSDT": {
+                "signal": reversed_signal,
+                "price": 100.0,
+                "time": pd.Timestamp("2026-04-25 14:15:00"),
+                "row_15m": pd.Series({"open": 100.02, "high": 100.08, "low": 100.01, "close": 100.02}),
+            }
+        }
+    )
+
+    assert filled == {"SOLUSDT"}
+    assert engine.execution_audit["pending_cancel_reasons"] == {}
+    assert engine.execution_audit["market_fallback_attempted"] == 1
+    assert engine.positions["SOLUSDT"]["entry_price"] == pytest.approx(100.07001, rel=1e-6)
+
+
 def test_backtest_competition_score_boosts_only_flip_bullish() -> None:
     engine = BacktestEngine(
         BacktestConfig(symbols=["SOLUSDT"], initial_capital=10000.0),
@@ -1055,6 +1388,32 @@ def test_backtest_competition_score_boosts_only_flip_bullish() -> None:
 
     assert engine._resolve_competition_score(bullish) == pytest.approx(0.92, rel=1e-6)
     assert engine._resolve_competition_score(bearish) == pytest.approx(0.80, rel=1e-6)
+
+
+def test_backtest_competition_score_respects_configured_cluster_bonus_overrides() -> None:
+    config = BacktestConfig(symbols=["SOLUSDT"], initial_capital=10000.0)
+    strategy_config = MACDStrategyV2Config()
+    runtime_config = {
+        "fund_flow": {
+            "competition_ranking": {
+                "enabled": True,
+                "cluster_bonus_map": {
+                    "flip_bearish": 0.05,
+                    "red_bar_growing": 0.02,
+                    "flip_bullish": -0.10,
+                }
+            }
+        }
+    }
+    engine = BacktestEngine(config, strategy_config, runtime_config=runtime_config)
+
+    bullish = MACDSignalV2(direction="long", signal_score=0.80, signal_type_1h="flip_bullish", details={})
+    bearish = MACDSignalV2(direction="short", signal_score=0.80, signal_type_1h="flip_bearish", details={})
+    growing = MACDSignalV2(direction="short", signal_score=0.80, signal_type_1h="red_bar_growing", details={})
+
+    assert engine._resolve_competition_score(bullish) == pytest.approx(0.70, rel=1e-6)
+    assert engine._resolve_competition_score(bearish) == pytest.approx(0.85, rel=1e-6)
+    assert engine._resolve_competition_score(growing) == pytest.approx(0.82, rel=1e-6)
 
 
 def test_backtest_vip_priority_order_retries_once_with_price_improvement_before_fill() -> None:
@@ -1286,14 +1645,14 @@ def test_live_config_uses_rsi_resonance_threshold_defaults() -> None:
 
     cfg = build_strategy_config(runtime_cfg)
 
-    assert cfg.min_signal_score == pytest.approx(0.85, rel=1e-6)
-    assert cfg.red_bar_growing_min_signal_score == pytest.approx(0.90, rel=1e-6)
-    assert cfg.green_bar_growing_min_signal_score == pytest.approx(0.87, rel=1e-6)
-    assert cfg.flip_bearish_min_signal_score == pytest.approx(0.84, rel=1e-6)
-    assert cfg.flip_bullish_min_signal_score == pytest.approx(0.82, rel=1e-6)
-    assert cfg.soft_long_min_signal_score == pytest.approx(0.85, rel=1e-6)
-    assert cfg.stable_bear_continuation_min_signal_score == pytest.approx(0.85, rel=1e-6)
-    assert cfg.stable_bull_continuation_min_signal_score == pytest.approx(0.85, rel=1e-6)
-    assert cfg.min_vwap_score_for_entry == pytest.approx(0.10, rel=1e-6)
-    assert cfg.preflip_trial_min_signal_score == pytest.approx(0.85, rel=1e-6)
-    assert cfg.trial_short_below_structure_promotion_min_signal_score == pytest.approx(0.85, rel=1e-6)
+    assert cfg.min_signal_score == pytest.approx(0.68, rel=1e-6)
+    assert cfg.red_bar_growing_min_signal_score == pytest.approx(0.68, rel=1e-6)
+    assert cfg.green_bar_growing_min_signal_score == pytest.approx(0.69, rel=1e-6)
+    assert cfg.flip_bearish_min_signal_score == pytest.approx(0.66, rel=1e-6)
+    assert cfg.flip_bullish_min_signal_score == pytest.approx(0.64, rel=1e-6)
+    assert cfg.soft_long_min_signal_score == pytest.approx(0.66, rel=1e-6)
+    assert cfg.stable_bear_continuation_min_signal_score == pytest.approx(0.68, rel=1e-6)
+    assert cfg.stable_bull_continuation_min_signal_score == pytest.approx(0.68, rel=1e-6)
+    assert cfg.min_vwap_score_for_entry == pytest.approx(0.0, rel=1e-6)
+    assert cfg.preflip_trial_min_signal_score == pytest.approx(0.66, rel=1e-6)
+    assert cfg.trial_short_below_structure_promotion_min_signal_score == pytest.approx(0.68, rel=1e-6)

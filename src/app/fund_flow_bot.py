@@ -1619,6 +1619,8 @@ class TradingBot:
         return {
             "enabled": bool(gate_cfg.get("enabled", True)),
             "force_exit_on_gate": bool(gate_cfg.get("force_exit_on_gate", True)),
+            "phase1_entry_only": bool(gate_cfg.get("phase1_entry_only", False)),
+            "shadow_mode": bool(gate_cfg.get("shadow_mode", False)),
             "entry_block_actions": entry_block_actions,
             "entry_hold_portion_scale": min(1.0, max(0.1, self._to_float(gate_cfg.get("entry_hold_portion_scale", 0.6), 0.6))),
             "entry_hold_leverage_cap": max(
@@ -3011,6 +3013,14 @@ class TradingBot:
         cfg = self._pretrade_risk_gate_config()
         if not bool(cfg.get("enabled", True)):
             return decision, {"enabled": False, "action": "BYPASS"}
+        shadow_mode = bool(cfg.get("shadow_mode", False))
+
+        def _shadow_return(result_meta: Dict[str, Any], shadow_action: str) -> Tuple[FundFlowDecision, Dict[str, Any]]:
+            result_meta["shadow_mode"] = True
+            result_meta["shadow_action"] = str(shadow_action or result_meta.get("action", "HOLD")).upper()
+            if isinstance(md, dict):
+                md["pretrade_risk_gate"] = result_meta
+            return decision, result_meta
 
         md_raw = getattr(decision, "metadata", None)
         md: Dict[str, Any] = md_raw if isinstance(md_raw, dict) else {}
@@ -3110,6 +3120,8 @@ class TradingBot:
                 md["entry_execution_policy"] = exec_mode
                 if exec_reason:
                     md["execution_quality_reason"] = exec_reason
+            if shadow_mode:
+                return _shadow_return(gate_meta, "BLOCK")
             base_reason = str(decision.reason or "").strip()
             block_reason = f"EXECUTION_1M_BLOCK mode={exec_mode}"
             if exec_reason:
@@ -3160,6 +3172,13 @@ class TradingBot:
             }
             if isinstance(md, dict):
                 md["pretrade_risk_gate"] = gate_meta
+            if isinstance(position, dict) and bool(cfg.get("phase1_entry_only", False)):
+                gate_meta["phase1_entry_only"] = True
+                if isinstance(md, dict):
+                    md["pretrade_risk_gate"] = gate_meta
+                return (decision, gate_meta) if not shadow_mode else _shadow_return(gate_meta, gate_action)
+            if shadow_mode:
+                return _shadow_return(gate_meta, gate_action)
 
             pos_side = str(position.get("side", "")).upper() if isinstance(position, dict) else ""
             pos_key = self._position_track_key(symbol, pos_side) if pos_side in ("LONG", "SHORT") else ""
@@ -8678,7 +8697,7 @@ class TradingBot:
         if open_candidates:
             open_candidates = sorted(
                 open_candidates,
-                key=lambda x: float(x.get("score", 0.0)),
+                key=lambda x: float(x.get("competition_score", x.get("score", 0.0))),
                 reverse=True,
             )
             if ai_gate_enabled and ai_review_flat_enabled:
