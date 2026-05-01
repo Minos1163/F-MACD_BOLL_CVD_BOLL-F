@@ -162,7 +162,7 @@ def test_live_runtime_config_uses_rsi_rhythm_defaults() -> None:
     assert runtime_cfg["fund_flow"]["execution_degradation"]["open_ioc_dynamic_step_enabled"] is True
     assert runtime_cfg["fund_flow"]["execution_degradation"]["open_ioc_max_total_slippage_bps"] == 60
     assert runtime_cfg["fund_flow"]["execution_degradation"]["open_market_fallback_max_slippage_bps"] == 8
-    assert runtime_cfg["fund_flow"]["execution_degradation"]["force_market_fallback_on_ioc_remainder"] is True
+    assert runtime_cfg["fund_flow"]["execution_degradation"]["force_market_fallback_on_ioc_remainder"] is False
     assert runtime_cfg["fund_flow"]["max_active_symbols"] == 3
     assert runtime_cfg["fund_flow"]["competition_ranking"]["enabled"] is False
     assert runtime_cfg["fund_flow"]["pretrade_risk_gate"]["enabled"] is False
@@ -1219,6 +1219,73 @@ def test_backtest_force_market_fallback_defaults_from_execution_degradation() ->
     assert filled == {"SOLUSDT"}
     assert engine.execution_audit["market_fallback_attempted"] == 1
     assert engine.execution_audit["market_fallback_filled"] == 1
+
+
+def test_backtest_default_ioc_does_not_enable_forced_market_fallback_when_disabled() -> None:
+    runtime_config = {
+        "fund_flow": {
+            "execution_degradation": {
+                "open_market_fallback_enabled": True,
+                "open_market_fallback_max_slippage_bps": 8,
+                "force_market_fallback_on_ioc_remainder": False,
+            }
+        }
+    }
+    config = BacktestConfig(
+        symbols=["SOLUSDT"],
+        initial_capital=10000.0,
+        entry_time_in_force="IOC",
+        entry_slippage=0.0,
+    )
+    engine = BacktestEngine(config, MACDStrategyV2Config(), runtime_config=runtime_config)
+    signal = MACDSignalV2(
+        direction="long",
+        signal_score=0.86,
+        signal_type_1h="red_bar_growing",
+        entry_type_15m="rsi_spring",
+        vwap_score=0.20,
+        vwap_state="long_dual_support",
+        ema_multiplier=1.0,
+        ema_structure_status="normal",
+        details={
+            "entry_time_in_force": "IOC",
+            "entry_price_mode": "ioc_limit",
+            "entry_execution_policy": "ioc",
+        },
+    )
+
+    assert engine.execute_trade(
+        "SOLUSDT",
+        {
+            "signal": signal,
+            "price": 100.0,
+            "time": pd.Timestamp("2026-04-25 14:00:00"),
+            "row_1h": pd.Series({"atr": 1.0}),
+            "cvd_veto_context": {},
+            "cvd_context": {},
+        },
+        data={},
+    ) is True
+
+    order = engine.pending_orders["SOLUSDT"]
+    assert order["entry_market_fallback_enabled"] is False
+    assert order["entry_market_fallback_max_slippage_bps"] == 0
+    assert order["force_market_fallback_on_ioc_remainder"] is False
+
+    filled = engine.process_pending_orders(
+        {
+            "SOLUSDT": {
+                "signal": signal,
+                "price": 100.0,
+                "time": pd.Timestamp("2026-04-25 14:15:00"),
+                "row_15m": pd.Series({"open": 100.02, "high": 100.08, "low": 100.01, "close": 100.02}),
+            }
+        }
+    )
+
+    assert filled == set()
+    assert engine.execution_audit["market_fallback_attempted"] == 0
+    assert engine.execution_audit["pending_cancel_reasons"] == {"ioc_unfilled": 1}
 
 
 def test_backtest_force_market_fallback_survives_followup_signal_below_threshold() -> None:

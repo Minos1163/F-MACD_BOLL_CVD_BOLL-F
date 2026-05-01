@@ -1103,7 +1103,7 @@
       "open_gtc_fallback_enabled": true,
       "open_market_fallback_enabled": true,
       "open_market_fallback_max_slippage_bps": 8,
-      "force_market_fallback_on_ioc_remainder": true,
+      "force_market_fallback_on_ioc_remainder": false,
       "close_ioc_retry_times": 1,
       "close_ioc_retry_step_bps": 5,
       "close_gtc_fallback_enabled": false,

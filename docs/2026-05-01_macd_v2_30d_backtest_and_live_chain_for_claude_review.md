@@ -10,7 +10,7 @@
 - `dynamic_max_active_symbols.max_active_symbols: 4 -> 3`
 - `competition_ranking.enabled: true -> false`
 - `pretrade_risk_gate.enabled: true -> false`
-- `execution_degradation.force_market_fallback_on_ioc_remainder: true`
+- `execution_degradation.force_market_fallback_on_ioc_remainder: true`（外科修正阶段启用；归核化阶段已改为默认 `false`）
 - `execution_degradation.open_market_fallback_max_slippage_bps: 8`
 - 修复 backtest pending order metadata 默认不传播 market fallback 的问题
 - 修复 backtest pending IOC 在 fallback 前被“后续信号低于阈值 / 信号反向”早退取消的问题
@@ -38,7 +38,7 @@
 - `capacity=3 / ranking=false / gate=false` 的回退方向是正确的，回撤相对 `capacity=4` 从 `10.37%` 降到 `9.10%`，但仍未回到旧基线 `6.12%`。
 - IOC market fallback 的技术链路已修通，不再是 `attempted=0`。
 - “强制 IOC 剩余市价补单”不是可上线收益改进；它把执行问题转化成了信号质量问题，新增 42 笔 fallback 成交拉低了 WR/PF/收益。
-- 下一步不应继续叠加复杂度，应把 `force_market_fallback_on_ioc_remainder` 改成消融项，默认关闭或至少加高分门槛后再测。
+- 归核化阶段已把 `force_market_fallback_on_ioc_remainder` 改成消融项并默认关闭；30 天 strict-live 结果恢复到 `+41.58% / WR 87.78% / PF 6.15 / MDD 8.23%`，但仍未达到新验收线。
 
 ## 1. 本轮结论
 
@@ -379,6 +379,80 @@ pytest tests/test_macd_strategy_v2_4h_scoring.py tests/test_backtest_profiles.py
 - 若继续测试 fallback，应增加门槛，例如 `signal_score >= 0.88`、禁止后续信号反向后补单、或仅允许 `flip_bearish` 高质量簇补单。
 - 当前最稳的回滚基线仍是：`capacity=3`、`competition_ranking=false`、`pretrade_risk_gate.enabled=false`、`disable_flip_bullish_entries=true`，但不要强制补单。
 
+## 7B. 归核化复测结果
+
+### 7B.1 配置归核化 strict-live 复测
+
+来源：
+
+- [output/backtest/v2_core_reset_20260501_summary.json](/D:/AIDCA/AI2/output/backtest/v2_core_reset_20260501_summary.json)
+- [output/backtest/v2_core_reset_20260501_ioc_diagnosis.json](/D:/AIDCA/AI2/output/backtest/v2_core_reset_20260501_ioc_diagnosis.json)
+- [output/backtest/v2_core_reset_20260501_analysis_analysis_summary.json](/D:/AIDCA/AI2/output/backtest/v2_core_reset_20260501_analysis_analysis_summary.json)
+
+窗口：
+
+- `2026-02-23` 到 `2026-03-24T23:59:59`
+
+归核化配置：
+
+- `max_active_symbols = 3`
+- `competition_ranking.enabled = false`
+- `pretrade_risk_gate.enabled = false`
+- `disable_flip_bullish_entries = true`
+- `force_market_fallback_on_ioc_remainder = false`
+- `open_ioc_dynamic_step_enabled = true`
+- `open_ioc_max_total_slippage_bps = 60`
+
+指标：
+
+- 收益率 `+41.5841%`
+- 胜率 `87.7778%`
+- 总成交 `90`
+- PF `6.1471`
+- MDD `8.2305%`
+- 提交订单 `217`
+- 成交订单 `90`
+- 取消订单 `127`
+
+执行漏斗：
+
+- `market_fallback_attempted = 0`
+- `market_fallback_filled = 0`
+- `market_fallback_slippage_blocked = 0`
+- `pending_cancel_reasons = {"ioc_no_fill": 127}`
+
+按信号类型归因：
+
+- `red_bar_growing: 73 笔 / WR 84.93% / PnL +2748.27`
+- `flip_bearish: 17 笔 / WR 100% / PnL +1626.64`
+- `flip_bullish: 0 笔`
+
+验收对比：
+
+- 收益目标：`>= +45.00%`，实际 `+41.58%`，失败
+- WR 目标：`>= 85.00%`，实际 `87.78%`，通过
+- PF 目标：`>= 9.00`，实际 `6.15`，失败
+- MDD 目标：`<= 6.00%`，实际 `8.23%`，失败
+- Trades 目标：`80-100`，实际 `90`，通过
+- `flip_bullish` 成交目标：`0`，实际 `0`，通过
+- 全局强制 fallback 目标：不应触发，实际 `market_fallback_attempted=0`，通过
+
+### 7B.2 对比表
+
+| 版本 | Return | WR | Trades | PF | MDD | Submitted | Filled | Canceled | Market attempted | Market filled |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 旧基线 `20260430` | `+44.37%` | `87.23%` | `94` | `7.20` | `6.12%` | `224` | `94` | `130` | `0` | `0` |
+| P0-P4 全集成 | `+40.93%` | `86.67%` | `105` | `5.48` | `10.37%` | `251` | `105` | `146` | `0` | `0` |
+| 外科修正 + 强制 fallback | `+27.13%` | `74.77%` | `111` | `2.54` | `9.10%` | `178` | `111` | `67` | `109` | `42` |
+| 归核化 + 关闭强制 fallback | `+41.58%` | `87.78%` | `90` | `6.15` | `8.23%` | `217` | `90` | `127` | `0` | `0` |
+
+### 7B.3 评审结论
+
+- 关闭强制 fallback 是正确减法：WR 从 `74.77%` 恢复到 `87.78%`，PF 从 `2.54` 恢复到 `6.15`。
+- 归核化仍未超越旧基线：收益低于 `44.37%`，PF 低于 `7.20`，MDD 高于 `6.12%`。
+- `flip_bullish` 禁用仍保持有效，但单独禁用它并没有自动带来 PF `>=9` 的结构性提升。
+- 本轮不应继续叠加新调参；下一轮应单独定位 MDD `8.23%` 的来源，优先从退出路径或仓位暴露归因入手，而不是恢复强制补单。
+
 ## 8. 当前实盘开仓链路
 
 主链路：
@@ -404,7 +478,7 @@ pytest tests/test_macd_strategy_v2_4h_scoring.py tests/test_backtest_profiles.py
 - `open_ioc_dynamic_step_enabled = true`
 - `open_ioc_max_total_slippage_bps = 60`
 - `open_market_fallback_max_slippage_bps = 8`
-- `force_market_fallback_on_ioc_remainder = true`
+- `force_market_fallback_on_ioc_remainder = false`
 - `pretrade_risk_gate.enabled = false`
 - `pretrade_risk_gate.phase1_entry_only = true`
 - `competition_ranking.enabled = false`
@@ -440,6 +514,17 @@ pytest tests/test_macd_strategy_v2_4h_scoring.py tests/test_backtest_profiles.py
 - [output/backtest/v2_surgical_fix_20260501_force_market_audit_analysis_analysis_summary.json](/D:/AIDCA/AI2/output/backtest/v2_surgical_fix_20260501_force_market_audit_analysis_analysis_summary.json)
 - [output/backtest/v2_surgical_fix_20260501_force_market_audit_analysis_symbol_breakdown.csv](/D:/AIDCA/AI2/output/backtest/v2_surgical_fix_20260501_force_market_audit_analysis_symbol_breakdown.csv)
 - [output/backtest/v2_surgical_fix_20260501_force_market_audit_analysis_true_drawdown_breakdown.csv](/D:/AIDCA/AI2/output/backtest/v2_surgical_fix_20260501_force_market_audit_analysis_true_drawdown_breakdown.csv)
+
+归核化复测产物：
+
+- [output/backtest/v2_core_reset_20260501_summary.json](/D:/AIDCA/AI2/output/backtest/v2_core_reset_20260501_summary.json)
+- [output/backtest/v2_core_reset_20260501_trades.csv](/D:/AIDCA/AI2/output/backtest/v2_core_reset_20260501_trades.csv)
+- [output/backtest/v2_core_reset_20260501_equity_curve.csv](/D:/AIDCA/AI2/output/backtest/v2_core_reset_20260501_equity_curve.csv)
+- [output/backtest/v2_core_reset_20260501_pending_cancels.csv](/D:/AIDCA/AI2/output/backtest/v2_core_reset_20260501_pending_cancels.csv)
+- [output/backtest/v2_core_reset_20260501_ioc_diagnosis.json](/D:/AIDCA/AI2/output/backtest/v2_core_reset_20260501_ioc_diagnosis.json)
+- [output/backtest/v2_core_reset_20260501_analysis_analysis_summary.json](/D:/AIDCA/AI2/output/backtest/v2_core_reset_20260501_analysis_analysis_summary.json)
+- [output/backtest/v2_core_reset_20260501_analysis_symbol_breakdown.csv](/D:/AIDCA/AI2/output/backtest/v2_core_reset_20260501_analysis_symbol_breakdown.csv)
+- [output/backtest/v2_core_reset_20260501_analysis_true_drawdown_breakdown.csv](/D:/AIDCA/AI2/output/backtest/v2_core_reset_20260501_analysis_true_drawdown_breakdown.csv)
 
 旧基线对比产物：
 
