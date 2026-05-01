@@ -1852,6 +1852,61 @@
           },
           "notes": "Ablation profile: only relax soft_long_* threshold_check floor from the baseline 0.82 path down to 0.79, keeping VWAP and all other live funnel gates unchanged."
         },
+        "round1_disable_4h_shrink_exit": {
+          "config_overrides": {
+            "fund_flow": {
+              "macd_mtf_strategy_v2": {
+                "stop_loss_config": {
+                  "enable_4h_shrink_exit": false
+                }
+              }
+            }
+          },
+          "notes": "Round 1A MDD ablation: disable only the 4H shrink exit to determine whether the current shrink-exit timing improves or worsens drawdown."
+        },
+        "round1_shrink_exit_require_profit_false_weak_loss": {
+          "config_overrides": {
+            "fund_flow": {
+              "macd_mtf_strategy_v2": {
+                "stop_loss_config": {
+                  "enable_4h_shrink_exit": true,
+                  "exit_4h_require_profit": false,
+                  "exit_4h_weak_loss_threshold": -0.001
+                }
+              }
+            }
+          },
+          "notes": "Round 1B MDD ablation: keep the 4H shrink exit but allow weak-loss exits down to -0.10% instead of requiring positive PnL."
+        },
+        "round1_red_bar_score_069": {
+          "config_overrides": {
+            "fund_flow": {
+              "macd_mtf_strategy_v2": {
+                "entry_thresholds": {
+                  "red_bar_growing": 0.69
+                }
+              }
+            }
+          },
+          "notes": "Round 1C MDD ablation: raise only the red_bar_growing signal threshold from 0.68 to 0.69 to test low-score red-bar loss contribution."
+        },
+        "round1_red_bar_low_quality_veto": {
+          "config_overrides": {
+            "fund_flow": {
+              "macd_mtf_strategy_v2": {
+                "entry_filters": {
+                  "min_vwap_score_for_entry": 0.03
+                },
+                "position_management": {
+                  "enable_red_bar_growing_probe_overlay": true,
+                  "red_bar_growing_probe_position_penalty": 0.50,
+                  "red_bar_growing_probe_max_leverage": 2
+                }
+              }
+            }
+          },
+          "notes": "Round 1D MDD ablation: use existing red_bar_growing probe controls plus a minimal VWAP quality floor to reduce exposure on the observed low-quality red-bar loss pocket without changing live defaults."
+        },
         "top100_binance_rot_20260319": {
           "symbols": [
             "BTCUSDT",

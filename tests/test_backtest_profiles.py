@@ -133,6 +133,40 @@ def test_live_runtime_config_contains_soft_long_threshold_ablation_profiles() ->
     assert profile_079["short_quality_filter"]["enabled"] is False
 
 
+def test_live_runtime_config_contains_round1_mdd_ablation_profiles() -> None:
+    runtime_cfg = _load_live_runtime_config()
+    profiles = runtime_cfg["fund_flow"]["backtest"]["profiles"]
+
+    expected = {
+        "round1_disable_4h_shrink_exit",
+        "round1_shrink_exit_require_profit_false_weak_loss",
+        "round1_red_bar_score_069",
+        "round1_red_bar_low_quality_veto",
+    }
+    assert expected.issubset(set(profiles))
+
+    disable_shrink, _ = apply_backtest_profile(runtime_cfg, "round1_disable_4h_shrink_exit")
+    disable_stop = disable_shrink["fund_flow"]["macd_mtf_strategy_v2"]["stop_loss_config"]
+    assert disable_stop["enable_4h_shrink_exit"] is False
+
+    weak_loss, _ = apply_backtest_profile(runtime_cfg, "round1_shrink_exit_require_profit_false_weak_loss")
+    weak_loss_stop = weak_loss["fund_flow"]["macd_mtf_strategy_v2"]["stop_loss_config"]
+    assert weak_loss_stop["enable_4h_shrink_exit"] is True
+    assert weak_loss_stop["exit_4h_require_profit"] is False
+    assert weak_loss_stop["exit_4h_weak_loss_threshold"] == -0.001
+
+    red_bar_069, _ = apply_backtest_profile(runtime_cfg, "round1_red_bar_score_069")
+    red_bar_thresholds = red_bar_069["fund_flow"]["macd_mtf_strategy_v2"]["entry_thresholds"]
+    assert red_bar_thresholds["red_bar_growing"] == 0.69
+
+    red_bar_veto, _ = apply_backtest_profile(runtime_cfg, "round1_red_bar_low_quality_veto")
+    v2_cfg = red_bar_veto["fund_flow"]["macd_mtf_strategy_v2"]
+    assert v2_cfg["position_management"]["enable_red_bar_growing_probe_overlay"] is True
+    assert v2_cfg["position_management"]["red_bar_growing_probe_position_penalty"] == 0.5
+    assert v2_cfg["position_management"]["red_bar_growing_probe_max_leverage"] == 2
+    assert v2_cfg["entry_filters"]["min_vwap_score_for_entry"] == 0.03
+
+
 def test_live_runtime_config_uses_rsi_rhythm_defaults() -> None:
     runtime_cfg = _load_live_runtime_config()
     v2_cfg = runtime_cfg["fund_flow"]["macd_mtf_strategy_v2"]

@@ -453,6 +453,53 @@ pytest tests/test_macd_strategy_v2_4h_scoring.py tests/test_backtest_profiles.py
 - `flip_bullish` 禁用仍保持有效，但单独禁用它并没有自动带来 PF `>=9` 的结构性提升。
 - 本轮不应继续叠加新调参；下一轮应单独定位 MDD `8.23%` 的来源，优先从退出路径或仓位暴露归因入手，而不是恢复强制补单。
 
+## 7C. Round 1 MDD 单变量消融
+
+### 7C.1 Round 0 回撤诊断
+
+来源：
+
+- [output/backtest/v2_core_reset_20260501_round1_mdd_diagnosis.json](/D:/AIDCA/AI2/output/backtest/v2_core_reset_20260501_round1_mdd_diagnosis.json)
+
+窗口：
+
+- `2026-02-28 17:30:00 -> 2026-03-04 00:30:00`
+
+诊断结论：
+
+- 窗口内重叠成交 `11` 笔，窗口内平仓 `9` 笔。
+- 窗口内平仓总 PnL `+128.84`，但权益从 `13382.26` 下探到 `12280.84`，说明主要回撤来自持仓浮亏而非已实现净亏损。
+- 窗口内已实现亏损只有 `2` 笔，均为 `red_bar_growing + stop_loss_intrabar`。
+- 两笔亏损为：
+  - `ALGOUSDT long / -256.55 / score 0.6634 / vwap 0.0359 / adx_1h 10.06 / adx_4h 19.11 / bb_middle_slope_4h -0.00219`
+  - `ADAUSDT long / -211.49 / score 0.6617 / vwap 0.0342 / adx_1h 14.58 / adx_4h 18.16 / bb_middle_slope_4h -0.00136`
+- 同窗口 `4h_shrink_exit` 触发 `2` 笔，均盈利，合计 `+558.27`，不支持“关闭 4H shrink exit”。
+
+### 7C.2 Round 1 消融结果
+
+| Profile | Return | WR | Trades | PF | MDD | Submitted | Filled | Canceled | 结论 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| 归核化基线 | `+41.58%` | `87.78%` | `90` | `6.15` | `8.23%` | `217` | `90` | `127` | 当前最佳基线 |
+| `round1_disable_4h_shrink_exit` | `+27.84%` | `81.36%` | `59` | `4.81` | `9.79%` | `145` | `59` | `86` | 失败，4H shrink exit 不能关闭 |
+| `round1_shrink_exit_require_profit_false_weak_loss` | `+41.58%` | `87.78%` | `90` | `6.15` | `8.23%` | `217` | `90` | `127` | 与基线一致，`-0.10%` 弱亏损门槛未新增触发 |
+| `round1_red_bar_score_069` | `+41.58%` | `87.78%` | `90` | `6.15` | `8.23%` | `217` | `90` | `127` | 与基线一致，成交不在 `0.68-0.69` 窄带 |
+| `round1_red_bar_low_quality_veto` | `+13.45%` | `100.00%` | `18` | `inf` | `4.39%` | `53` | `18` | `35` | MDD 下降但收益和交易数严重不达标 |
+
+产物：
+
+- [output/backtest/v2_round1_disable_4h_shrink_exit_20260501_summary.json](/D:/AIDCA/AI2/output/backtest/v2_round1_disable_4h_shrink_exit_20260501_summary.json)
+- [output/backtest/v2_round1_shrink_exit_weak_loss_20260501_summary.json](/D:/AIDCA/AI2/output/backtest/v2_round1_shrink_exit_weak_loss_20260501_summary.json)
+- [output/backtest/v2_round1_red_bar_score_069_20260501_summary.json](/D:/AIDCA/AI2/output/backtest/v2_round1_red_bar_score_069_20260501_summary.json)
+- [output/backtest/v2_round1_red_bar_low_quality_veto_20260501_summary.json](/D:/AIDCA/AI2/output/backtest/v2_round1_red_bar_low_quality_veto_20260501_summary.json)
+
+### 7C.3 Round 1 结论
+
+- 本轮没有任何单变量 profile 同时满足 `Return >= 41.50% / WR >= 85% / PF >= 6.0 / MDD <= 7.0% / Trades 80-100`。
+- `4h_shrink_exit` 是正贡献退出路径，关闭后收益、WR、PF、MDD 全部恶化。
+- 将 `red_bar_growing` 从 `0.68` 提到 `0.69` 没有效果，说明亏损单实际分数低于当前成交门槛来自 4H-primary / light-confirm 路径的有效阈值覆盖，不是这个单一阈值能切掉。
+- 粗暴 VWAP 地板能砍掉亏损并压低 MDD，但也几乎砍掉全部 `red_bar_growing` 收益来源，不符合上线条件。
+- 因此当前 live 默认仍应保持归核化配置；下一轮若继续优化，应针对 `red_bar_growing long + low ADX + negative 4H slope` 做更窄的单变量过滤，而不是全局收紧 VWAP 或关闭退出。
+
 ## 8. 当前实盘开仓链路
 
 主链路：

@@ -18,6 +18,7 @@ from scripts.backtest_macd_v2 import (
 )
 from scripts.analyze_backtest_trades import build_cancel_quality_summary
 from scripts.diagnose_ioc_fallback import diagnose_ioc_fallback
+from scripts.diagnose_macd_v2_mdd_round1 import diagnose_mdd_round1
 from scripts.validate_live_backtest_alignment import (
     ApprovedDifference,
     AlignmentRule,
@@ -56,6 +57,73 @@ def test_resolve_runtime_config_for_backtest_skips_profile_in_strict_live_mode()
 
     assert active_profile == ""
     assert merged["fund_flow"]["macd_mtf_strategy_v2"]["short_quality_filter"]["enabled"] is True
+
+
+def test_diagnose_mdd_round1_requires_existing_input_files(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError, match="trades file"):
+        diagnose_mdd_round1(
+            trades_file=tmp_path / "missing_trades.csv",
+            equity_curve_file=tmp_path / "equity.csv",
+            drawdown_file=tmp_path / "drawdown.csv",
+            window_start="2026-02-28 17:30:00",
+            window_end="2026-03-04 00:30:00",
+        )
+
+
+def test_diagnose_mdd_round1_rejects_empty_trades(tmp_path: Path) -> None:
+    trades = tmp_path / "trades.csv"
+    equity = tmp_path / "equity.csv"
+    drawdown = tmp_path / "drawdown.csv"
+    pd.DataFrame(columns=["symbol", "entry_time", "exit_time", "pnl"]).to_csv(trades, index=False)
+    pd.DataFrame([{"time": "2026-03-01 00:00:00", "equity": 10000.0}]).to_csv(equity, index=False)
+    pd.DataFrame([{"start_time": "2026-03-01 00:00:00", "trough_time": "2026-03-01 01:00:00"}]).to_csv(drawdown, index=False)
+
+    with pytest.raises(ValueError, match="trades file is empty"):
+        diagnose_mdd_round1(
+            trades_file=trades,
+            equity_curve_file=equity,
+            drawdown_file=drawdown,
+            window_start="2026-02-28 17:30:00",
+            window_end="2026-03-04 00:30:00",
+        )
+
+
+def test_diagnose_mdd_round1_reports_empty_window_when_no_overlap(tmp_path: Path) -> None:
+    trades = tmp_path / "trades.csv"
+    equity = tmp_path / "equity.csv"
+    drawdown = tmp_path / "drawdown.csv"
+    pd.DataFrame(
+        [
+            {
+                "symbol": "SOLUSDT",
+                "side": "long",
+                "entry_time": "2026-02-20 00:00:00",
+                "exit_time": "2026-02-20 01:00:00",
+                "pnl": 12.5,
+                "reason": "stop_loss_intrabar",
+                "signal_type_1h": "red_bar_growing",
+                "signal_score": 0.67,
+                "vwap_score": 0.04,
+                "adx_1h": 20.0,
+                "bb_middle_slope_4h": -0.001,
+            }
+        ]
+    ).to_csv(trades, index=False)
+    pd.DataFrame([{"time": "2026-02-20 00:15:00", "equity": 10012.5}]).to_csv(equity, index=False)
+    pd.DataFrame([{"start_time": "2026-02-20 00:00:00", "trough_time": "2026-02-20 01:00:00"}]).to_csv(drawdown, index=False)
+
+    result = diagnose_mdd_round1(
+        trades_file=trades,
+        equity_curve_file=equity,
+        drawdown_file=drawdown,
+        window_start="2026-02-28 17:30:00",
+        window_end="2026-03-04 00:30:00",
+    )
+
+    assert result["window"]["overlap_trades"] == 0
+    assert result["window"]["closed_trades"] == 0
+    assert result["reason_breakdown"] == []
+    assert result["signal_type_breakdown"] == []
 
 
 def test_resolve_runtime_config_for_backtest_rejects_profile_with_strict_live_mode() -> None:
