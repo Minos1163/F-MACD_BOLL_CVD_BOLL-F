@@ -55,8 +55,10 @@ class TestTechnicalIndicators:
         vwap = TechnicalIndicators.calculate_vwap(high, low, close, volume)
         
         assert len(vwap) == len(close)
+        typical_price = (high + low + close) / 3
         for i in range(len(vwap)):
-            assert low[i] <= vwap[i] <= high[i]
+            expected = np.average(typical_price[: i + 1], weights=volume[: i + 1])
+            assert vwap[i] == pytest.approx(expected)
 
 
 class TestMacroLayer:
@@ -68,8 +70,8 @@ class TestMacroLayer:
     
     def test_bullish_permission(self, macro_layer):
         """测试多头许可"""
-        # 创建上涨趋势数据
-        close = np.linspace(100, 150, 100)
+        # 创建持续抬升的上涨趋势数据，避免被背离检测否决
+        close = 100 + (np.linspace(0, 1, 100) ** 2) * 50
         
         _, _, histogram = TechnicalIndicators.calculate_macd(close, 12, 26, 9)
         macd_line, signal_line, _ = TechnicalIndicators.calculate_macd(close, 12, 26, 9)
@@ -83,8 +85,8 @@ class TestMacroLayer:
     
     def test_bearish_permission(self, macro_layer):
         """测试空头许可"""
-        # 创建下跌趋势数据
-        close = np.linspace(150, 100, 100)
+        # 创建持续走弱的下跌趋势数据，避免被背离检测否决
+        close = 150 - (np.linspace(0, 1, 100) ** 2) * 50
         
         _, _, histogram = TechnicalIndicators.calculate_macd(close, 12, 26, 9)
         macd_line, signal_line, _ = TechnicalIndicators.calculate_macd(close, 12, 26, 9)
@@ -116,8 +118,8 @@ class TestCoreLayer:
     
     def test_identify_chop_regime(self, core_layer):
         """测试震荡识别"""
-        # 创建震荡数据
-        close = np.random.normal(125, 2, 200)
+        # 创建确定性的来回震荡数据，避免随机样本误入回调状态
+        close = 125 + np.tile(np.array([0, 2, -2, 1, -1]), 40)[:200]
         vwap = np.full(200, 125)
         
         regime = core_layer.identify_regime(close, vwap)

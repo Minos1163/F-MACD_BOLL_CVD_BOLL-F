@@ -1725,6 +1725,13 @@ class VWAPAnalyzer:
         return vwap
 
 
+# Backward-compatible exports for callers and tests that still import the
+# original generic layer names.
+MacroLayer = MacroLayer4H
+CoreLayer = CoreLayer1H
+MicroLayer = MicroLayer15m
+
+
 class ScoreFusionEngine:
     """分数融合引擎"""
     
@@ -1754,6 +1761,8 @@ class ScoreFusionEngine:
             # 回调中，提升动能分要求
             if momentum_score < 15:
                 total_score -= 5
+
+        total_score = max(0, min(100, total_score))
         
         # 确定等级
         if total_score >= self.config.score_s_grade_min:
