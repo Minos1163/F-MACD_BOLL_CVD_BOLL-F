@@ -289,14 +289,15 @@ class MACDStrategyV2Config:
     symbol_risk_watchlist_max_leverage: int = 0
     symbol_risk_watchlist_apply_session_scale_double: bool = False
     symbol_risk_watchlist_session_scale_multiplier: float = 0.80
+    vol_vwap_warn_position_scale: float = 0.50
 
     # 过热惩罚
     overheat_growing_penalty: float = 0.12
     overheat_ema_multiplier_threshold: float = 1.2
     overheat_vwap_score_threshold: float = 0.10
     min_vwap_score_for_entry: float = 0.10  # VWAP全局过滤
-    volume_vwap_both_low_min_score_vol: float = 0.05
-    volume_vwap_both_low_min_vwap_score: float = 0.10
+    vol_vwap_warn_min_score_vol: float = 0.05
+    vol_vwap_warn_min_vwap_score: float = 0.10
     
     # 止损配置
     use_dynamic_stop: bool = True
@@ -4499,6 +4500,15 @@ class MACDStrategyV2Engine:
             rsi_spring_threshold_override_score_bonus=float(spring_override["score_bonus"]),
             rsi_spring_threshold_override_min_signal_score=float(spring_override["threshold"]),
         )
+        vol_vwap_warn = (
+            score_vol < float(self.config.vol_vwap_warn_min_score_vol)
+            and vwap_score <= float(self.config.vol_vwap_warn_min_vwap_score)
+        )
+        debug_details.update(
+            vol_vwap_warn=bool(vol_vwap_warn),
+            vol_vwap_warn_min_score_vol=float(self.config.vol_vwap_warn_min_score_vol),
+            vol_vwap_warn_min_vwap_score=float(self.config.vol_vwap_warn_min_vwap_score),
+        )
         trial_short_promotion_eval = self._evaluate_trial_short_below_structure_continuation_promotion(
             primary_mode=primary_mode,
             trade_direction=trade_direction,
@@ -4549,31 +4559,6 @@ class MACDStrategyV2Engine:
                     f'{self.config.flip_bearish_normal_ema_min_signal_score:.2f})'
                 ),
                 score=score,
-                signal_type_1h=signal_type_1h,
-                entry_type_15m=entry_type_15m,
-                entry_score_15m=entry_score_15m,
-                vwap_score=vwap_score,
-                vwap_deviation=vwap_deviation,
-                ema_multiplier=ema_multiplier,
-                ema_structure_status=ema_status,
-                enhancement_score=enhancement_score,
-                is_4h_enhanced=is_4h_enhanced,
-                details=self._build_debug_details(
-                    **debug_details,
-                ),
-            )
-        
-        # ========== Step 7: 组合否决检查 ==========
-        # V6: 成交量 + VWAP 双低
-        if (
-            score_vol < float(self.config.volume_vwap_both_low_min_score_vol)
-            and vwap_score <= float(self.config.volume_vwap_both_low_min_vwap_score)
-        ):
-            return self._neutral_signal(
-                reason='volume_vwap_both_low',
-                score=score,
-                veto_type=VetoType.VOLUME_VWAP_BOTH_LOW,
-                veto_reason="成交量与VWAP评分双低",
                 signal_type_1h=signal_type_1h,
                 entry_type_15m=entry_type_15m,
                 entry_score_15m=entry_score_15m,
@@ -4828,6 +4813,9 @@ class MACDStrategyV2Engine:
             'score_vwap': score_vwap,
             'score_15m': score_15m,
             'score_volume': score_vol,
+            'vol_vwap_warn': bool(vol_vwap_warn),
+            'vol_vwap_warn_min_score_vol': float(self.config.vol_vwap_warn_min_score_vol),
+            'vol_vwap_warn_min_vwap_score': float(self.config.vol_vwap_warn_min_vwap_score),
             'overheat_penalty': overheat_penalty,
             'legacy_4h_boost': legacy_4h_boost,
             'effective_4h_score': effective_4h_score,

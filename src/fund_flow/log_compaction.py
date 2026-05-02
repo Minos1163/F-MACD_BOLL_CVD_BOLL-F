@@ -33,6 +33,13 @@ _METADATA_SCALAR_KEYS = (
     "pnl_pct",
     "regime_adx",
     "regime_atr_pct",
+    "vol_vwap_warn",
+    "vol_vwap_warn_position_scaled",
+    "vol_vwap_warn_position_scale",
+    "vol_vwap_warn_original_portion",
+    "vol_vwap_warn_adjusted_portion",
+    "score_volume",
+    "vwap_score",
 )
 
 _METADATA_OBJECT_KEYS = ("risk_plan", "stop_trigger", "pretrade_risk_gate", "leverage_model")

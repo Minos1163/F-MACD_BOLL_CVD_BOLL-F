@@ -713,12 +713,12 @@ class FundFlowDecisionEngine:
                     1,
                     int(self._to_float(position_mgmt_cfg.get("green_bar_growing_probe_max_leverage"), 2)),
                 ),
-                volume_vwap_both_low_min_score_vol=self._to_float(
-                    filter_cfg.get("volume_vwap_both_low_min_score_vol"),
+                vol_vwap_warn_min_score_vol=self._to_float(
+                    filter_cfg.get("vol_vwap_warn_min_score_vol", filter_cfg.get("volume_vwap_both_low_min_score_vol")),
                     0.05,
                 ),
-                volume_vwap_both_low_min_vwap_score=self._to_float(
-                    filter_cfg.get("volume_vwap_both_low_min_vwap_score"),
+                vol_vwap_warn_min_vwap_score=self._to_float(
+                    filter_cfg.get("vol_vwap_warn_min_vwap_score", filter_cfg.get("volume_vwap_both_low_min_vwap_score")),
                     0.10,
                 ),
                 rsi_spring_recent_extreme_lookback=max(2, int(self._to_float(rsi_cfg.get("spring_recent_extreme_lookback"), 6))),
@@ -1010,6 +1010,13 @@ class FundFlowDecisionEngine:
                 short_filter_max_oi_delta_ratio=self._to_float(v2_cfg.get("short_quality_filter", {}).get("max_oi_delta_ratio"), 0.0),
                 short_filter_min_vwap_deviation=self._to_float(v2_cfg.get("short_quality_filter", {}).get("min_vwap_deviation"), 0.005),
             )
+            self.vol_vwap_warn_position_scale = max(
+                0.0,
+                min(
+                    1.0,
+                    self._to_float(position_mgmt_cfg.get("vol_vwap_warn_position_scale"), 0.50),
+                ),
+            )
             self.macd_v2_engine = MACDStrategyV2Engine(self.macd_v2_config)
             regime_state_cfg = v2_cfg.get("regime_state_machine", {}) if isinstance(v2_cfg.get("regime_state_machine"), dict) else {}
             self.macd_4h_regime_state_cfg = {
@@ -1064,6 +1071,7 @@ class FundFlowDecisionEngine:
             self.macd_v2_config = None
             self.macd_v2_engine = None
             self.macd_4h_regime_state_cfg = {"enabled": False}
+            self.vol_vwap_warn_position_scale = 0.50
     
     def _parse_default_weights(self, dw_cfg: Dict[str, Any], prefix: str) -> Dict[str, float]:
         """
@@ -1716,6 +1724,7 @@ class FundFlowDecisionEngine:
         local_metadata["rsi_probe_mode"] = rsi_probe_mode
         local_metadata["competition_score"] = self._resolve_macd_v2_competition_score(signal, macd_v2_engine)
         local_metadata["final_leverage_after_rsi"] = leverage
+        portion = self._apply_macd_v2_vol_vwap_warn_position_scale(portion, signal, local_metadata)
         local_metadata["final_portion_after_rsi"] = portion
         local_metadata["entry_type_15m"] = local_metadata.get("entry_type_15m") or f"regime_{regime_state.get('phase', 'neutral')}"
         local_metadata["macd_4h_regime_entry"] = True
@@ -1920,6 +1929,30 @@ class FundFlowDecisionEngine:
             multiplier = 1.10 + (0.05 if entry_type in {"rsi_spring", "rsi_neutral_resume"} else 0.0)
             return score * multiplier
         return score
+
+    def _apply_macd_v2_vol_vwap_warn_position_scale(
+        self,
+        portion: float,
+        signal: MACDSignalV2,
+        metadata: Dict[str, Any],
+    ) -> float:
+        details = signal.details if isinstance(signal.details, dict) else {}
+        warn = bool(details.get("vol_vwap_warn", False))
+        metadata["vol_vwap_warn"] = warn
+        metadata["score_volume"] = self._to_float(details.get("score_volume"), metadata.get("score_volume", 0.0))
+        metadata["vwap_score"] = self._to_float(details.get("vwap_score"), metadata.get("vwap_score", signal.vwap_score))
+        metadata["vol_vwap_warn_position_scaled"] = False
+        if not warn:
+            return portion
+
+        original_portion = max(0.0, float(portion or 0.0))
+        scale = max(0.0, min(1.0, self._to_float(getattr(self, "vol_vwap_warn_position_scale", 0.50), 0.50)))
+        adjusted_portion = original_portion * scale
+        metadata["vol_vwap_warn_position_scaled"] = True
+        metadata["vol_vwap_warn_position_scale"] = scale
+        metadata["vol_vwap_warn_original_portion"] = original_portion
+        metadata["vol_vwap_warn_adjusted_portion"] = adjusted_portion
+        return adjusted_portion
 
     def _apply_symbol_side_override(
         self,
@@ -4447,6 +4480,7 @@ class FundFlowDecisionEngine:
                 rsi_conflict_portion_mult=float((signal.details or {}).get("rsi_conflict_portion_mult", 0.70) or 0.70),
                 rsi_probe_mode=self._resolve_macd_v2_probe_mode(signal, macd_v2_engine),
             )
+            portion = self._apply_macd_v2_vol_vwap_warn_position_scale(portion, signal, metadata)
             metadata["session_risk"] = {
                 "position_scale": float(session_position_scale),
                 "state": str(signal.vwap_state or signal.signal_type_1h or ""),
@@ -4572,6 +4606,7 @@ class FundFlowDecisionEngine:
                 rsi_conflict_portion_mult=float((signal.details or {}).get("rsi_conflict_portion_mult", 0.70) or 0.70),
                 rsi_probe_mode=self._resolve_macd_v2_probe_mode(signal, macd_v2_engine),
             )
+            portion = self._apply_macd_v2_vol_vwap_warn_position_scale(portion, signal, metadata)
             metadata["session_risk"] = {
                 "position_scale": float(session_position_scale),
                 "state": str(signal.vwap_state or signal.signal_type_1h or ""),

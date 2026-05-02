@@ -107,6 +107,9 @@ class PapiTpSlManager:
         sl = cfg.stop_loss_price
         tp = cfg.take_profit_price
 
+        if cfg.take_profit_price is None and cfg.take_profit_pct is None and not cfg.take_profit_levels:
+            return sl, None
+
         # 优先使用 stop_loss + RR 反算 take_profit（当 take_profit_pct 未提供或非常小时）
         rr = cfg.rr_ratio if cfg.rr_ratio is not None else 1.0
 
@@ -187,6 +190,7 @@ class PapiTpSlManager:
         order: Dict[str, Any] = {
             "symbol": cfg.symbol,
             "side": order_side,
+            "algoType": "CONDITIONAL",
             "workingType": "MARK_PRICE",
             "timeInForce": "GTC",
         }
@@ -208,9 +212,8 @@ class PapiTpSlManager:
                 order["quantity"] = qty
         order.update(
             {
-                "strategyType": "STOP",
-                "stopPrice": self._round(stop_price, cfg.symbol),
-                "price": self._round(stop_price, cfg.symbol),
+                "type": "STOP_MARKET",
+                "triggerPrice": self._round(stop_price, cfg.symbol),
             }
         )
         return order
@@ -238,9 +241,8 @@ class PapiTpSlManager:
             order["quantity"] = tp_qty
             order.update(
                 {
-                    "strategyType": "TAKE_PROFIT",
-                    "stopPrice": self._round(stop_price, cfg.symbol),
-                    "price": self._round(stop_price, cfg.symbol),
+                    "type": "TAKE_PROFIT_MARKET",
+                    "triggerPrice": self._round(stop_price, cfg.symbol),
                 }
             )
             orders.append(order)
@@ -258,7 +260,7 @@ class PapiTpSlManager:
 
     def _order_endpoint(self) -> str:
         base = self.broker.PAPI_BASE
-        return f"{base}/papi/v1/um/conditional/order"
+        return f"{base}/papi/v1/um/algo/order"
 
     def _round(self, price: float, symbol: str) -> float:
         tick_size = self._get_tick_size(symbol)

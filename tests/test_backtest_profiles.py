@@ -398,13 +398,13 @@ def test_build_strategy_config_reads_flip_bullish_sniper_settings() -> None:
     assert strategy_config.flip_bullish_cooling_reject_if_15m_rsi_above == pytest.approx(65.0, rel=1e-6)
 
 
-def test_build_strategy_config_reads_volume_vwap_combo_hotfix_settings() -> None:
+def test_build_strategy_config_reads_vol_vwap_warn_settings() -> None:
     runtime_cfg = {
         "fund_flow": {
             "macd_mtf_strategy_v2": {
                 "entry_filters": {
-                    "volume_vwap_both_low_min_score_vol": 0.0,
-                    "volume_vwap_both_low_min_vwap_score": 0.0,
+                    "vol_vwap_warn_min_score_vol": 0.0,
+                    "vol_vwap_warn_min_vwap_score": 0.0,
                     "disable_red_bar_shrinking_long_dual_support_entries": False,
                     "disable_green_bar_shrinking_short_dual_pressure_entries": False,
                     "flip_bullish_cooling": {
@@ -423,8 +423,8 @@ def test_build_strategy_config_reads_volume_vwap_combo_hotfix_settings() -> None
 
     strategy_config = build_strategy_config(runtime_cfg)
 
-    assert strategy_config.volume_vwap_both_low_min_score_vol == pytest.approx(0.0, rel=1e-6)
-    assert strategy_config.volume_vwap_both_low_min_vwap_score == pytest.approx(0.0, rel=1e-6)
+    assert strategy_config.vol_vwap_warn_min_score_vol == pytest.approx(0.0, rel=1e-6)
+    assert strategy_config.vol_vwap_warn_min_vwap_score == pytest.approx(0.0, rel=1e-6)
     assert strategy_config.disable_red_bar_shrinking_long_dual_support_entries is False
     assert strategy_config.disable_green_bar_shrinking_short_dual_pressure_entries is False
     assert strategy_config.flip_bullish_cooling_hard_rsi_buffer == pytest.approx(4.0, rel=1e-6)
@@ -1011,6 +1011,48 @@ def test_backtest_candidate_sort_key_prefers_sovereign_competition_score() -> No
     candidates.sort(key=engine._candidate_sort_key, reverse=True)
 
     assert [symbol for symbol, _analysis in candidates] == ["BTCUSDT", "SOLUSDT"]
+
+
+def test_backtest_position_size_scales_vol_vwap_warn_like_live() -> None:
+    engine = BacktestEngine(
+        BacktestConfig(
+            symbols=["SOLUSDT"],
+            initial_capital=10000.0,
+            default_target_portion=0.20,
+            max_symbol_position_portion=0.50,
+            min_open_portion=0.01,
+        ),
+        MACDStrategyV2Config(
+            vol_vwap_warn_position_scale=0.50,
+            vwap_score_tier_apply_to_states=[],
+            symbol_risk_watchlist_symbols=[],
+        ),
+        runtime_config={},
+    )
+
+    normal_position, _normal_leverage = engine.calculate_position_size(
+        symbol="SOLUSDT",
+        signal_score=0.82,
+        price=100.0,
+        ema_multiplier=1.0,
+        signal_type_1h="red_bar_growing",
+        vwap_score=0.04,
+        vwap_state="long_dual_support",
+        vol_vwap_warn=False,
+    )
+    warn_position, _warn_leverage = engine.calculate_position_size(
+        symbol="SOLUSDT",
+        signal_score=0.82,
+        price=100.0,
+        ema_multiplier=1.0,
+        signal_type_1h="red_bar_growing",
+        vwap_score=0.04,
+        vwap_state="long_dual_support",
+        vol_vwap_warn=True,
+    )
+
+    assert normal_position > 0
+    assert warn_position == pytest.approx(normal_position * 0.50, rel=1e-9)
 
 
 def test_backtest_capacity_examples_capture_sovereign_competition_metadata() -> None:

@@ -186,6 +186,69 @@ def test_finalize_entries_ai_review_rejects_weak_trend_candidate_without_structu
     assert bot._executed == []
 
 
+def test_finalize_entries_skips_ai_final_review_when_ai_review_disabled():
+    bot = _make_bot(active_symbols={})
+    bot.position_data = SimpleNamespace(get_all_positions=lambda: {})
+    bot._ai_review_mode_supports_flat_candidates = lambda _mode: True
+    calls = []
+
+    def _decide(**kwargs):
+        calls.append(kwargs)
+        return _decision_with_md(
+            "ONDOUSDT",
+            FundFlowOperation.SELL,
+            {
+                "engine": "TREND",
+                "ds_source": "ai_weight_router",
+                "ds_confidence": 0.0,
+                "test_score": 0.667,
+            },
+        )
+
+    bot.fund_flow_decision_engine = SimpleNamespace(decide=_decide)
+    context = {
+        "pending_new_entries": [
+            {
+                "symbol": "ONDOUSDT",
+                "score": 0.667,
+                "max_active_symbols": 2,
+                "ai_shortlist_rank": 1,
+                "decision": _decision_with_md(
+                    "ONDOUSDT",
+                    FundFlowOperation.SELL,
+                    {"engine": "TREND", "test_score": 0.667},
+                ),
+                "position": None,
+                "current_price": 0.268,
+                "flow_context": {
+                    "regime": "TREND",
+                    "flow_confirm": False,
+                    "trap_score": 0.5,
+                    "trap_confirmed": False,
+                    "capture_confirm_3m_side": "NONE",
+                },
+                "trigger_context": {},
+                "portfolio": {},
+                "account_summary": {"available_balance": 1000.0},
+            }
+        ],
+        "block_new_entries_due_to_protection_gap": False,
+        "protection_gap_symbols": [],
+        "max_active_symbols": 2,
+        "account_summary": {"available_balance": 1000.0},
+        "ai_gate_enabled": True,
+        "ai_review_cfg": {"enabled": False, "flat_top_n": 3},
+        "ai_review_mode": "flat_candidates",
+    }
+
+    bot._finalize_entries(context)
+
+    assert calls == []
+    assert len(bot._executed) == 1
+    assert bot._executed[0]["symbol"] == "ONDOUSDT"
+    assert bot._executed[0]["decision"].operation == FundFlowOperation.SELL
+
+
 def test_ai_entry_guard_blocks_weak_same_side_add():
     bot = TradingBot.__new__(TradingBot)
     allowed, reason = bot._ai_entry_guard(

@@ -50,10 +50,10 @@
       "JSTUSDT",
       "FETUSDT"
     ],
-    "min_leverage": 2,
-    "default_leverage": 3,
-    "max_leverage": 4,
-    "high_signal_leverage_cap": 3,
+    "min_leverage": 3,
+    "default_leverage": 4,
+    "max_leverage": 5,
+    "high_signal_leverage_cap": 5,
     "min_position_percent": 12,
     "max_position_percent": 60,
     "reserve_percent": 20
@@ -268,11 +268,23 @@
         "flip_bullish": -0.10
       }
     },
-    "min_leverage": 2,
-    "default_leverage": 3,
-    "max_leverage": 4,
-    "high_signal_leverage_cap": 3,
+    "min_leverage": 3,
+    "default_leverage": 4,
+    "max_leverage": 5,
+    "high_signal_leverage_cap": 5,
     "strict_leverage_sync": true,
+    "account_risk": {
+      "enabled": true,
+      "target_max_drawdown_pct": 7.0,
+      "strategy_reference_mdd_pct": 8.23,
+      "exposure_scaler_enabled": true,
+      "exposure_scaler_value": 0.85,
+      "leverage_scaler_enabled": true,
+      "leverage_scaler_value": 0.85,
+      "leverage_rounding": "floor",
+      "min_scaled_leverage": 3,
+      "metadata_enabled": true
+    },
     "price_deviation_limit_percent": 1.0,
     "open_threshold": 0.38,
     "long_open_threshold": 0.09,
@@ -305,7 +317,7 @@
       "APTUSDT"
     ],
     "skip_unconfigured_positions": true,
-    "take_profit_pct": 0.0,
+    "take_profit_pct": 0.02,
     "breakeven_enabled": true,
     "breakeven_trigger_pnl_ratio": 0.008,
     "breakeven_lock_ratio": 0.002,
@@ -476,6 +488,8 @@
         "disable_green_bar_growing_entries": false,
         "disable_green_bar_shrinking_short_dual_pressure_entries": false,
         "disable_red_bar_shrinking_long_dual_support_entries": false,
+        "vol_vwap_warn_min_score_vol": 0.05,
+        "vol_vwap_warn_min_vwap_score": 0.10,
         "min_signal_score": 0.680,
         "min_vwap_score_for_entry": 0.0,
         "symbol_signal_overrides": []
@@ -506,7 +520,8 @@
         "red_bar_growing_probe_max_leverage": 2,
         "enable_green_bar_growing_probe_overlay": true,
         "green_bar_growing_probe_position_penalty": 0.10,
-        "green_bar_growing_probe_max_leverage": 2
+        "green_bar_growing_probe_max_leverage": 2,
+        "vol_vwap_warn_position_scale": 0.50
       },
       "exit_management": {
         "enable_priority_signal_shrink_exit": true,
@@ -788,13 +803,13 @@
         "default_target_portion": 0.6,
         "add_position_portion": 0.6,
         "max_symbol_position_portion": 0.6,
-        "default_leverage": 3,
-        "max_leverage": 4,
-        "min_leverage": 2,
+        "default_leverage": 4,
+        "max_leverage": 5,
+        "min_leverage": 3,
         "long_open_threshold": 0.095,
         "short_open_threshold": 0.08,
         "close_threshold": 0.3,
-        "take_profit_pct": 0.0,
+        "take_profit_pct": 0.02,
         "take_profit_pct_levels": [],
         "take_profit_reduce_pct_levels": [],
         "dynamic_stop_loss_enabled": true,
@@ -838,9 +853,9 @@
         "default_target_portion": 0.6,
         "add_position_portion": 0.6,
         "max_symbol_position_portion": 0.6,
-        "default_leverage": 3,
-        "max_leverage": 4,
-        "min_leverage": 2,
+        "default_leverage": 4,
+        "max_leverage": 5,
+        "min_leverage": 3,
         "long_open_threshold": 0.5,
         "short_open_threshold": 0.42,
         "close_threshold": 0.55,
@@ -1253,8 +1268,8 @@
                   "flip_bullish_min_vwap_score": 0.0,
                   "enable_flip_bullish_strict_filter": false,
                   "enable_flip_bullish_cvd_context_filter": false,
-                  "volume_vwap_both_low_min_score_vol": 0.0,
-                  "volume_vwap_both_low_min_vwap_score": 0.0,
+                  "vol_vwap_warn_min_score_vol": 0.0,
+                  "vol_vwap_warn_min_vwap_score": 0.0,
                   "disable_green_bar_shrinking_short_dual_pressure_entries": false,
                   "disable_red_bar_shrinking_long_dual_support_entries": false,
                   "preflip_trial_min_signal_score": 0.66,
@@ -1272,7 +1287,8 @@
                 "position_management": {
                   "enable_green_bar_growing_probe_overlay": true,
                   "green_bar_growing_probe_position_penalty": 0.10,
-                  "green_bar_growing_probe_max_leverage": 2
+                  "green_bar_growing_probe_max_leverage": 2,
+                  "vol_vwap_warn_position_scale": 0.50
                 },
                 "short_quality_filter": {
                   "enabled": false

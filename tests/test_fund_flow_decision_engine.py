@@ -1932,24 +1932,182 @@ def test_rule_stop_trigger_short_runner_exits_on_below_zero_golden_cross():
     assert stop_state["exit_trigger"] == "macd_golden_cross_below_zero"
 
 
-def test_macd_v2_volume_vwap_combo_thresholds_propagate_from_config() -> None:
+def test_macd_v2_vol_vwap_warn_settings_propagate_from_config() -> None:
     cfg = _cfg()
     cfg["fund_flow"]["strategy_mode"] = "macd_mtf_strategy_v2"
     cfg["fund_flow"]["macd_mtf_strategy_v2"] = {
         "entry_filters": {
-            "volume_vwap_both_low_min_score_vol": 0.02,
-            "volume_vwap_both_low_min_vwap_score": 0.02,
+            "vol_vwap_warn_min_score_vol": 0.02,
+            "vol_vwap_warn_min_vwap_score": 0.03,
             "disable_red_bar_shrinking_long_dual_support_entries": False,
             "disable_green_bar_shrinking_short_dual_pressure_entries": False,
+        },
+        "position_management": {
+            "vol_vwap_warn_position_scale": 0.25,
         },
     }
 
     engine = FundFlowDecisionEngine(cfg)
 
-    assert engine.macd_v2_config.volume_vwap_both_low_min_score_vol == pytest.approx(0.02, rel=1e-6)
-    assert engine.macd_v2_config.volume_vwap_both_low_min_vwap_score == pytest.approx(0.02, rel=1e-6)
+    assert engine.macd_v2_config.vol_vwap_warn_min_score_vol == pytest.approx(0.02, rel=1e-6)
+    assert engine.macd_v2_config.vol_vwap_warn_min_vwap_score == pytest.approx(0.03, rel=1e-6)
+    assert engine.vol_vwap_warn_position_scale == pytest.approx(0.25, rel=1e-6)
     assert engine.macd_v2_config.disable_red_bar_shrinking_long_dual_support_entries is False
     assert engine.macd_v2_config.disable_green_bar_shrinking_short_dual_pressure_entries is False
+
+
+def test_macd_v2_buy_portion_is_scaled_when_vol_vwap_warn_is_set() -> None:
+    cfg = _cfg()
+    cfg["fund_flow"]["strategy_mode"] = "macd_mtf_strategy_v2"
+    cfg["fund_flow"]["macd_mtf_strategy_v2"] = {
+        "position_management": {"vol_vwap_warn_position_scale": 0.50},
+    }
+    engine = FundFlowDecisionEngine(cfg)
+
+    class _StubStrategyEngine:
+        def analyze(self, **_kwargs):
+            return MACDSignalV2(
+                direction="long",
+                signal_score=0.82,
+                signal_type_1h="red_bar_growing",
+                entry_type_15m="rsi_confirmed",
+                vwap_score=0.04,
+                details={
+                    "vol_vwap_warn": True,
+                    "score_volume": 0.033,
+                    "vwap_score": 0.04,
+                    "rsi_exposure_mult": 1.0,
+                    "rsi_macd_conflict": False,
+                },
+            )
+
+        def calculate_leverage(self, *args, **kwargs):
+            return 3
+
+        def resolve_session_position_scale(self, *args, **kwargs):
+            return 1.0
+
+        def resolve_symbol_risk_session_scale(self, *args, **kwargs):
+            return 1.0
+
+        def calculate_position_portion(self, *args, **kwargs):
+            return 0.20
+
+        def is_watchlist_symbol(self, symbol):
+            return False
+
+        def resolve_4h_shrink_exit_policy(self, **kwargs):
+            return {"active": False}
+
+    engine._macd_v2_engine_for_symbol = lambda _symbol: (_StubStrategyEngine(), None)
+    engine._build_macd_v2_4h_regime_state = lambda **_kwargs: {
+        "side_override_mode": "BOTH",
+        "state": "trend",
+        "phase": "active",
+        "side": "long",
+        "close_on_reverse": False,
+    }
+
+    market_flow_context = {
+        "timeframes": {
+            "15m": {"timestamp": 1714132800, "macd_hist_series": [0.01, 0.02], "close": 101.0},
+            "1h": {"timestamp": 1714132800, "macd_hist_series": [0.01, 0.02], "vwap": 100.0, "close": 101.0},
+            "4h": {"timestamp": 1714132800, "macd_hist_series": [0.01, 0.02], "close": 101.0},
+        }
+    }
+
+    decision = engine._decide_macd_v2_strategy(
+        "ZROUSDT",
+        {"positions": {}},
+        101.0,
+        market_flow_context,
+        {"regime": "trend", "adx": 24.0, "atr_pct": 0.01},
+    )
+
+    assert decision.operation == Operation.BUY
+    assert decision.target_portion_of_balance == pytest.approx(0.10, rel=1e-6)
+    assert decision.metadata["vol_vwap_warn"] is True
+    assert decision.metadata["vol_vwap_warn_position_scaled"] is True
+    assert decision.metadata["vol_vwap_warn_position_scale"] == pytest.approx(0.50, rel=1e-6)
+    assert decision.metadata["vol_vwap_warn_original_portion"] == pytest.approx(0.20, rel=1e-6)
+    assert decision.metadata["vol_vwap_warn_adjusted_portion"] == pytest.approx(0.10, rel=1e-6)
+    assert decision.metadata["score_volume"] == pytest.approx(0.033, rel=1e-6)
+    assert decision.metadata["vwap_score"] == pytest.approx(0.04, rel=1e-6)
+
+
+def test_macd_v2_sell_portion_is_not_scaled_without_vol_vwap_warn() -> None:
+    cfg = _cfg()
+    cfg["fund_flow"]["strategy_mode"] = "macd_mtf_strategy_v2"
+    cfg["fund_flow"]["macd_mtf_strategy_v2"] = {
+        "position_management": {"vol_vwap_warn_position_scale": 0.50},
+    }
+    engine = FundFlowDecisionEngine(cfg)
+
+    class _StubStrategyEngine:
+        def analyze(self, **_kwargs):
+            return MACDSignalV2(
+                direction="short",
+                signal_score=0.82,
+                signal_type_1h="green_bar_growing",
+                entry_type_15m="rsi_confirmed",
+                vwap_score=0.42,
+                details={
+                    "vol_vwap_warn": False,
+                    "score_volume": 0.10,
+                    "vwap_score": 0.42,
+                    "rsi_exposure_mult": 1.0,
+                    "rsi_macd_conflict": False,
+                },
+            )
+
+        def calculate_leverage(self, *args, **kwargs):
+            return 3
+
+        def resolve_session_position_scale(self, *args, **kwargs):
+            return 1.0
+
+        def resolve_symbol_risk_session_scale(self, *args, **kwargs):
+            return 1.0
+
+        def calculate_position_portion(self, *args, **kwargs):
+            return 0.20
+
+        def is_watchlist_symbol(self, symbol):
+            return False
+
+        def resolve_4h_shrink_exit_policy(self, **kwargs):
+            return {"active": False}
+
+    engine._macd_v2_engine_for_symbol = lambda _symbol: (_StubStrategyEngine(), None)
+    engine._build_macd_v2_4h_regime_state = lambda **_kwargs: {
+        "side_override_mode": "BOTH",
+        "state": "trend",
+        "phase": "active",
+        "side": "short",
+        "close_on_reverse": False,
+    }
+
+    market_flow_context = {
+        "timeframes": {
+            "15m": {"timestamp": 1714132800, "macd_hist_series": [0.01, 0.02], "close": 99.0},
+            "1h": {"timestamp": 1714132800, "macd_hist_series": [0.01, 0.02], "vwap": 100.0, "close": 99.0},
+            "4h": {"timestamp": 1714132800, "macd_hist_series": [0.01, 0.02], "close": 99.0},
+        }
+    }
+
+    decision = engine._decide_macd_v2_strategy(
+        "DOGEUSDT",
+        {"positions": {}},
+        99.0,
+        market_flow_context,
+        {"regime": "trend", "adx": 24.0, "atr_pct": 0.01},
+    )
+
+    assert decision.operation == Operation.SELL
+    assert decision.target_portion_of_balance == pytest.approx(0.20, rel=1e-6)
+    assert decision.metadata["vol_vwap_warn"] is False
+    assert decision.metadata["vol_vwap_warn_position_scaled"] is False
+    assert "vol_vwap_warn_original_portion" not in decision.metadata
 
 
 def test_macd_v2_neutral_signal_triggers_macd_1h_flip_exit_close() -> None:

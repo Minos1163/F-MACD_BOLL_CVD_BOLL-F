@@ -915,7 +915,7 @@ def test_analyze_vwap_hard_block_only_triggers_beyond_3pct_deviation() -> None:
     assert hard_block_signal.veto_type.value == "vwap_hard_block"
 
 
-def test_analyze_volume_vwap_combo_veto_respects_relaxed_thresholds() -> None:
+def test_analyze_volume_vwap_warn_does_not_block_high_score_signal() -> None:
     config = MACDStrategyV2Config(
         weight_1h_direction=0.15,
         weight_4h_direction=0.40,
@@ -936,8 +936,8 @@ def test_analyze_volume_vwap_combo_veto_respects_relaxed_thresholds() -> None:
         disable_green_bar_growing_entries=False,
         primary_direction_timeframe="4h",
     )
-    config.volume_vwap_both_low_min_score_vol = 0.02
-    config.volume_vwap_both_low_min_vwap_score = 0.02
+    config.vol_vwap_warn_min_score_vol = 0.05
+    config.vol_vwap_warn_min_vwap_score = 0.10
     engine = MACDStrategyV2Engine(config)
 
     signal = engine.analyze(
@@ -969,6 +969,69 @@ def test_analyze_volume_vwap_combo_veto_respects_relaxed_thresholds() -> None:
     assert signal.direction == "long"
     assert signal.veto_type is not None
     assert signal.veto_type.value == "none"
+    assert signal.details["vol_vwap_warn"] is True
+    assert signal.details["score_volume"] == pytest.approx(0.033, abs=1e-6)
+    assert signal.details["vwap_score"] <= 0.10
+
+
+def test_analyze_low_score_vol_vwap_warn_still_reaches_threshold_check() -> None:
+    config = MACDStrategyV2Config(
+        weight_1h_direction=0.0,
+        weight_4h_direction=0.0,
+        weight_4h_enhancement=0.0,
+        weight_rsi_rhythm=0.0,
+        weight_vwap=0.0,
+        weight_15m_entry=0.0,
+        weight_volume=0.10,
+        min_signal_score=0.68,
+        min_entry_score=0.68,
+        red_bar_growing_min_signal_score=0.68,
+        flip_bullish_min_signal_score=0.68,
+        min_vwap_score_for_entry=0.0,
+        overheat_growing_penalty=0.0,
+        enable_flip_bullish_sniper=False,
+        enable_flip_bullish_cooling=False,
+        enable_flip_bullish_strict_filter=False,
+        disable_flip_bullish_entries=False,
+        disable_green_bar_growing_entries=False,
+        primary_direction_timeframe="4h",
+    )
+    config.vol_vwap_warn_min_score_vol = 0.05
+    config.vol_vwap_warn_min_vwap_score = 0.10
+    engine = MACDStrategyV2Engine(config)
+
+    signal = engine.analyze(
+        macd_hist_15m=np.array([-0.10, -0.05, 0.02, 0.05]),
+        macd_hist_1h=np.array([-0.20, -0.10, 0.05, 0.10]),
+        macd_hist_4h=np.array([-0.30, -0.15, -0.05, 0.20]),
+        idx_15m=3,
+        idx_1h=3,
+        idx_4h=3,
+        volume_ratio=0.7,
+        vwap=100.0,
+        structural_vwap=100.0,
+        close_price=100.6,
+        bb_middle_1h=100.0,
+        bb_upper_1h=110.0,
+        bb_lower_1h=90.0,
+        bb_middle_4h=99.0,
+        bb_upper_4h=109.0,
+        bb_lower_4h=89.0,
+        bb_middle_15m=100.0,
+        bb_upper_15m=103.0,
+        bb_lower_15m=97.0,
+        close_15m=100.6,
+        adx_1h=20.0,
+        adx_4h=22.0,
+        atr_1h=1.0,
+    )
+
+    assert signal.direction == "neutral"
+    assert signal.veto_type is not None
+    assert signal.veto_type.value != "volume_vwap_both_low"
+    assert signal.details["stage"] == "threshold_check"
+    assert signal.details["vol_vwap_warn"] is True
+    assert signal.details["reason"].startswith("信号评分低于阈值")
 
 
 def test_flip_bullish_strict_filter_softens_into_score_penalty() -> None:

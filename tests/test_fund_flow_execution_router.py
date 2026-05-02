@@ -1,6 +1,8 @@
 import math
 from pathlib import Path
 
+import pytest
+
 from src.fund_flow.attribution_engine import FundFlowAttributionEngine
 from src.fund_flow.execution_router import FundFlowExecutionRouter
 from src.fund_flow.models import FundFlowDecision, Operation, TimeInForce
@@ -19,10 +21,16 @@ class _FakeClient:
         self.calls = []
         self.protection_calls = []
         self.cancel_calls = []
+        self.leverage_calls = []
         self.broker = _DummyBroker()
+        self.position_gateway = self
 
     def format_quantity(self, _symbol, qty):
         return round(float(qty), 6)
+
+    def change_leverage(self, symbol, leverage):
+        self.leverage_calls.append({"symbol": symbol, "leverage": int(leverage)})
+        return {"leverage": int(leverage)}
 
     def _execute_order_v2(self, params, side, reduce_only):
         self.calls.append({"params": dict(params), "side": side, "reduce_only": reduce_only})
@@ -51,6 +59,28 @@ def _risk_cfg():
         "trading": {"default_leverage": 2, "max_leverage": 5},
         "fund_flow": {"min_open_portion": 0.1, "max_open_portion": 1.0},
     }
+
+
+def _account_risk_cfg():
+    cfg = _risk_cfg()
+    cfg["fund_flow"].update(
+        {
+            "min_leverage": 1,
+            "default_leverage": 3,
+            "max_leverage": 4,
+            "account_risk": {
+                "enabled": True,
+                "exposure_scaler_enabled": True,
+                "exposure_scaler_value": 0.85,
+                "leverage_scaler_enabled": True,
+                "leverage_scaler_value": 0.85,
+                "leverage_rounding": "floor",
+                "min_scaled_leverage": 1,
+                "metadata_enabled": True,
+            },
+        }
+    )
+    return cfg
 
 
 def test_open_ioc_fallback_to_gtc(tmp_path: Path):
@@ -183,6 +213,42 @@ def test_open_respects_entry_tif_override_gtc(tmp_path: Path):
     assert result["status"] == "pending"
     assert len(client.calls) == 1
     assert client.calls[0]["params"]["timeInForce"] == "GTC"
+
+
+def test_open_execution_uses_account_risk_scaled_portion_and_leverage(tmp_path: Path):
+    client = _FakeClient(
+        responses=[
+            {"status": "FILLED", "executedQty": "8.925", "orderId": 456},
+        ]
+    )
+    risk = FundFlowRiskEngine(_account_risk_cfg(), symbol_whitelist=["BTCUSDT"])
+    attr = FundFlowAttributionEngine(str(tmp_path))
+    router = FundFlowExecutionRouter(client, risk, attr)
+
+    decision = FundFlowDecision(
+        operation=Operation.BUY,
+        symbol="BTCUSDT",
+        target_portion_of_balance=0.35,
+        leverage=3,
+        max_price=100.0,
+        take_profit_price=110.0,
+        stop_loss_price=95.0,
+        time_in_force=TimeInForce.IOC,
+    )
+    risk.validate_decision(decision)
+    result = router.execute_decision(
+        decision=decision,
+        account_state={"available_balance": 1500.0},
+        current_price=100.0,
+        position=None,
+    )
+
+    assert result["status"] == "success"
+    assert result["margin"] == pytest.approx(446.25, rel=1e-9)
+    assert result["position_value"] == pytest.approx(892.5, rel=1e-9)
+    assert result["quantity"] == pytest.approx(8.925, rel=1e-9)
+    assert result["leverage"] == 2
+    assert client.leverage_calls == [{"symbol": "BTCUSDT", "leverage": 2}]
 
 
 def test_open_market_fallback_requires_double_gate_and_skips_gtc_for_ioc_policy(tmp_path: Path):

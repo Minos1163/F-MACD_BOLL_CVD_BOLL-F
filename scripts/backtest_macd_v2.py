@@ -598,8 +598,13 @@ def build_strategy_config(runtime_cfg: dict) -> MACDStrategyV2Config:
         enable_green_bar_growing_probe_overlay=bool(position_mgmt_cfg.get("enable_green_bar_growing_probe_overlay", False)),
         green_bar_growing_probe_position_penalty=float(position_mgmt_cfg.get("green_bar_growing_probe_position_penalty", 0.40)),
         green_bar_growing_probe_max_leverage=max(1, int(float(position_mgmt_cfg.get("green_bar_growing_probe_max_leverage", 2)))),
-        volume_vwap_both_low_min_score_vol=float(filter_cfg.get("volume_vwap_both_low_min_score_vol", 0.05)),
-        volume_vwap_both_low_min_vwap_score=float(filter_cfg.get("volume_vwap_both_low_min_vwap_score", 0.10)),
+        vol_vwap_warn_position_scale=float(position_mgmt_cfg.get("vol_vwap_warn_position_scale", 0.50)),
+        vol_vwap_warn_min_score_vol=float(
+            filter_cfg.get("vol_vwap_warn_min_score_vol", filter_cfg.get("volume_vwap_both_low_min_score_vol", 0.05))
+        ),
+        vol_vwap_warn_min_vwap_score=float(
+            filter_cfg.get("vol_vwap_warn_min_vwap_score", filter_cfg.get("volume_vwap_both_low_min_vwap_score", 0.10))
+        ),
         rsi_spring_recent_extreme_lookback=int(float(rsi_cfg.get("spring_recent_extreme_lookback", 6))),
         rsi_spring_recent_oversold=float(rsi_cfg.get("spring_recent_oversold", 40.0)),
         rsi_spring_recent_overbought=float(rsi_cfg.get("spring_recent_overbought", 60.0)),
@@ -1806,6 +1811,7 @@ class BacktestEngine:
         is_trial_entry: bool = False,
         entry_scale: float = 1.0,
         session_scale: float = 1.0,
+        vol_vwap_warn: bool = False,
     ) -> Tuple[float, int]:
         """计算仓位大小和杠杆"""
         if self.config.fixed_leverage is not None:
@@ -1832,6 +1838,9 @@ class BacktestEngine:
             entry_scale=entry_scale,
             session_scale=session_scale,
         )
+        if vol_vwap_warn:
+            scale = max(0.0, min(1.0, float(getattr(self.strategy_config, "vol_vwap_warn_position_scale", 0.50) or 0.50)))
+            position_pct *= scale
         if position_pct < self.config.min_open_portion:
             return 0.0, leverage
 
@@ -1969,6 +1978,7 @@ class BacktestEngine:
             is_trial_entry=bool(signal.is_trial_entry),
             entry_scale=float(signal.entry_scale or 1.0),
             session_scale=session_position_scale,
+            vol_vwap_warn=bool(signal_details.get("vol_vwap_warn", False)),
         )
         if position_value <= 0:
             self._bump_execution_reason("execute_reject_reasons", "position_value_zero")

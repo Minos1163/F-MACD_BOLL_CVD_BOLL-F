@@ -277,6 +277,7 @@ class TradingBot:
         self._pre_risk_exit_streak_by_pos: Dict[str, int] = {}
         self._dca_stage_by_pos: Dict[str, int] = {}
         self._winner_pyramid_stage_by_pos: Dict[str, int] = {}
+        self._protection_plan_by_pos: Dict[str, Dict[str, Any]] = {}
         self._opened_symbols_this_cycle: set[str] = set()
         self._volatility_spike_streak_by_symbol: Dict[str, int] = {}
         self._volatility_last_bucket_by_symbol: Dict[str, str] = {}
@@ -3781,6 +3782,31 @@ class TradingBot:
                     if isinstance(k, str) and isinstance(v, str):
                         conflict_reason[k.upper()] = v
             self._conflict_cooldown_reason_by_symbol = conflict_reason
+            raw_protection_plan = data.get("protection_plan_by_pos", {})
+            protection_plan: Dict[str, Dict[str, Any]] = {}
+            if isinstance(raw_protection_plan, dict):
+                for k, v in raw_protection_plan.items():
+                    if not isinstance(k, str) or not isinstance(v, dict):
+                        continue
+                    tp_levels_raw = v.get("tp_levels")
+                    tp_levels: List[Dict[str, float]] = []
+                    if isinstance(tp_levels_raw, list):
+                        for item in tp_levels_raw:
+                            if not isinstance(item, dict):
+                                continue
+                            try:
+                                price = float(item.get("price"))
+                                reduce_pct = float(item.get("reduce_pct"))
+                            except Exception:
+                                continue
+                            if price > 0 and reduce_pct > 0:
+                                tp_levels.append({"price": price, "reduce_pct": reduce_pct})
+                    protection_plan[k.upper()] = {
+                        "stop_loss_price": self._to_float(v.get("stop_loss_price"), 0.0) or None,
+                        "take_profit_price": self._to_float(v.get("take_profit_price"), 0.0) or None,
+                        "tp_levels": tp_levels,
+                    }
+            self._protection_plan_by_pos = protection_plan
         except Exception:
             # 状态文件损坏时忽略，避免启动失败。
             pass
@@ -3795,6 +3821,7 @@ class TradingBot:
             "peak_equity": self._peak_equity,
             "dca_stage_by_pos": self._dca_stage_by_pos,
             "winner_pyramid_stage_by_pos": self._winner_pyramid_stage_by_pos,
+            "protection_plan_by_pos": self._protection_plan_by_pos,
             "conflict_exit_streak_by_symbol": self._conflict_exit_streak_by_symbol,
             "conflict_cooldown_until_by_symbol": {
                 k: v.isoformat() for k, v in self._conflict_cooldown_until_by_symbol.items() if isinstance(v, datetime)
@@ -4829,7 +4856,7 @@ class TradingBot:
             is_reduce = bool(order.get("reduceOnly", False))
             is_close = bool(order.get("closePosition", False))
             order_type = str(order.get("type", "")).upper()
-            strategy_type = str(order.get("strategyType", "")).upper()
+            strategy_type = str(order.get("orderType") or order.get("strategyType") or "").upper()
             if "TAKE_PROFIT" in order_type or "STOP" in order_type:
                 continue
             if "TAKE_PROFIT" in strategy_type or "STOP" in strategy_type:
@@ -4878,7 +4905,7 @@ class TradingBot:
             is_reduce = bool(order.get("reduceOnly", False))
             is_close = bool(order.get("closePosition", False))
             order_type = str(order.get("type", "")).upper()
-            strategy_type = str(order.get("strategyType", "")).upper()
+            strategy_type = str(order.get("orderType") or order.get("strategyType") or "").upper()
             if "TAKE_PROFIT" in order_type or "STOP" in order_type:
                 continue
             if "TAKE_PROFIT" in strategy_type or "STOP" in strategy_type:
@@ -4927,7 +4954,7 @@ class TradingBot:
             if not (is_reduce or is_close):
                 continue
             order_type = str(order.get("type", "")).upper()
-            strategy_type = str(order.get("strategyType", "")).upper()
+            strategy_type = str(order.get("orderType") or order.get("strategyType") or "").upper()
             if "TAKE_PROFIT" in order_type or "STOP" in order_type:
                 continue
             if "TAKE_PROFIT" in strategy_type or "STOP" in strategy_type:
@@ -5043,7 +5070,7 @@ class TradingBot:
 
         filtered: List[Dict[str, Any]] = []
         for order in orders:
-            order_type = str(order.get("type") or order.get("strategyType") or "").upper()
+            order_type = str(order.get("type") or order.get("orderType") or order.get("strategyType") or "").upper()
             if "TAKE_PROFIT" not in order_type and "STOP" not in order_type:
                 continue
             status = str(order.get("status") or order.get("strategyStatus") or "").upper()
@@ -5056,7 +5083,7 @@ class TradingBot:
                 if order_close_side in ("BUY", "SELL") and order_close_side != expected_close_side:
                     continue
                 if hedge_mode:
-                    if order_side != side_norm:
+                    if order_side and order_side not in (side_norm, "BOTH"):
                         continue
                 elif order_side and order_side not in (side_norm, "BOTH"):
                     continue
@@ -5065,15 +5092,67 @@ class TradingBot:
 
     def _protection_coverage(self, symbol: str, side: Optional[str] = None) -> Dict[str, Any]:
         orders = self._open_protection_orders(symbol, side=side)
+        return self._protection_coverage_from_orders(orders)
+
+    @staticmethod
+    def _protection_coverage_from_orders(orders: Any) -> Dict[str, Any]:
         has_tp = False
         has_sl = False
-        for order in orders:
-            order_type = str(order.get("type") or order.get("strategyType") or "").upper()
+        normalized_orders = [order for order in (orders or []) if isinstance(order, dict)]
+        for order in normalized_orders:
+            order_type = str(order.get("type") or order.get("orderType") or order.get("strategyType") or "").upper()
             if "TAKE_PROFIT" in order_type:
                 has_tp = True
             if "STOP" in order_type:
                 has_sl = True
-        return {"has_tp": has_tp, "has_sl": has_sl, "orders": orders}
+        return {"has_tp": has_tp, "has_sl": has_sl, "orders": normalized_orders}
+
+    def _protection_requirements(self) -> Dict[str, bool]:
+        cfg = getattr(self, "config", {}) or {}
+        ff_cfg = cfg.get("fund_flow", {}) or {}
+        risk_cfg = cfg.get("risk", {}) or {}
+        tp_raw = ff_cfg.get("take_profit_pct", risk_cfg.get("take_profit_default_percent"))
+        sl_raw = ff_cfg.get("stop_loss_pct", risk_cfg.get("stop_loss_default_percent"))
+        tp_levels = ff_cfg.get("take_profit_pct_levels")
+        need_tp = self._normalize_percent(tp_raw, 0.03) > 0 or (
+            isinstance(tp_levels, list) and len(tp_levels) > 0
+        )
+        need_sl = self._normalize_percent(sl_raw, 0.01) > 0 or bool(
+            getattr(self, "_dynamic_stop_loss_enabled", False)
+        )
+        return {"need_tp": need_tp, "need_sl": need_sl}
+
+    def _protection_is_covered(self, coverage: Dict[str, Any]) -> bool:
+        return self._protection_coverage_meets_requirements(coverage)
+
+    def _protection_coverage_meets_requirements(self, coverage: Dict[str, Any]) -> bool:
+        requirements = self._protection_requirements()
+        has_tp = bool(coverage.get("has_tp"))
+        has_sl = bool(coverage.get("has_sl"))
+        return (has_tp or not requirements["need_tp"]) and (has_sl or not requirements["need_sl"])
+
+    def _repair_result_satisfies_protection_requirements(
+        self,
+        repair: Optional[Dict[str, Any]],
+        coverage_after: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        repair_obj = repair if isinstance(repair, dict) else {}
+        repair_status = str(repair_obj.get("status", "")).lower()
+        if repair_status not in ("success", "partial"):
+            return False
+
+        merged_orders: List[Dict[str, Any]] = []
+        if isinstance(coverage_after, dict):
+            merged_orders.extend(
+                [order for order in (coverage_after.get("orders") or []) if isinstance(order, dict)]
+            )
+        merged_orders.extend(
+            [order for order in (repair_obj.get("orders") or []) if isinstance(order, dict)]
+        )
+        if not merged_orders:
+            return False
+        merged_coverage = self._protection_coverage_from_orders(merged_orders)
+        return self._protection_coverage_meets_requirements(merged_coverage)
 
     def _extract_stop_price_from_order(self, order: Dict[str, Any]) -> float:
         """
@@ -5098,7 +5177,7 @@ class TradingBot:
         best = 0.0
         try:
             for o in (orders or []):
-                order_type = str(o.get("type") or o.get("strategyType") or "").upper()
+                order_type = str(o.get("type") or o.get("orderType") or o.get("strategyType") or "").upper()
                 if "STOP" not in order_type:
                     continue
                 p = self._extract_stop_price_from_order(o)
@@ -5287,10 +5366,24 @@ class TradingBot:
 
         ff_cfg = self.config.get("fund_flow", {}) or {}
         risk_cfg = self.config.get("risk", {}) or {}
+        pos_key = self._position_track_key(symbol, side)
+        protection_plan = self._protection_plan_by_pos.get(pos_key, {})
         sl_raw = ff_cfg.get("stop_loss_pct", risk_cfg.get("stop_loss_default_percent"))
         tp_raw = ff_cfg.get("take_profit_pct", risk_cfg.get("take_profit_default_percent"))
         sl_pct = self._normalize_percent(sl_raw, 0.01)
         tp_pct = self._normalize_percent(tp_raw, 0.03)
+        persisted_tp = self._to_float(protection_plan.get("take_profit_price"), 0.0)
+        persisted_sl = self._to_float(protection_plan.get("stop_loss_price"), 0.0)
+        persisted_tp_levels_raw = protection_plan.get("tp_levels")
+        persisted_tp_levels: List[Tuple[float, float]] = []
+        if isinstance(persisted_tp_levels_raw, list):
+            for item in persisted_tp_levels_raw:
+                if not isinstance(item, dict):
+                    continue
+                price = self._to_float(item.get("price"), 0.0)
+                reduce_pct = self._to_float(item.get("reduce_pct"), 0.0)
+                if price > 0 and reduce_pct > 0:
+                    persisted_tp_levels.append((price, reduce_pct))
 
         # 尝试使用动态止损系统
         stop_loss = None
@@ -5330,6 +5423,8 @@ class TradingBot:
                 stop_loss = entry_price * (1.0 - sl_pct) if sl_pct > 0 else None
             else:
                 stop_loss = entry_price * (1.0 + sl_pct) if sl_pct > 0 else None
+        if persisted_sl > 0:
+            stop_loss = persisted_sl
 
         if side == "LONG":
             take_profit = entry_price * (1.0 + tp_pct) if tp_pct > 0 else None
@@ -5337,6 +5432,8 @@ class TradingBot:
         else:
             take_profit = entry_price * (1.0 - tp_pct) if tp_pct > 0 else None
             side_enum = IntentPositionSide.SHORT
+        if persisted_tp > 0:
+            take_profit = persisted_tp
         
         # 打印动态止损信息
         if dynamic_sl_used:
@@ -5348,6 +5445,7 @@ class TradingBot:
             tp=take_profit,
             sl=stop_loss,
             quantity=qty,
+            tp_levels=persisted_tp_levels or None,
         )
 
     def _tighten_protection_for_conflict(
@@ -5517,7 +5615,7 @@ class TradingBot:
                 }
 
             for order in existing_orders:
-                order_type = str(order.get("type") or order.get("strategyType") or "").upper()
+                order_type = str(order.get("type") or order.get("orderType") or order.get("strategyType") or "").upper()
                 if "STOP" in order_type:
                     oid = order.get("orderId")
                     if oid:
@@ -5649,6 +5747,28 @@ class TradingBot:
             p_reduce_no_ps = dict(base_params)
             candidates.append(("reduce_only_market_no_ps", p_reduce_no_ps, True))
 
+        def _finalize_flatten_success(payload: Dict[str, Any]) -> Dict[str, Any]:
+            latest_pos = None
+            try:
+                latest_pos = self.position_data.get_current_position(symbol)
+            except Exception:
+                latest_pos = None
+
+            position_closed = ratio >= 0.999
+            if isinstance(latest_pos, dict):
+                latest_side = self._extract_position_side(latest_pos)
+                latest_amount = self._extract_position_amount(latest_pos)
+                position_closed = not (latest_side == side and latest_amount > 0.0)
+
+            if position_closed:
+                try:
+                    cancel_result = self.client.cancel_all_conditional_orders(symbol)
+                    if isinstance(cancel_result, dict):
+                        payload["protection_cleanup"] = cancel_result
+                except Exception as e:
+                    payload["protection_cleanup_error"] = str(e)
+            return payload
+
         errors: List[str] = []
         for mode, params, reduce_only in candidates:
             try:
@@ -5663,19 +5783,19 @@ class TradingBot:
                         errors.append(f"{mode}: code={code}, msg={order.get('msg')}")
                         continue
                     if order.get("orderId") is not None:
-                        return {"status": "success", "order": order, "mode": mode}
+                        return _finalize_flatten_success({"status": "success", "order": order, "mode": mode})
                     if str(order.get("status", "")).lower() == "success":
-                        return {"status": "success", "order": order, "mode": mode}
+                        return _finalize_flatten_success({"status": "success", "order": order, "mode": mode})
 
                 # 若返回结构不标准，二次确认仓位是否已消失，避免误判。
                 latest_pos = self.position_data.get_current_position(symbol)
                 if not isinstance(latest_pos, dict):
-                    return {
+                    return _finalize_flatten_success({
                         "status": "success",
                         "order": order,
                         "mode": mode,
                         "message": "position closed after emergency request",
-                    }
+                    })
                 errors.append(f"{mode}: unexpected response={order}")
             except Exception as e:
                 errors.append(f"{mode}: {e}")
@@ -5932,19 +6052,48 @@ class TradingBot:
             return
 
         if decision.operation == FundFlowOperation.CLOSE:
+            for pos_side in ("LONG", "SHORT"):
+                self._protection_plan_by_pos.pop(self._position_track_key(symbol, pos_side), None)
+            self._save_risk_state()
             self._clear_dca_tracking_for_symbol(symbol)
             return
 
         md_raw = getattr(decision, "metadata", None)
         md: Dict[str, Any] = md_raw if isinstance(md_raw, dict) else {}
-        dca_triggered = bool(md.get("dca_triggered"))
-        winner_triggered = bool(md.get("winner_pyramiding_triggered"))
-        if not dca_triggered and not winner_triggered:
-            return
-
         side = "LONG" if decision.operation == FundFlowOperation.BUY else "SHORT"
         pos_key = self._position_track_key(symbol, side)
         changed = False
+
+        tp_levels_raw = md.get("tp_levels") if isinstance(md, dict) else None
+        tp_levels: List[Dict[str, float]] = []
+        if isinstance(tp_levels_raw, list):
+            for item in tp_levels_raw:
+                if not isinstance(item, dict):
+                    continue
+                price = self._to_float(item.get("price"), 0.0)
+                reduce_pct = self._to_float(item.get("reduce_pct"), 0.0)
+                if price > 0 and reduce_pct > 0:
+                    tp_levels.append({"price": price, "reduce_pct": reduce_pct})
+        protection_plan = {
+            "stop_loss_price": self._to_float(decision.stop_loss_price, 0.0) or None,
+            "take_profit_price": self._to_float(decision.take_profit_price, 0.0) or None,
+            "tp_levels": tp_levels,
+        }
+        if (
+            protection_plan["stop_loss_price"] is not None
+            or protection_plan["take_profit_price"] is not None
+            or protection_plan["tp_levels"]
+        ):
+            if self._protection_plan_by_pos.get(pos_key) != protection_plan:
+                self._protection_plan_by_pos[pos_key] = protection_plan
+                changed = True
+
+        dca_triggered = bool(md.get("dca_triggered"))
+        winner_triggered = bool(md.get("winner_pyramiding_triggered"))
+        if not dca_triggered and not winner_triggered:
+            if changed:
+                self._save_risk_state()
+            return
 
         if dca_triggered:
             try:
@@ -6096,8 +6245,8 @@ class TradingBot:
             for item in protection.get("orders", []):
                 if not isinstance(item, dict):
                     continue
-                order_type = str(item.get("type") or item.get("strategyType") or "").upper()
-                oid = item.get("orderId")
+                order_type = str(item.get("type") or item.get("orderType") or item.get("strategyType") or "").upper()
+                oid = item.get("orderId") or item.get("algoId") or item.get("strategyId")
                 if oid is None:
                     continue
                 if "TAKE_PROFIT" in order_type:
@@ -6487,6 +6636,16 @@ class TradingBot:
         status = str(execution_result.get("status", "")).lower()
         if status not in ("success", "pending"):
             return {}
+        protection_obj = execution_result.get("protection") if isinstance(execution_result, dict) else None
+        if status == "pending" and isinstance(protection_obj, dict):
+            protection_status = str(protection_obj.get("status", "")).lower()
+            protection_message = str(protection_obj.get("message", "")).lower()
+            if protection_status == "pending" and "entry not filled yet" in protection_message:
+                return {
+                    "status": "pending",
+                    "message": "entry_pending_protection_deferred",
+                    "protection": protection_obj,
+                }
         try:
             latest_position = self.position_data.get_current_position(symbol)
         except Exception:
@@ -6498,7 +6657,7 @@ class TradingBot:
             return {"status": "skipped", "message": f"invalid_position_side:{side}"}
 
         coverage = self._protection_coverage(symbol, side=side)
-        covered = bool(coverage.get("has_tp")) and bool(coverage.get("has_sl"))
+        covered = self._protection_is_covered(coverage)
         if covered:
             return {"status": "ok", "message": "coverage_ready", "coverage": coverage}
 
@@ -6508,7 +6667,10 @@ class TradingBot:
         )
         repair = self._repair_missing_protection(symbol, latest_position)
         coverage_after = self._protection_coverage(symbol, side=side)
-        covered_after = bool(coverage_after.get("has_tp")) and bool(coverage_after.get("has_sl"))
+        covered_after = self._protection_is_covered(coverage_after) or self._repair_result_satisfies_protection_requirements(
+            repair,
+            coverage_after,
+        )
         if covered_after:
             print(f"   ✅ {symbol} 执行后保护钩子补挂成功")
             return {
@@ -6525,14 +6687,11 @@ class TradingBot:
             "repair": repair,
             "coverage_before": coverage,
             "coverage_after": coverage_after,
+            "immediate_close_suppressed": bool(
+                self._protection_sla_config().get("immediate_close_on_repair_fail", False)
+            ),
         }
-        if bool(self._protection_sla_config().get("immediate_close_on_repair_fail", False)):
-            flatten = self._emergency_flatten_unprotected(symbol, latest_position, reduce_ratio=1.0)
-            result["flatten"] = flatten
-            print(
-                f"   🧯 {symbol} 执行后保护钩子修复失败，触发强制减仓/平仓: "
-                f"status={flatten.get('status')} detail={flatten.get('message') or flatten.get('order')}"
-            )
+        print(f"   ⚠️ {symbol} 执行后保护钩子修复失败，继续SLA监控")
         return result
 
     def run_cycle(
@@ -6904,7 +7063,7 @@ class TradingBot:
                     self._update_position_extrema(symbol, leg_position, current_price)
             
                     coverage = self._protection_coverage(symbol, side=side)
-                    covered = bool(coverage.get("has_tp")) and bool(coverage.get("has_sl"))
+                    covered = self._protection_is_covered(coverage)
                     if covered:
                         self._protection_missing_since_ts.pop(pos_key, None)
                         self._protection_last_alert_ts.pop(pos_key, None)
@@ -6922,7 +7081,10 @@ class TradingBot:
                         f"msg={repair.get('message')}"
                     )
                     coverage_after = self._protection_coverage(symbol, side=side)
-                    covered_after = bool(coverage_after.get("has_tp")) and bool(coverage_after.get("has_sl"))
+                    covered_after = self._protection_is_covered(coverage_after) or self._repair_result_satisfies_protection_requirements(
+                        repair,
+                        coverage_after,
+                    )
                     if covered_after:
                         self._protection_missing_since_ts.pop(pos_key, None)
                         self._protection_last_alert_ts.pop(pos_key, None)
@@ -6933,29 +7095,12 @@ class TradingBot:
                         continue
             
                     if str(repair.get("status", "")).lower() != "success":
-                        if immediate_close_on_repair_fail:
-                            close_res = self._emergency_flatten_unprotected(
-                                symbol,
-                                leg_position,
-                                reduce_ratio=repair_fail_reduce_ratio,
-                            )
-                            print(
-                                f"   🧯 ({side}) 保护单补挂失败，触发强制减仓/平仓(ratio={repair_fail_reduce_ratio:.2f}): "
-                                f"status={close_res.get('status')} detail={close_res.get('message') or close_res.get('order')}"
-                            )
-                            self._emit_protection_sla_alert(
-                                symbol=symbol,
-                                side=side,
-                                detail="protection_repair_failed_immediate_flatten",
-                                extra={"repair": repair, "flatten": close_res},
-                            )
-                            continue
-                        print(f"   ⚠️ ({side}) 保护单补挂失败，已按配置跳过立即强平，继续SLA监控")
+                        print(f"   ⚠️ ({side}) 保护单补挂失败，继续SLA监控")
                         self._emit_protection_sla_alert(
                             symbol=symbol,
                             side=side,
                             detail="protection_repair_failed_no_immediate_close",
-                            extra={"repair": repair},
+                            extra={"repair": repair, "immediate_close_suppressed": bool(immediate_close_on_repair_fail)},
                         )
             
                     first_seen = self._position_first_seen_ts.get(pos_key, now_ts)
@@ -7018,7 +7163,7 @@ class TradingBot:
             self._update_position_extrema(symbol, position, current_price)
             
             coverage = self._protection_coverage(symbol, side=side)
-            covered = bool(coverage.get("has_tp")) and bool(coverage.get("has_sl"))
+            covered = self._protection_is_covered(coverage)
             if covered:
                 self._protection_missing_since_ts.pop(pos_key, None)
                 self._protection_last_alert_ts.pop(pos_key, None)
@@ -7035,7 +7180,10 @@ class TradingBot:
                     f"msg={repair.get('message')}"
                 )
                 coverage_after = self._protection_coverage(symbol, side=side)
-                covered_after = bool(coverage_after.get("has_tp")) and bool(coverage_after.get("has_sl"))
+                covered_after = self._protection_is_covered(coverage_after) or self._repair_result_satisfies_protection_requirements(
+                    repair,
+                    coverage_after,
+                )
                 if covered_after:
                     self._protection_missing_since_ts.pop(pos_key, None)
                     self._protection_last_alert_ts.pop(pos_key, None)
@@ -7050,29 +7198,12 @@ class TradingBot:
                     protection_gap_symbols.append(symbol)
             
                 if str(repair.get("status", "")).lower() != "success":
-                    if immediate_close_on_repair_fail:
-                        close_res = self._emergency_flatten_unprotected(
-                            symbol,
-                            position,
-                            reduce_ratio=repair_fail_reduce_ratio,
-                        )
-                        print(
-                            f"   🧯 保护单补挂失败，触发强制减仓/平仓(ratio={repair_fail_reduce_ratio:.2f}): "
-                            f"status={close_res.get('status')} detail={close_res.get('message') or close_res.get('order')}"
-                        )
-                        self._emit_protection_sla_alert(
-                            symbol=symbol,
-                            side=side,
-                            detail="protection_repair_failed_immediate_flatten",
-                            extra={"repair": repair, "flatten": close_res},
-                        )
-                        continue
-                    print("   ⚠️ 保护单补挂失败，已按配置跳过立即强平，继续SLA监控")
+                    print("   ⚠️ 保护单补挂失败，继续SLA监控")
                     self._emit_protection_sla_alert(
                         symbol=symbol,
                         side=side,
                         detail="protection_repair_failed_no_immediate_close",
-                        extra={"repair": repair},
+                        extra={"repair": repair, "immediate_close_suppressed": bool(immediate_close_on_repair_fail)},
                     )
             
                 first_seen = self._position_first_seen_ts.get(pos_key, now_ts)
@@ -8459,6 +8590,30 @@ class TradingBot:
                         extra={"open_new_entry": True},
                     )
                     continue
+                min_open_portion = max(
+                    0.01,
+                    float(getattr(self.fund_flow_risk_engine, "min_open_portion", 0.1) or 0.1),
+                )
+                if float(decision.target_portion_of_balance) < min_open_portion:
+                    print(
+                        f"⏭️ {symbol} 目标开仓比例低于最小下单阈值，跳过开仓: "
+                        f"target={float(decision.target_portion_of_balance):.4f}, "
+                        f"min_open={min_open_portion:.4f}"
+                    )
+                    self._log_entry_gate_block(
+                        symbol=symbol,
+                        gate="min_open_portion",
+                        reason="target_below_min_open",
+                        threshold=min_open_portion,
+                        value=float(decision.target_portion_of_balance),
+                        decision=decision,
+                        flow_context=flow_context,
+                        trigger_context=trigger_context,
+                        market_data=market_data,
+                        flow_snapshot=flow_snapshot,
+                        extra={"open_new_entry": True},
+                    )
+                    continue
                 item_max_active_symbols = max(
                     1,
                     int(
@@ -8658,7 +8813,8 @@ class TradingBot:
         ai_review_cfg = ai_review_cfg_raw if isinstance(ai_review_cfg_raw, dict) else {}
         ai_review_mode = str(context.get("ai_review_mode") or "disabled").lower()
         ai_flat_top_n = max(1, int(self._to_float(ai_review_cfg.get("flat_top_n", 2), 2)))
-        ai_review_flat_enabled = self._ai_review_mode_supports_flat_candidates(ai_review_mode)
+        ai_review_enabled = bool(ai_review_cfg.get("enabled", True))
+        ai_review_flat_enabled = ai_review_enabled and self._ai_review_mode_supports_flat_candidates(ai_review_mode)
 
         def _item_decision(item: Dict[str, Any]) -> Optional[FundFlowDecision]:
             decision_raw = item.get("decision")
