@@ -1,5 +1,10 @@
+import logging
+
+import pytest
+
 from src.fund_flow.decision_engine import FundFlowDecisionEngine
-from src.fund_flow.models import Operation
+from src.fund_flow.macd_strategy_v2 import MACDSignalV2
+from src.fund_flow.models import FundFlowDecision, Operation, TimeInForce
 
 
 def _cfg():
@@ -39,6 +44,531 @@ def _trend_context(
     }
     tf_15m = {**tf_ctx, "ema_fast": ema_fast, "ema_slow": ema_slow, "adx": adx, "atr_pct": atr_pct}
     return {"timeframes": {"15m": tf_15m, "5m": dict(tf_ctx)}}
+
+
+def test_macd_mtf_default_4h_enhancement_weight_is_aligned_to_v2_default():
+    cfg = _cfg()
+    cfg["fund_flow"]["macd_mtf_strategy"] = {}
+
+    engine = FundFlowDecisionEngine(cfg)
+
+    assert engine.macd_mtf_strategy_config.weight_4h_enhancement == 0.10
+
+
+def test_macd_v2_common_stable_continuation_threshold_populates_both_sides():
+    cfg = _cfg()
+    cfg["fund_flow"]["strategy_mode"] = "macd_mtf_strategy_v2"
+    cfg["fund_flow"]["macd_mtf_strategy_v2"] = {
+        "entry_thresholds": {
+            "stable_continuation_min_signal_score": 0.86,
+        },
+        "entry_filters": {
+            "enable_stable_bear_continuation": True,
+            "enable_stable_bull_continuation": True,
+        },
+    }
+
+    engine = FundFlowDecisionEngine(cfg)
+
+    assert engine.macd_v2_config.stable_bear_continuation_min_signal_score == 0.86
+    assert engine.macd_v2_config.stable_bull_continuation_min_signal_score == 0.86
+
+
+def test_macd_v2_common_stable_continuation_filters_are_side_defaults_only():
+    cfg = _cfg()
+    cfg["fund_flow"]["strategy_mode"] = "macd_mtf_strategy_v2"
+    cfg["fund_flow"]["macd_mtf_strategy_v2"] = {
+        "entry_filters": {
+            "enable_stable_bear_continuation": True,
+            "enable_stable_bull_continuation": True,
+            "stable_continuation_min_vwap_score": 0.07,
+            "stable_continuation_min_adx_1h": 28.0,
+            "stable_continuation_min_4h_bars": 2,
+            "stable_bull_continuation_min_vwap_score": 0.11,
+        },
+    }
+
+    engine = FundFlowDecisionEngine(cfg)
+
+    assert engine.macd_v2_config.stable_bear_continuation_min_vwap_score == 0.07
+    assert engine.macd_v2_config.stable_bear_continuation_min_adx_1h == 28.0
+    assert engine.macd_v2_config.stable_bear_continuation_min_4h_bars == 2
+    assert engine.macd_v2_config.stable_bull_continuation_min_vwap_score == 0.11
+    assert engine.macd_v2_config.stable_bull_continuation_min_adx_1h == 28.0
+    assert engine.macd_v2_config.stable_bull_continuation_min_4h_bars == 2
+
+
+def test_macd_v2_weak_combo_veto_flag_propagates_from_live_config():
+    cfg = _cfg()
+    cfg["fund_flow"]["strategy_mode"] = "macd_mtf_strategy_v2"
+    cfg["fund_flow"]["macd_mtf_strategy_v2"] = {
+        "entry_filters": {
+            "enable_weak_combo_veto": False,
+        },
+    }
+
+    engine = FundFlowDecisionEngine(cfg)
+
+    assert engine.macd_v2_config.enable_weak_combo_veto is False
+
+
+def test_macd_v2_soft_long_threshold_override_populates_config():
+    cfg = _cfg()
+    cfg["fund_flow"]["strategy_mode"] = "macd_mtf_strategy_v2"
+    cfg["fund_flow"]["macd_mtf_strategy_v2"] = {
+        "entry_thresholds": {
+            "soft_long_min_signal_score": 0.80,
+        },
+    }
+
+    engine = FundFlowDecisionEngine(cfg)
+
+    assert engine.macd_v2_config.soft_long_min_signal_score == 0.80
+
+
+def test_macd_v2_direction_gate_veto_uses_effective_runtime_mode():
+    engine = FundFlowDecisionEngine(_cfg())
+    decision = FundFlowDecision(
+        operation=Operation.SELL,
+        symbol="VETUSDT",
+        target_portion_of_balance=0.2,
+        leverage=4,
+        reason="macd_v2_short_1h_green_bar_growing_15m_soft_short_neutral_vwap_0.12",
+        metadata={"direction_lock": "BOTH"},
+    )
+
+    resolved = engine._apply_macd_v2_direction_gate(
+        decision,
+        effective_mode="LONG_ONLY",
+        source="macd_4h_regime_state.side_override_mode",
+    )
+
+    assert resolved.operation == Operation.HOLD
+    assert resolved.metadata["direction_lock"] == "LONG_ONLY"
+    assert resolved.metadata["direction_gate_source"] == "macd_4h_regime_state.side_override_mode"
+    assert resolved.metadata["direction_gate_effective_mode"] == "LONG_ONLY"
+    assert resolved.metadata["direction_gate_pre_decision"] == Operation.SELL.value
+    assert resolved.metadata["direction_gate_final_decision"] == Operation.HOLD.value
+    assert resolved.metadata["direction_gate_veto"] is True
+    assert resolved.metadata["blocked_reason"] == "direction_gate_veto"
+
+
+def test_macd_v2_entry_routing_extracts_sovereign_metadata_and_gtc_tif() -> None:
+    engine = FundFlowDecisionEngine(_cfg())
+    signal = MACDSignalV2(
+        direction="long",
+        signal_score=0.91,
+        signal_type_1h="flip_bullish",
+        details={
+            "competition_score": 1.0465,
+            "execution_route": "rsi_launch_sovereign",
+            "priority_execution_applied": True,
+            "priority_signal": True,
+            "entry_time_in_force": "GTC",
+            "entry_expire_seconds": 30,
+            "entry_price_mode": "elastic_limit",
+            "entry_retry_enabled": True,
+            "entry_retry_max_attempts": 1,
+            "rsi_launch_sovereign_active": True,
+            "rsi_launch_sovereign_side": "long",
+            "rsi_launch_sovereign_bonus_score": 0.12,
+            "rsi_launch_sovereign_threshold_override": 0.80,
+            "rsi_launch_sovereign_competition_multiplier": 1.15,
+        },
+    )
+
+    tif, metadata = engine._extract_macd_v2_entry_routing(signal)
+
+    assert tif.value == "Gtc"
+    assert metadata["competition_score"] == pytest.approx(1.0465, rel=1e-6)
+    assert metadata["execution_route"] == "rsi_launch_sovereign"
+    assert metadata["priority_execution_applied"] is True
+    assert metadata["priority_signal"] is True
+    assert metadata["entry_time_in_force"] == "GTC"
+    assert metadata["entry_expire_seconds"] == 30
+    assert metadata["entry_price_mode"] == "elastic_limit"
+    assert metadata["entry_retry_enabled"] is True
+    assert metadata["entry_retry_max_attempts"] == 1
+    assert metadata["rsi_launch_sovereign_active"] is True
+    assert metadata["rsi_launch_sovereign_side"] == "long"
+    assert metadata["rsi_launch_sovereign_bonus_score"] == pytest.approx(0.12, rel=1e-6)
+    assert metadata["rsi_launch_sovereign_threshold_override"] == pytest.approx(0.80, rel=1e-6)
+    assert metadata["rsi_launch_sovereign_competition_multiplier"] == pytest.approx(1.15, rel=1e-6)
+
+
+def test_macd_v2_entry_routing_defaults_to_standard_ioc() -> None:
+    engine = FundFlowDecisionEngine(_cfg())
+    signal = MACDSignalV2(direction="short", signal_score=0.84, signal_type_1h="flip_bearish", details={})
+
+    tif, metadata = engine._extract_macd_v2_entry_routing(signal)
+
+    assert tif.value == "Ioc"
+    assert metadata["competition_score"] == pytest.approx(0.84, rel=1e-6)
+    assert metadata["execution_route"] == "standard"
+    assert metadata["priority_execution_applied"] is False
+    assert metadata["rsi_launch_sovereign_active"] is False
+
+
+def test_macd_v2_priority_metadata_enables_standard_ioc_market_fallback() -> None:
+    cfg = _cfg()
+    cfg["fund_flow"]["strategy_mode"] = "macd_mtf_strategy_v2"
+    cfg["fund_flow"]["macd_mtf_strategy_v2"] = {
+        "entry_filters": {
+            "enable_priority_execution": True,
+            "priority_exec_min_score": 0.90,
+            "priority_exec_vip_min_score": 0.92,
+        }
+    }
+    engine = FundFlowDecisionEngine(cfg)
+    signal = MACDSignalV2(direction="long", signal_score=0.68, signal_type_1h="red_bar_growing", details={})
+
+    metadata = engine._resolve_macd_v2_priority_metadata(signal, macd_v2_engine=None)
+
+    assert metadata["execution_route"] == "ioc_market_fallback"
+    assert metadata["priority_execution_applied"] is False
+    assert metadata["entry_time_in_force"] == "IOC"
+    assert metadata["entry_market_fallback_enabled"] is True
+    assert metadata["entry_market_fallback_timeout_ms"] == 2000
+    assert metadata["entry_market_fallback_max_slippage_bps"] == 5
+    assert metadata["entry_execution_policy"] == "ioc_market_fallback"
+
+
+def test_macd_v2_priority_metadata_uses_updated_live_default_expiry_windows() -> None:
+    cfg = _cfg()
+    cfg["fund_flow"]["strategy_mode"] = "macd_mtf_strategy_v2"
+    cfg["fund_flow"]["macd_mtf_strategy_v2"] = {
+        "entry_filters": {
+            "enable_priority_execution": True,
+            "priority_exec_min_score": 0.90,
+            "priority_exec_expire_seconds": 25,
+            "priority_exec_vip_min_score": 0.92,
+            "priority_exec_vip_expire_seconds": 45,
+        }
+    }
+    engine = FundFlowDecisionEngine(cfg)
+
+    regular = MACDSignalV2(direction="long", signal_score=0.91, signal_type_1h="red_bar_growing", details={})
+    vip = MACDSignalV2(direction="long", signal_score=0.93, signal_type_1h="red_bar_growing", details={})
+
+    regular_md = engine._resolve_macd_v2_priority_metadata(regular, macd_v2_engine=None)
+    vip_md = engine._resolve_macd_v2_priority_metadata(vip, macd_v2_engine=None)
+
+    assert regular_md["entry_expire_seconds"] == 25
+    assert vip_md["entry_expire_seconds"] == 45
+
+
+def test_macd_v2_sovereign_entry_routing_keeps_market_fallback_disabled() -> None:
+    engine = FundFlowDecisionEngine(_cfg())
+    signal = MACDSignalV2(
+        direction="long",
+        signal_score=0.91,
+        signal_type_1h="flip_bullish",
+        details={
+            "competition_score": 1.0465,
+            "execution_route": "rsi_launch_sovereign",
+            "priority_execution_applied": True,
+            "priority_signal": True,
+            "entry_time_in_force": "GTC",
+            "entry_expire_seconds": 30,
+            "entry_price_mode": "elastic_limit",
+            "entry_retry_enabled": True,
+            "entry_retry_max_attempts": 1,
+            "rsi_launch_sovereign_active": True,
+            "rsi_launch_sovereign_side": "long",
+            "rsi_launch_sovereign_bonus_score": 0.12,
+            "rsi_launch_sovereign_threshold_override": 0.80,
+            "rsi_launch_sovereign_competition_multiplier": 1.15,
+            "entry_market_fallback_enabled": False,
+            "entry_market_fallback_timeout_ms": 0,
+            "entry_market_fallback_max_slippage_bps": 0,
+            "entry_execution_policy": "priority_execution_vip",
+        },
+    )
+
+    tif, metadata = engine._extract_macd_v2_entry_routing(signal)
+
+    assert tif.value == "Gtc"
+    assert metadata["entry_market_fallback_enabled"] is False
+    assert metadata["entry_market_fallback_timeout_ms"] == 0
+    assert metadata["entry_market_fallback_max_slippage_bps"] == 0
+    assert metadata["entry_execution_policy"] == "priority_execution_vip"
+
+
+def test_macd_v2_live_defaults_use_rsi_rhythm_weights() -> None:
+    cfg = _cfg()
+    cfg["fund_flow"]["strategy_mode"] = "macd_mtf_strategy_v2"
+    cfg["fund_flow"]["macd_mtf_strategy_v2"] = {}
+
+    engine = FundFlowDecisionEngine(cfg)
+
+    assert engine.macd_v2_config.weight_4h_direction == 0.40
+    assert engine.macd_v2_config.weight_1h_direction == 0.15
+    assert engine.macd_v2_config.weight_rsi_rhythm == 0.30
+    assert engine.macd_v2_config.weight_vwap == 0.05
+    assert engine.macd_v2_config.weight_15m_entry == 0.05
+    assert engine.macd_v2_config.min_signal_score == 0.85
+    assert engine.macd_v2_config.red_bar_growing_min_signal_score == 0.90
+    assert engine.macd_v2_config.green_bar_growing_min_signal_score == 0.87
+    assert engine.macd_v2_config.flip_bearish_min_signal_score == 0.84
+    assert engine.macd_v2_config.flip_bullish_min_signal_score == 0.82
+    assert engine.macd_v2_config.min_vwap_score_for_entry == 0.10
+    assert engine.macd_v2_config.short_min_vwap_score_for_entry == 0.06
+    assert engine.macd_v2_config.flip_bearish_short_min_vwap_score_for_entry == 0.08
+    assert engine.macd_v2_config.short_rsi_probe_only_below == 40.0
+    assert engine.macd_v2_config.flip_bearish_require_enhancement_or_15m_confirmation is True
+
+
+def test_macd_v2_legacy_soft_15m_flags_emit_deprecation_warning(caplog) -> None:
+    cfg = _cfg()
+    cfg["fund_flow"]["strategy_mode"] = "macd_mtf_strategy_v2"
+    cfg["fund_flow"]["macd_mtf_strategy_v2"] = {
+        "entry_filters": {
+            "enable_soft_15m_confirmation_when_4h_primary": True,
+            "soft_15m_entry_score": 0.28,
+        },
+        "rsi_config": {
+            "enable_entry_refinement": False,
+            "period": 14,
+        },
+    }
+
+    with caplog.at_level(logging.WARNING):
+        FundFlowDecisionEngine(cfg)
+
+    assert "deprecated" in caplog.text.lower()
+    assert "soft_15m" in caplog.text.lower()
+    assert "rsi refinement" in caplog.text.lower()
+
+
+def test_macd_v2_priority_execution_uses_gtc_route_for_high_score_signal() -> None:
+    cfg = _cfg()
+    cfg["fund_flow"]["strategy_mode"] = "macd_mtf_strategy_v2"
+    cfg["fund_flow"]["macd_mtf_strategy_v2"] = {
+        "entry_filters": {
+            "enable_priority_execution": True,
+            "priority_exec_min_score": 0.90,
+            "priority_exec_expire_seconds": 15,
+        }
+    }
+    engine = FundFlowDecisionEngine(cfg)
+
+    class _StubStrategyEngine:
+        def analyze(self, **_kwargs):
+            return MACDSignalV2(
+                direction="long",
+                signal_score=0.91,
+                signal_type_1h="flip_bullish",
+                entry_type_15m="rsi_spring",
+                vwap_score=0.04,
+                vwap_state="long_dual_support",
+                ema_multiplier=1.0,
+                ema_structure_status="normal",
+                details={
+                    "rsi_exposure_mult": 1.0,
+                    "rsi_macd_conflict": False,
+                },
+            )
+
+        def calculate_leverage(self, *args, **kwargs):
+            return 4
+
+        def resolve_session_position_scale(self, *args, **kwargs):
+            return 1.0
+
+        def resolve_symbol_risk_session_scale(self, *args, **kwargs):
+            return 1.0
+
+        def calculate_position_portion(self, *args, **kwargs):
+            return 0.20
+
+        def is_watchlist_symbol(self, symbol):
+            return False
+
+        def resolve_4h_shrink_exit_policy(self, **kwargs):
+            return {"active": False}
+
+    engine._macd_v2_engine_for_symbol = lambda _symbol: (_StubStrategyEngine(), None)
+    engine._build_macd_v2_4h_regime_state = lambda **_kwargs: {
+        "side_override_mode": "BOTH",
+        "state": "trend",
+        "phase": "active",
+        "side": "long",
+        "max_leverage": 4,
+        "close_on_reverse": False,
+    }
+
+    market_flow_context = {
+        "timeframes": {
+            "15m": {
+                "timestamp": 1714132800,
+                "macd_hist_series": [0.01, 0.02],
+                "volume": 1000.0,
+                "avg_volume": 500.0,
+                "bb_middle": 100.0,
+                "bb_upper": 102.0,
+                "bb_lower": 98.0,
+                "close": 101.0,
+                "close_series": [99.0, 100.0, 101.0],
+            },
+            "1h": {
+                "timestamp": 1714132800,
+                "macd_hist_series": [0.01, 0.02],
+                "vwap": 100.5,
+                "close": 101.0,
+                "bb_middle": 100.0,
+                "bb_upper": 103.0,
+                "bb_lower": 97.0,
+                "atr": 1.0,
+                "adx": 24.0,
+                "close_series": [99.0, 100.0, 101.0],
+                "vwap_series": [100.0, 100.2, 100.5],
+            },
+            "4h": {
+                "timestamp": 1714132800,
+                "macd_hist_series": [0.01, 0.02],
+                "bb_middle": 99.5,
+                "bb_upper": 104.0,
+                "bb_lower": 95.0,
+                "adx": 22.0,
+                "close_series": [98.0, 99.5, 101.0],
+            },
+        }
+    }
+
+    decision = engine._decide_macd_v2_strategy(
+        "VETUSDT",
+        {"positions": {}},
+        101.0,
+        market_flow_context,
+        {"regime": "trend", "adx": 24.0, "atr_pct": 0.01},
+    )
+
+    assert decision.operation == Operation.BUY
+    assert decision.time_in_force == TimeInForce.GTC
+    assert decision.metadata["execution_route"] == "priority_execution"
+    assert decision.metadata["entry_time_in_force"] == "GTC"
+    assert decision.metadata["entry_expire_seconds"] == 15
+    assert decision.metadata["entry_price_mode"] == "elastic_limit"
+    assert decision.metadata["priority_execution_applied"] is True
+    assert decision.metadata["competition_score"] == pytest.approx(1.0465, rel=1e-6)
+
+
+def test_macd_v2_priority_execution_uses_vip_route_for_score_above_vip_floor() -> None:
+    cfg = _cfg()
+    cfg["fund_flow"]["strategy_mode"] = "macd_mtf_strategy_v2"
+    cfg["fund_flow"]["macd_mtf_strategy_v2"] = {
+        "entry_filters": {
+            "enable_priority_execution": True,
+            "priority_exec_min_score": 0.90,
+            "priority_exec_expire_seconds": 15,
+            "priority_exec_vip_min_score": 0.92,
+            "priority_exec_vip_expire_seconds": 30,
+            "priority_exec_vip_allow_retry": True,
+        }
+    }
+    engine = FundFlowDecisionEngine(cfg)
+
+    class _StubStrategyEngine:
+        def analyze(self, **_kwargs):
+            return MACDSignalV2(
+                direction="long",
+                signal_score=0.93,
+                signal_type_1h="flip_bullish",
+                entry_type_15m="rsi_spring",
+                vwap_score=0.04,
+                vwap_state="long_dual_support",
+                ema_multiplier=1.0,
+                ema_structure_status="normal",
+                details={
+                    "rsi_exposure_mult": 1.0,
+                    "rsi_macd_conflict": False,
+                },
+            )
+
+        def calculate_leverage(self, *args, **kwargs):
+            return 4
+
+        def resolve_session_position_scale(self, *args, **kwargs):
+            return 1.0
+
+        def resolve_symbol_risk_session_scale(self, *args, **kwargs):
+            return 1.0
+
+        def calculate_position_portion(self, *args, **kwargs):
+            return 0.20
+
+        def is_watchlist_symbol(self, symbol):
+            return False
+
+        def resolve_4h_shrink_exit_policy(self, **kwargs):
+            return {"active": False}
+
+    engine._macd_v2_engine_for_symbol = lambda _symbol: (_StubStrategyEngine(), None)
+    engine._build_macd_v2_4h_regime_state = lambda **_kwargs: {
+        "side_override_mode": "BOTH",
+        "state": "trend",
+        "phase": "active",
+        "side": "long",
+        "max_leverage": 4,
+        "close_on_reverse": False,
+    }
+
+    market_flow_context = {
+        "timeframes": {
+            "15m": {
+                "timestamp": 1714132800,
+                "macd_hist_series": [0.01, 0.02],
+                "volume": 1000.0,
+                "avg_volume": 500.0,
+                "bb_middle": 100.0,
+                "bb_upper": 102.0,
+                "bb_lower": 98.0,
+                "close": 101.0,
+                "close_series": [99.0, 100.0, 101.0],
+            },
+            "1h": {
+                "timestamp": 1714132800,
+                "macd_hist_series": [0.01, 0.02],
+                "vwap": 100.5,
+                "close": 101.0,
+                "bb_middle": 100.0,
+                "bb_upper": 103.0,
+                "bb_lower": 97.0,
+                "atr": 1.0,
+                "adx": 24.0,
+                "close_series": [99.0, 100.0, 101.0],
+                "vwap_series": [100.0, 100.2, 100.5],
+            },
+            "4h": {
+                "timestamp": 1714132800,
+                "macd_hist_series": [0.01, 0.02],
+                "bb_middle": 99.5,
+                "bb_upper": 104.0,
+                "bb_lower": 95.0,
+                "adx": 22.0,
+                "close_series": [98.0, 99.5, 101.0],
+            },
+        }
+    }
+
+    decision = engine._decide_macd_v2_strategy(
+        "VETUSDT",
+        {"positions": {}},
+        101.0,
+        market_flow_context,
+        {"regime": "trend", "adx": 24.0, "atr_pct": 0.01},
+    )
+
+    assert decision.operation == Operation.BUY
+    assert decision.time_in_force == TimeInForce.GTC
+    assert decision.metadata["execution_route"] == "priority_execution_vip"
+    assert decision.metadata["entry_time_in_force"] == "GTC"
+    assert decision.metadata["entry_expire_seconds"] == 30
+    assert decision.metadata["entry_price_mode"] == "elastic_limit"
+    assert decision.metadata["priority_execution_applied"] is True
+    assert decision.metadata["priority_execution_tier"] == "vip"
+    assert decision.metadata["entry_retry_enabled"] is True
+    assert decision.metadata["entry_retry_max_attempts"] == 1
 
 
 def test_decide_hold_when_long_score_lacks_breakout_or_pullback():
@@ -1404,4 +1934,307 @@ def test_rule_stop_trigger_short_runner_exits_on_below_zero_golden_cross():
     assert stop_state["runner_active"] is True
     assert stop_state["exit_stage"] == "RUNNER"
     assert stop_state["exit_trigger"] == "macd_golden_cross_below_zero"
+
+
+def test_macd_v2_vol_vwap_warn_settings_propagate_from_config() -> None:
+    cfg = _cfg()
+    cfg["fund_flow"]["strategy_mode"] = "macd_mtf_strategy_v2"
+    cfg["fund_flow"]["macd_mtf_strategy_v2"] = {
+        "entry_filters": {
+            "vol_vwap_warn_min_score_vol": 0.02,
+            "vol_vwap_warn_min_vwap_score": 0.03,
+            "disable_red_bar_shrinking_long_dual_support_entries": False,
+            "disable_green_bar_shrinking_short_dual_pressure_entries": False,
+        },
+        "position_management": {
+            "vol_vwap_warn_position_scale": 0.25,
+        },
+    }
+
+    engine = FundFlowDecisionEngine(cfg)
+
+    assert engine.macd_v2_config.vol_vwap_warn_min_score_vol == pytest.approx(0.02, rel=1e-6)
+    assert engine.macd_v2_config.vol_vwap_warn_min_vwap_score == pytest.approx(0.03, rel=1e-6)
+    assert engine.vol_vwap_warn_position_scale == pytest.approx(0.25, rel=1e-6)
+    assert engine.macd_v2_config.disable_red_bar_shrinking_long_dual_support_entries is False
+    assert engine.macd_v2_config.disable_green_bar_shrinking_short_dual_pressure_entries is False
+
+
+def test_macd_v2_buy_portion_is_scaled_when_vol_vwap_warn_is_set() -> None:
+    cfg = _cfg()
+    cfg["fund_flow"]["strategy_mode"] = "macd_mtf_strategy_v2"
+    cfg["fund_flow"]["macd_mtf_strategy_v2"] = {
+        "position_management": {"vol_vwap_warn_position_scale": 0.50},
+    }
+    engine = FundFlowDecisionEngine(cfg)
+
+    class _StubStrategyEngine:
+        def analyze(self, **_kwargs):
+            return MACDSignalV2(
+                direction="long",
+                signal_score=0.82,
+                signal_type_1h="red_bar_growing",
+                entry_type_15m="rsi_confirmed",
+                vwap_score=0.04,
+                details={
+                    "vol_vwap_warn": True,
+                    "score_volume": 0.033,
+                    "vwap_score": 0.04,
+                    "rsi_exposure_mult": 1.0,
+                    "rsi_macd_conflict": False,
+                },
+            )
+
+        def calculate_leverage(self, *args, **kwargs):
+            return 3
+
+        def resolve_session_position_scale(self, *args, **kwargs):
+            return 1.0
+
+        def resolve_symbol_risk_session_scale(self, *args, **kwargs):
+            return 1.0
+
+        def calculate_position_portion(self, *args, **kwargs):
+            return 0.20
+
+        def is_watchlist_symbol(self, symbol):
+            return False
+
+        def resolve_4h_shrink_exit_policy(self, **kwargs):
+            return {"active": False}
+
+    engine._macd_v2_engine_for_symbol = lambda _symbol: (_StubStrategyEngine(), None)
+    engine._build_macd_v2_4h_regime_state = lambda **_kwargs: {
+        "side_override_mode": "BOTH",
+        "state": "trend",
+        "phase": "active",
+        "side": "long",
+        "close_on_reverse": False,
+    }
+
+    market_flow_context = {
+        "timeframes": {
+            "15m": {"timestamp": 1714132800, "macd_hist_series": [0.01, 0.02], "close": 101.0},
+            "1h": {"timestamp": 1714132800, "macd_hist_series": [0.01, 0.02], "vwap": 100.0, "close": 101.0},
+            "4h": {"timestamp": 1714132800, "macd_hist_series": [0.01, 0.02], "close": 101.0},
+        }
+    }
+
+    decision = engine._decide_macd_v2_strategy(
+        "ZROUSDT",
+        {"positions": {}},
+        101.0,
+        market_flow_context,
+        {"regime": "trend", "adx": 24.0, "atr_pct": 0.01},
+    )
+
+    assert decision.operation == Operation.BUY
+    assert decision.target_portion_of_balance == pytest.approx(0.10, rel=1e-6)
+    assert decision.metadata["vol_vwap_warn"] is True
+    assert decision.metadata["vol_vwap_warn_position_scaled"] is True
+    assert decision.metadata["vol_vwap_warn_position_scale"] == pytest.approx(0.50, rel=1e-6)
+    assert decision.metadata["vol_vwap_warn_original_portion"] == pytest.approx(0.20, rel=1e-6)
+    assert decision.metadata["vol_vwap_warn_adjusted_portion"] == pytest.approx(0.10, rel=1e-6)
+    assert decision.metadata["score_volume"] == pytest.approx(0.033, rel=1e-6)
+    assert decision.metadata["vwap_score"] == pytest.approx(0.04, rel=1e-6)
+
+
+def test_macd_v2_sell_portion_is_not_scaled_without_vol_vwap_warn() -> None:
+    cfg = _cfg()
+    cfg["fund_flow"]["strategy_mode"] = "macd_mtf_strategy_v2"
+    cfg["fund_flow"]["macd_mtf_strategy_v2"] = {
+        "position_management": {"vol_vwap_warn_position_scale": 0.50},
+    }
+    engine = FundFlowDecisionEngine(cfg)
+
+    class _StubStrategyEngine:
+        def analyze(self, **_kwargs):
+            return MACDSignalV2(
+                direction="short",
+                signal_score=0.82,
+                signal_type_1h="green_bar_growing",
+                entry_type_15m="rsi_confirmed",
+                vwap_score=0.42,
+                details={
+                    "vol_vwap_warn": False,
+                    "score_volume": 0.10,
+                    "vwap_score": 0.42,
+                    "rsi_exposure_mult": 1.0,
+                    "rsi_macd_conflict": False,
+                },
+            )
+
+        def calculate_leverage(self, *args, **kwargs):
+            return 3
+
+        def resolve_session_position_scale(self, *args, **kwargs):
+            return 1.0
+
+        def resolve_symbol_risk_session_scale(self, *args, **kwargs):
+            return 1.0
+
+        def calculate_position_portion(self, *args, **kwargs):
+            return 0.20
+
+        def is_watchlist_symbol(self, symbol):
+            return False
+
+        def resolve_4h_shrink_exit_policy(self, **kwargs):
+            return {"active": False}
+
+    engine._macd_v2_engine_for_symbol = lambda _symbol: (_StubStrategyEngine(), None)
+    engine._build_macd_v2_4h_regime_state = lambda **_kwargs: {
+        "side_override_mode": "BOTH",
+        "state": "trend",
+        "phase": "active",
+        "side": "short",
+        "close_on_reverse": False,
+    }
+
+    market_flow_context = {
+        "timeframes": {
+            "15m": {"timestamp": 1714132800, "macd_hist_series": [0.01, 0.02], "close": 99.0},
+            "1h": {"timestamp": 1714132800, "macd_hist_series": [0.01, 0.02], "vwap": 100.0, "close": 99.0},
+            "4h": {"timestamp": 1714132800, "macd_hist_series": [0.01, 0.02], "close": 99.0},
+        }
+    }
+
+    decision = engine._decide_macd_v2_strategy(
+        "DOGEUSDT",
+        {"positions": {}},
+        99.0,
+        market_flow_context,
+        {"regime": "trend", "adx": 24.0, "atr_pct": 0.01},
+    )
+
+    assert decision.operation == Operation.SELL
+    assert decision.target_portion_of_balance == pytest.approx(0.20, rel=1e-6)
+    assert decision.metadata["vol_vwap_warn"] is False
+    assert decision.metadata["vol_vwap_warn_position_scaled"] is False
+    assert "vol_vwap_warn_original_portion" not in decision.metadata
+
+
+def test_macd_v2_neutral_signal_triggers_macd_1h_flip_exit_close() -> None:
+    cfg = _cfg()
+    cfg["fund_flow"]["strategy_mode"] = "macd_mtf_strategy_v2"
+    cfg["fund_flow"]["macd_mtf_strategy_v2"] = {
+        "exit_management": {
+            "macd_1h_flip_exit": {
+                "enabled": True,
+                "confirm_bars": 2,
+                "flip_min_magnitude": 0.0003,
+                "min_profit_to_early_exit": 0.006,
+            }
+        },
+        "stop_loss_config": {"enable_4h_shrink_exit": False},
+    }
+    engine = FundFlowDecisionEngine(cfg)
+
+    class _StubStrategyEngine:
+        def analyze(self, **_kwargs):
+            return MACDSignalV2(
+                direction="neutral",
+                signal_score=0.0,
+                signal_type_1h="red_bar_growing",
+                details={
+                    "macd_histogram_1h_current": -0.0005,
+                    "macd_histogram_1h_history": [-0.0006, -0.0005],
+                },
+            )
+
+        def resolve_4h_shrink_exit_policy(self, **kwargs):
+            return {"active": False}
+
+    engine._macd_v2_engine_for_symbol = lambda _symbol: (_StubStrategyEngine(), None)
+    engine._build_macd_v2_4h_regime_state = lambda **_kwargs: {
+        "side_override_mode": "BOTH",
+        "state": "trend",
+        "phase": "active",
+        "side": "long",
+        "close_on_reverse": False,
+    }
+
+    market_flow_context = {
+        "timeframes": {
+            "15m": {"timestamp": 1714132800, "macd_hist_series": [0.01, 0.02], "high": 100.9, "low": 100.6, "close": 100.8},
+            "1h": {"timestamp": 1714132800, "macd_hist_series": [0.01, 0.02], "macd_hist": -0.0005, "macd_hist_prev": -0.0006, "close": 100.8},
+            "4h": {"timestamp": 1714132800, "macd_hist_series": [0.01, 0.02], "close": 100.8},
+        }
+    }
+    portfolio = {"positions": {"VETUSDT": {"side": "LONG", "entry_price": 100.0}}}
+
+    decision = engine._decide_macd_v2_strategy(
+        "VETUSDT",
+        portfolio,
+        100.8,
+        market_flow_context,
+        {"regime": "trend", "adx": 24.0, "atr_pct": 0.01},
+    )
+
+    assert decision.operation == Operation.CLOSE
+    assert decision.target_portion_of_balance == pytest.approx(1.0, rel=1e-6)
+    assert "macd_1h_flip_exit" in decision.reason
+
+
+def test_macd_v2_neutral_signal_triggers_rsi_overheat_partial_close() -> None:
+    cfg = _cfg()
+    cfg["fund_flow"]["strategy_mode"] = "macd_mtf_strategy_v2"
+    cfg["fund_flow"]["macd_mtf_strategy_v2"] = {
+        "exit_management": {
+            "rsi_overheat_exit": {
+                "enabled": True,
+                "rsi_1h_overheat": 78.0,
+                "min_mfe_to_trigger": 0.012,
+                "partial_exit_ratio": 0.50,
+            }
+        },
+        "stop_loss_config": {"enable_4h_shrink_exit": False},
+    }
+    engine = FundFlowDecisionEngine(cfg)
+
+    class _StubStrategyEngine:
+        def analyze(self, **_kwargs):
+            return MACDSignalV2(
+                direction="neutral",
+                signal_score=0.0,
+                signal_type_1h="red_bar_growing",
+                details={
+                    "rsi_1h": 80.0,
+                    "macd_histogram_1h_current": 0.0010,
+                    "macd_histogram_1h_prev": 0.0014,
+                },
+            )
+
+        def resolve_4h_shrink_exit_policy(self, **kwargs):
+            return {"active": False}
+
+    engine._macd_v2_engine_for_symbol = lambda _symbol: (_StubStrategyEngine(), None)
+    engine._build_macd_v2_4h_regime_state = lambda **_kwargs: {
+        "side_override_mode": "BOTH",
+        "state": "trend",
+        "phase": "active",
+        "side": "long",
+        "close_on_reverse": False,
+    }
+
+    market_flow_context = {
+        "timeframes": {
+            "15m": {"timestamp": 1714132800, "macd_hist_series": [0.01, 0.02], "high": 101.4, "low": 100.7, "close": 101.0},
+            "1h": {"timestamp": 1714132800, "macd_hist_series": [0.01, 0.02], "close": 101.0},
+            "4h": {"timestamp": 1714132800, "macd_hist_series": [0.01, 0.02], "close": 101.0},
+        }
+    }
+    portfolio = {"positions": {"VETUSDT": {"side": "LONG", "entry_price": 100.0}}}
+
+    decision = engine._decide_macd_v2_strategy(
+        "VETUSDT",
+        portfolio,
+        101.0,
+        market_flow_context,
+        {"regime": "trend", "adx": 24.0, "atr_pct": 0.01},
+    )
+
+    assert decision.operation == Operation.CLOSE
+    assert decision.target_portion_of_balance == pytest.approx(0.50, rel=1e-6)
+    assert "rsi_overheat_exit" in decision.reason
 

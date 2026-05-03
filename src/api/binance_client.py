@@ -901,6 +901,7 @@ class BinanceClient:
         if "papi" in base:
             # 不同账户版本的 PAPI 条件单批量撤销端点存在差异，逐个尝试并静默回退。
             bulk_paths = [
+                "/papi/v1/um/algo/allOpenOrders",
                 "/papi/v1/um/conditional/all",
                 "/papi/v1/um/conditional/allOpenOrders",
             ]
@@ -934,21 +935,23 @@ class BinanceClient:
                     continue
                 order_id = order.get("orderId")
                 strategy_id = order.get("strategyId")
-                if order_id is None and strategy_id is None:
+                algo_id = order.get("algoId")
+                if order_id is None and strategy_id is None and algo_id is None:
                     failed += 1
                     continue
 
-                cancel_params: Dict[str, Any] = {"symbol": symbol}
+                cancel_params: Dict[str, Any] = {}
+                if algo_id is None:
+                    cancel_params["symbol"] = symbol
                 if order_id is not None:
                     cancel_params["orderId"] = order_id
                 if strategy_id is not None:
                     cancel_params["strategyId"] = strategy_id
+                if algo_id is not None:
+                    cancel_params["algoId"] = algo_id
 
-                status_code, _ = self._papi_request_json(
-                    method="DELETE",
-                    path="/papi/v1/um/conditional/order",
-                    params=cancel_params,
-                )
+                cancel_path = "/papi/v1/um/algo/order" if algo_id is not None else "/papi/v1/um/conditional/order"
+                status_code, _ = self._papi_request_json(method="DELETE", path=cancel_path, params=cancel_params)
                 if status_code < 400:
                     cancelled += 1
                 else:
@@ -984,6 +987,7 @@ class BinanceClient:
 
         params = {"symbol": symbol} if symbol else {}
         candidate_paths = [
+            "/papi/v1/um/algo/openAlgoOrders",
             "/papi/v1/um/conditional/openOrders",
             "/papi/v1/um/conditional/openOrder",
         ]
@@ -1006,7 +1010,7 @@ class BinanceClient:
 
     @staticmethod
     def _order_type_upper(order: Dict[str, Any]) -> str:
-        return str(order.get("type") or order.get("strategyType") or "").upper()
+        return str(order.get("type") or order.get("orderType") or order.get("strategyType") or "").upper()
 
     def _is_active_protection_order(self, order: Dict[str, Any]) -> bool:
         otype = self._order_type_upper(order)
@@ -1064,8 +1068,9 @@ class BinanceClient:
             key = (
                 str(order.get("orderId") or ""),
                 str(order.get("strategyId") or ""),
+                str(order.get("algoId") or ""),
                 self._order_type_upper(order),
-                str(order.get("stopPrice") or order.get("price") or ""),
+                str(order.get("stopPrice") or order.get("triggerPrice") or order.get("price") or ""),
             )
             if key in seen:
                 continue
@@ -1074,18 +1079,24 @@ class BinanceClient:
         return deduped
 
     def _cancel_single_papi_conditional_order(self, symbol: str, order: Dict[str, Any]) -> bool:
-        params: Dict[str, Any] = {"symbol": symbol}
+        params: Dict[str, Any] = {}
         order_id = order.get("orderId")
         strategy_id = order.get("strategyId")
-        if order_id is None and strategy_id is None:
+        algo_id = order.get("algoId")
+        if order_id is None and strategy_id is None and algo_id is None:
             return False
+        if algo_id is None:
+            params["symbol"] = symbol
         if order_id is not None:
             params["orderId"] = order_id
         if strategy_id is not None:
             params["strategyId"] = strategy_id
+        if algo_id is not None:
+            params["algoId"] = algo_id
+        path = "/papi/v1/um/algo/order" if algo_id is not None else "/papi/v1/um/conditional/order"
         status_code, _ = self._papi_request_json(
             method="DELETE",
-            path="/papi/v1/um/conditional/order",
+            path=path,
             params=params,
         )
         return status_code < 400
@@ -1257,10 +1268,10 @@ class BinanceClient:
                 if isinstance(code, (int, float)) and code < 0:
                     err_orders.append(item)
                     continue
-                if item.get("orderId") is not None:
+                if item.get("orderId") is not None or item.get("strategyId") is not None or item.get("algoId") is not None:
                     ok_orders.append(item)
                     continue
-                # 某些端点返回文本结构体，缺少 orderId 也视为失败
+                # 某些端点返回文本结构体，缺少成功标识也视为失败
                 err_orders.append(item)
 
             if len(ok_orders) == 0:

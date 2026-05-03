@@ -262,6 +262,7 @@ class TradingBot:
         self._trade_fill_log_name = "trade_fills_utc.csv"
         self._api_cycle_stats_log_name = "api_cycle_stats_utc.jsonl"
         self._trade_fill_logged_keys: set[str] = set()
+        self._trade_fill_last_seen_ms_by_symbol: Dict[str, int] = {}
         self._consecutive_losses: int = 0
         self._cooldown_expires: Optional[datetime] = None
         self._cooldown_reason: Optional[str] = None
@@ -276,6 +277,7 @@ class TradingBot:
         self._pre_risk_exit_streak_by_pos: Dict[str, int] = {}
         self._dca_stage_by_pos: Dict[str, int] = {}
         self._winner_pyramid_stage_by_pos: Dict[str, int] = {}
+        self._protection_plan_by_pos: Dict[str, Dict[str, Any]] = {}
         self._opened_symbols_this_cycle: set[str] = set()
         self._volatility_spike_streak_by_symbol: Dict[str, int] = {}
         self._volatility_last_bucket_by_symbol: Dict[str, str] = {}
@@ -779,6 +781,12 @@ class TradingBot:
                 continue
             if dedup_key:
                 self._trade_fill_logged_keys.add(dedup_key)
+            symbol = str(row.get("合约") or "").upper()
+            ts_ms = self._to_int(row.get("_ts_ms"), 0)
+            if symbol and ts_ms > 0:
+                prev_ts = int(self._trade_fill_last_seen_ms_by_symbol.get(symbol, 0) or 0)
+                if ts_ms > prev_ts:
+                    self._trade_fill_last_seen_ms_by_symbol[symbol] = ts_ms
             dedup_rows.append(row)
         if not dedup_rows:
             return
@@ -798,6 +806,97 @@ class TradingBot:
         log_path = self._resolve_api_cycle_stats_log_path_utc()
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+    @staticmethod
+    def _normalize_trade_fill_fee(fee: float) -> float:
+        fee_value = float(fee or 0.0)
+        if abs(fee_value) < 1e-12:
+            return 0.0
+        return -abs(fee_value)
+
+    def _build_trade_fill_rows_from_fills(
+        self,
+        *,
+        symbol: str,
+        fills: List[Dict[str, Any]],
+        order: Optional[Dict[str, Any]] = None,
+        source: str = "user_trades",
+    ) -> List[Dict[str, Any]]:
+        symbol_up = str(symbol or "").upper()
+        default_order = order if isinstance(order, dict) else {}
+        default_order_id = self._to_int(default_order.get("orderId"), -1)
+        default_side = str(default_order.get("side") or "").upper()
+        rows: List[Dict[str, Any]] = []
+
+        for fill in fills:
+            if not isinstance(fill, dict):
+                continue
+            ts_ms = self._to_int(fill.get("time"), 0)
+            if ts_ms > 0:
+                ts_utc = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            else:
+                ts_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            order_id = self._to_int(fill.get("orderId"), default_order_id)
+            side = str(fill.get("side") or default_side).upper()
+            qty = self._to_float(fill.get("qty"), self._to_float(fill.get("executedQty"), 0.0))
+            price = self._to_float(
+                fill.get("price"),
+                self._to_float(default_order.get("avgPrice"), self._to_float(default_order.get("price"), 0.0)),
+            )
+            quote_qty = self._to_float(fill.get("quoteQty"), qty * price)
+            fee = self._normalize_trade_fill_fee(self._to_float(fill.get("commission"), 0.0))
+            fee_asset = str(fill.get("commissionAsset") or "USDT")
+            realized = self._to_float(fill.get("realizedPnl"), 0.0)
+            trade_id = str(fill.get("id") or fill.get("tradeId") or "")
+            rows.append(
+                {
+                    "_dedup_key": f"{symbol_up}|{order_id}|{trade_id or ts_ms}|{qty}|{price}",
+                    "_ts_ms": ts_ms,
+                    "时间(UTC)": ts_utc,
+                    "合约": symbol_up,
+                    "方向": self._normalize_fill_side(side),
+                    "价格": price,
+                    "数量": qty,
+                    "成交额": quote_qty,
+                    "手续费": fee,
+                    "手续费结算币种": fee_asset,
+                    "已实现盈亏": realized,
+                    "计价资产": "USDT",
+                    "订单ID": str(order_id) if order_id > 0 else "",
+                    "成交ID": trade_id,
+                    "来源": source,
+                }
+            )
+        return rows
+
+    def _sync_recent_trade_fills(self, symbols: List[str]) -> None:
+        if not isinstance(symbols, list) or not symbols:
+            return
+        rows: List[Dict[str, Any]] = []
+        seen_symbols: set[str] = set()
+
+        for raw_symbol in symbols:
+            symbol = str(raw_symbol or "").upper()
+            if not symbol or symbol in seen_symbols:
+                continue
+            seen_symbols.add(symbol)
+            fills = self._fetch_order_trade_fills(symbol=symbol, order_id=None)
+            if not fills:
+                continue
+
+            last_seen_ms = int(self._trade_fill_last_seen_ms_by_symbol.get(symbol, 0) or 0)
+            fresh_fills: List[Dict[str, Any]] = []
+            for fill in fills:
+                if not isinstance(fill, dict):
+                    continue
+                ts_ms = self._to_int(fill.get("time"), 0)
+                if last_seen_ms > 0 and ts_ms > 0 and ts_ms < last_seen_ms:
+                    continue
+                fresh_fills.append(fill)
+            if fresh_fills:
+                rows.extend(self._build_trade_fill_rows_from_fills(symbol=symbol, fills=fresh_fills))
+
+        self._append_trade_fill_rows(rows)
 
     def _write_trade_fill_log(
         self,
@@ -819,41 +918,7 @@ class TradingBot:
         fills = self._fetch_order_trade_fills(symbol=symbol, order_id=order_id)
         rows: List[Dict[str, Any]] = []
         if fills:
-            for fill in fills:
-                ts_ms = self._to_int(fill.get("time"), 0)
-                if ts_ms > 0:
-                    ts_utc = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-                else:
-                    ts_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-                side = str(fill.get("side") or order.get("side") or "").upper()
-                qty = self._to_float(fill.get("qty"), self._to_float(fill.get("executedQty"), 0.0))
-                price = self._to_float(
-                    fill.get("price"),
-                    self._to_float(order.get("avgPrice"), self._to_float(order.get("price"), 0.0)),
-                )
-                quote_qty = self._to_float(fill.get("quoteQty"), qty * price)
-                fee = self._to_float(fill.get("commission"), 0.0)
-                fee_asset = str(fill.get("commissionAsset") or "USDT")
-                realized = self._to_float(fill.get("realizedPnl"), 0.0)
-                trade_id = str(fill.get("id") or fill.get("tradeId") or "")
-                rows.append(
-                    {
-                        "_dedup_key": f"{symbol}|{order_id}|{trade_id or ts_ms}|{qty}|{price}",
-                        "时间(UTC)": ts_utc,
-                        "合约": symbol,
-                        "方向": self._normalize_fill_side(side),
-                        "价格": price,
-                        "数量": qty,
-                        "成交额": quote_qty,
-                        "手续费": fee,
-                        "手续费结算币种": fee_asset,
-                        "已实现盈亏": realized,
-                        "计价资产": "USDT",
-                        "订单ID": str(order_id),
-                        "成交ID": trade_id,
-                        "来源": "user_trades",
-                    }
-                )
+            rows.extend(self._build_trade_fill_rows_from_fills(symbol=symbol, fills=fills, order=order))
         else:
             # 若 userTrades 临时不可用，回退记录订单回报，避免完全丢单据。
             exec_qty = self._to_float(order.get("executedQty"), 0.0)
@@ -869,6 +934,7 @@ class TradingBot:
                 rows.append(
                     {
                         "_dedup_key": f"{symbol}|{order_id}|fallback|{exec_qty}|{price}",
+                        "_ts_ms": ts_ms,
                         "时间(UTC)": ts_utc,
                         "合约": symbol,
                         "方向": self._normalize_fill_side(side),
@@ -1554,6 +1620,8 @@ class TradingBot:
         return {
             "enabled": bool(gate_cfg.get("enabled", True)),
             "force_exit_on_gate": bool(gate_cfg.get("force_exit_on_gate", True)),
+            "phase1_entry_only": bool(gate_cfg.get("phase1_entry_only", False)),
+            "shadow_mode": bool(gate_cfg.get("shadow_mode", False)),
             "entry_block_actions": entry_block_actions,
             "entry_hold_portion_scale": min(1.0, max(0.1, self._to_float(gate_cfg.get("entry_hold_portion_scale", 0.6), 0.6))),
             "entry_hold_leverage_cap": max(
@@ -2946,6 +3014,14 @@ class TradingBot:
         cfg = self._pretrade_risk_gate_config()
         if not bool(cfg.get("enabled", True)):
             return decision, {"enabled": False, "action": "BYPASS"}
+        shadow_mode = bool(cfg.get("shadow_mode", False))
+
+        def _shadow_return(result_meta: Dict[str, Any], shadow_action: str) -> Tuple[FundFlowDecision, Dict[str, Any]]:
+            result_meta["shadow_mode"] = True
+            result_meta["shadow_action"] = str(shadow_action or result_meta.get("action", "HOLD")).upper()
+            if isinstance(md, dict):
+                md["pretrade_risk_gate"] = result_meta
+            return decision, result_meta
 
         md_raw = getattr(decision, "metadata", None)
         md: Dict[str, Any] = md_raw if isinstance(md_raw, dict) else {}
@@ -3045,6 +3121,8 @@ class TradingBot:
                 md["entry_execution_policy"] = exec_mode
                 if exec_reason:
                     md["execution_quality_reason"] = exec_reason
+            if shadow_mode:
+                return _shadow_return(gate_meta, "BLOCK")
             base_reason = str(decision.reason or "").strip()
             block_reason = f"EXECUTION_1M_BLOCK mode={exec_mode}"
             if exec_reason:
@@ -3095,6 +3173,13 @@ class TradingBot:
             }
             if isinstance(md, dict):
                 md["pretrade_risk_gate"] = gate_meta
+            if isinstance(position, dict) and bool(cfg.get("phase1_entry_only", False)):
+                gate_meta["phase1_entry_only"] = True
+                if isinstance(md, dict):
+                    md["pretrade_risk_gate"] = gate_meta
+                return (decision, gate_meta) if not shadow_mode else _shadow_return(gate_meta, gate_action)
+            if shadow_mode:
+                return _shadow_return(gate_meta, gate_action)
 
             pos_side = str(position.get("side", "")).upper() if isinstance(position, dict) else ""
             pos_key = self._position_track_key(symbol, pos_side) if pos_side in ("LONG", "SHORT") else ""
@@ -3697,6 +3782,31 @@ class TradingBot:
                     if isinstance(k, str) and isinstance(v, str):
                         conflict_reason[k.upper()] = v
             self._conflict_cooldown_reason_by_symbol = conflict_reason
+            raw_protection_plan = data.get("protection_plan_by_pos", {})
+            protection_plan: Dict[str, Dict[str, Any]] = {}
+            if isinstance(raw_protection_plan, dict):
+                for k, v in raw_protection_plan.items():
+                    if not isinstance(k, str) or not isinstance(v, dict):
+                        continue
+                    tp_levels_raw = v.get("tp_levels")
+                    tp_levels: List[Dict[str, float]] = []
+                    if isinstance(tp_levels_raw, list):
+                        for item in tp_levels_raw:
+                            if not isinstance(item, dict):
+                                continue
+                            try:
+                                price = float(item.get("price"))
+                                reduce_pct = float(item.get("reduce_pct"))
+                            except Exception:
+                                continue
+                            if price > 0 and reduce_pct > 0:
+                                tp_levels.append({"price": price, "reduce_pct": reduce_pct})
+                    protection_plan[k.upper()] = {
+                        "stop_loss_price": self._to_float(v.get("stop_loss_price"), 0.0) or None,
+                        "take_profit_price": self._to_float(v.get("take_profit_price"), 0.0) or None,
+                        "tp_levels": tp_levels,
+                    }
+            self._protection_plan_by_pos = protection_plan
         except Exception:
             # 状态文件损坏时忽略，避免启动失败。
             pass
@@ -3711,6 +3821,7 @@ class TradingBot:
             "peak_equity": self._peak_equity,
             "dca_stage_by_pos": self._dca_stage_by_pos,
             "winner_pyramid_stage_by_pos": self._winner_pyramid_stage_by_pos,
+            "protection_plan_by_pos": self._protection_plan_by_pos,
             "conflict_exit_streak_by_symbol": self._conflict_exit_streak_by_symbol,
             "conflict_cooldown_until_by_symbol": {
                 k: v.isoformat() for k, v in self._conflict_cooldown_until_by_symbol.items() if isinstance(v, datetime)
@@ -4745,7 +4856,7 @@ class TradingBot:
             is_reduce = bool(order.get("reduceOnly", False))
             is_close = bool(order.get("closePosition", False))
             order_type = str(order.get("type", "")).upper()
-            strategy_type = str(order.get("strategyType", "")).upper()
+            strategy_type = str(order.get("orderType") or order.get("strategyType") or "").upper()
             if "TAKE_PROFIT" in order_type or "STOP" in order_type:
                 continue
             if "TAKE_PROFIT" in strategy_type or "STOP" in strategy_type:
@@ -4756,6 +4867,76 @@ class TradingBot:
             if status in ("NEW", "PARTIALLY_FILLED", ""):
                 return True
         return False
+
+    def _pending_entry_order_stale_seconds(self, stale_seconds_override: Optional[int] = None) -> int:
+        if stale_seconds_override is not None:
+            return max(300, int(self._to_float(stale_seconds_override, 0)))
+
+        ff_cfg = self.config.get("fund_flow", {}) or {}
+        degrade_cfg = ff_cfg.get("execution_degradation", {}) if isinstance(ff_cfg.get("execution_degradation"), dict) else {}
+        raw_stale_seconds = degrade_cfg.get("open_order_stale_seconds", ff_cfg.get("open_order_stale_seconds"))
+        if raw_stale_seconds is not None:
+            return max(300, int(self._to_float(raw_stale_seconds, 0)))
+
+        decision_tf_seconds = self._decision_timeframe_seconds() or 15 * 60
+        return max(3600, int(decision_tf_seconds) * 8)
+
+    def _cancel_stale_pending_entry_orders(self, symbol: str, stale_seconds: Optional[int] = None) -> Dict[str, Any]:
+        threshold_seconds = self._pending_entry_order_stale_seconds(stale_seconds)
+        summary = {
+            "checked": 0,
+            "stale": 0,
+            "cancelled": 0,
+            "failed": 0,
+            "threshold_seconds": threshold_seconds,
+        }
+        try:
+            orders = self.client.get_open_orders(symbol) or []
+        except Exception:
+            return summary
+        if not isinstance(orders, list):
+            return summary
+
+        now_ms = int(time.time() * 1000)
+        for order in orders:
+            if not isinstance(order, dict):
+                continue
+            summary["checked"] += 1
+            is_reduce = bool(order.get("reduceOnly", False))
+            is_close = bool(order.get("closePosition", False))
+            order_type = str(order.get("type", "")).upper()
+            strategy_type = str(order.get("orderType") or order.get("strategyType") or "").upper()
+            if "TAKE_PROFIT" in order_type or "STOP" in order_type:
+                continue
+            if "TAKE_PROFIT" in strategy_type or "STOP" in strategy_type:
+                continue
+            if is_reduce or is_close:
+                continue
+
+            status = str(order.get("status", "")).upper()
+            if status not in ("NEW", "PARTIALLY_FILLED", ""):
+                continue
+
+            ts_raw = order.get("updateTime") or order.get("time") or order.get("transactTime")
+            ts_ms = self._to_float(ts_raw, 0.0)
+            if ts_ms <= 0:
+                continue
+            age_seconds = max(0.0, (now_ms - ts_ms) / 1000.0)
+            if age_seconds < float(threshold_seconds):
+                continue
+
+            summary["stale"] += 1
+            order_id = order.get("orderId")
+            if order_id is None:
+                summary["failed"] += 1
+                continue
+            try:
+                self.client.cancel_order(symbol, int(order_id))
+                summary["cancelled"] += 1
+            except Exception:
+                summary["failed"] += 1
+
+        return summary
 
     def _has_pending_close_order(self, symbol: str) -> bool:
         """Return True when there is an unfilled reduce-only close order for symbol."""
@@ -4773,7 +4954,7 @@ class TradingBot:
             if not (is_reduce or is_close):
                 continue
             order_type = str(order.get("type", "")).upper()
-            strategy_type = str(order.get("strategyType", "")).upper()
+            strategy_type = str(order.get("orderType") or order.get("strategyType") or "").upper()
             if "TAKE_PROFIT" in order_type or "STOP" in order_type:
                 continue
             if "TAKE_PROFIT" in strategy_type or "STOP" in strategy_type:
@@ -4889,7 +5070,7 @@ class TradingBot:
 
         filtered: List[Dict[str, Any]] = []
         for order in orders:
-            order_type = str(order.get("type") or order.get("strategyType") or "").upper()
+            order_type = str(order.get("type") or order.get("orderType") or order.get("strategyType") or "").upper()
             if "TAKE_PROFIT" not in order_type and "STOP" not in order_type:
                 continue
             status = str(order.get("status") or order.get("strategyStatus") or "").upper()
@@ -4902,7 +5083,7 @@ class TradingBot:
                 if order_close_side in ("BUY", "SELL") and order_close_side != expected_close_side:
                     continue
                 if hedge_mode:
-                    if order_side != side_norm:
+                    if order_side and order_side not in (side_norm, "BOTH"):
                         continue
                 elif order_side and order_side not in (side_norm, "BOTH"):
                     continue
@@ -4911,15 +5092,67 @@ class TradingBot:
 
     def _protection_coverage(self, symbol: str, side: Optional[str] = None) -> Dict[str, Any]:
         orders = self._open_protection_orders(symbol, side=side)
+        return self._protection_coverage_from_orders(orders)
+
+    @staticmethod
+    def _protection_coverage_from_orders(orders: Any) -> Dict[str, Any]:
         has_tp = False
         has_sl = False
-        for order in orders:
-            order_type = str(order.get("type") or order.get("strategyType") or "").upper()
+        normalized_orders = [order for order in (orders or []) if isinstance(order, dict)]
+        for order in normalized_orders:
+            order_type = str(order.get("type") or order.get("orderType") or order.get("strategyType") or "").upper()
             if "TAKE_PROFIT" in order_type:
                 has_tp = True
             if "STOP" in order_type:
                 has_sl = True
-        return {"has_tp": has_tp, "has_sl": has_sl, "orders": orders}
+        return {"has_tp": has_tp, "has_sl": has_sl, "orders": normalized_orders}
+
+    def _protection_requirements(self) -> Dict[str, bool]:
+        cfg = getattr(self, "config", {}) or {}
+        ff_cfg = cfg.get("fund_flow", {}) or {}
+        risk_cfg = cfg.get("risk", {}) or {}
+        tp_raw = ff_cfg.get("take_profit_pct", risk_cfg.get("take_profit_default_percent"))
+        sl_raw = ff_cfg.get("stop_loss_pct", risk_cfg.get("stop_loss_default_percent"))
+        tp_levels = ff_cfg.get("take_profit_pct_levels")
+        need_tp = self._normalize_percent(tp_raw, 0.03) > 0 or (
+            isinstance(tp_levels, list) and len(tp_levels) > 0
+        )
+        need_sl = self._normalize_percent(sl_raw, 0.01) > 0 or bool(
+            getattr(self, "_dynamic_stop_loss_enabled", False)
+        )
+        return {"need_tp": need_tp, "need_sl": need_sl}
+
+    def _protection_is_covered(self, coverage: Dict[str, Any]) -> bool:
+        return self._protection_coverage_meets_requirements(coverage)
+
+    def _protection_coverage_meets_requirements(self, coverage: Dict[str, Any]) -> bool:
+        requirements = self._protection_requirements()
+        has_tp = bool(coverage.get("has_tp"))
+        has_sl = bool(coverage.get("has_sl"))
+        return (has_tp or not requirements["need_tp"]) and (has_sl or not requirements["need_sl"])
+
+    def _repair_result_satisfies_protection_requirements(
+        self,
+        repair: Optional[Dict[str, Any]],
+        coverage_after: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        repair_obj = repair if isinstance(repair, dict) else {}
+        repair_status = str(repair_obj.get("status", "")).lower()
+        if repair_status not in ("success", "partial"):
+            return False
+
+        merged_orders: List[Dict[str, Any]] = []
+        if isinstance(coverage_after, dict):
+            merged_orders.extend(
+                [order for order in (coverage_after.get("orders") or []) if isinstance(order, dict)]
+            )
+        merged_orders.extend(
+            [order for order in (repair_obj.get("orders") or []) if isinstance(order, dict)]
+        )
+        if not merged_orders:
+            return False
+        merged_coverage = self._protection_coverage_from_orders(merged_orders)
+        return self._protection_coverage_meets_requirements(merged_coverage)
 
     def _extract_stop_price_from_order(self, order: Dict[str, Any]) -> float:
         """
@@ -4944,7 +5177,7 @@ class TradingBot:
         best = 0.0
         try:
             for o in (orders or []):
-                order_type = str(o.get("type") or o.get("strategyType") or "").upper()
+                order_type = str(o.get("type") or o.get("orderType") or o.get("strategyType") or "").upper()
                 if "STOP" not in order_type:
                     continue
                 p = self._extract_stop_price_from_order(o)
@@ -5133,10 +5366,24 @@ class TradingBot:
 
         ff_cfg = self.config.get("fund_flow", {}) or {}
         risk_cfg = self.config.get("risk", {}) or {}
+        pos_key = self._position_track_key(symbol, side)
+        protection_plan = self._protection_plan_by_pos.get(pos_key, {})
         sl_raw = ff_cfg.get("stop_loss_pct", risk_cfg.get("stop_loss_default_percent"))
         tp_raw = ff_cfg.get("take_profit_pct", risk_cfg.get("take_profit_default_percent"))
         sl_pct = self._normalize_percent(sl_raw, 0.01)
         tp_pct = self._normalize_percent(tp_raw, 0.03)
+        persisted_tp = self._to_float(protection_plan.get("take_profit_price"), 0.0)
+        persisted_sl = self._to_float(protection_plan.get("stop_loss_price"), 0.0)
+        persisted_tp_levels_raw = protection_plan.get("tp_levels")
+        persisted_tp_levels: List[Tuple[float, float]] = []
+        if isinstance(persisted_tp_levels_raw, list):
+            for item in persisted_tp_levels_raw:
+                if not isinstance(item, dict):
+                    continue
+                price = self._to_float(item.get("price"), 0.0)
+                reduce_pct = self._to_float(item.get("reduce_pct"), 0.0)
+                if price > 0 and reduce_pct > 0:
+                    persisted_tp_levels.append((price, reduce_pct))
 
         # 尝试使用动态止损系统
         stop_loss = None
@@ -5176,6 +5423,8 @@ class TradingBot:
                 stop_loss = entry_price * (1.0 - sl_pct) if sl_pct > 0 else None
             else:
                 stop_loss = entry_price * (1.0 + sl_pct) if sl_pct > 0 else None
+        if persisted_sl > 0:
+            stop_loss = persisted_sl
 
         if side == "LONG":
             take_profit = entry_price * (1.0 + tp_pct) if tp_pct > 0 else None
@@ -5183,6 +5432,8 @@ class TradingBot:
         else:
             take_profit = entry_price * (1.0 - tp_pct) if tp_pct > 0 else None
             side_enum = IntentPositionSide.SHORT
+        if persisted_tp > 0:
+            take_profit = persisted_tp
         
         # 打印动态止损信息
         if dynamic_sl_used:
@@ -5194,6 +5445,7 @@ class TradingBot:
             tp=take_profit,
             sl=stop_loss,
             quantity=qty,
+            tp_levels=persisted_tp_levels or None,
         )
 
     def _tighten_protection_for_conflict(
@@ -5363,7 +5615,7 @@ class TradingBot:
                 }
 
             for order in existing_orders:
-                order_type = str(order.get("type") or order.get("strategyType") or "").upper()
+                order_type = str(order.get("type") or order.get("orderType") or order.get("strategyType") or "").upper()
                 if "STOP" in order_type:
                     oid = order.get("orderId")
                     if oid:
@@ -5495,6 +5747,28 @@ class TradingBot:
             p_reduce_no_ps = dict(base_params)
             candidates.append(("reduce_only_market_no_ps", p_reduce_no_ps, True))
 
+        def _finalize_flatten_success(payload: Dict[str, Any]) -> Dict[str, Any]:
+            latest_pos = None
+            try:
+                latest_pos = self.position_data.get_current_position(symbol)
+            except Exception:
+                latest_pos = None
+
+            position_closed = ratio >= 0.999
+            if isinstance(latest_pos, dict):
+                latest_side = self._extract_position_side(latest_pos)
+                latest_amount = self._extract_position_amount(latest_pos)
+                position_closed = not (latest_side == side and latest_amount > 0.0)
+
+            if position_closed:
+                try:
+                    cancel_result = self.client.cancel_all_conditional_orders(symbol)
+                    if isinstance(cancel_result, dict):
+                        payload["protection_cleanup"] = cancel_result
+                except Exception as e:
+                    payload["protection_cleanup_error"] = str(e)
+            return payload
+
         errors: List[str] = []
         for mode, params, reduce_only in candidates:
             try:
@@ -5509,19 +5783,19 @@ class TradingBot:
                         errors.append(f"{mode}: code={code}, msg={order.get('msg')}")
                         continue
                     if order.get("orderId") is not None:
-                        return {"status": "success", "order": order, "mode": mode}
+                        return _finalize_flatten_success({"status": "success", "order": order, "mode": mode})
                     if str(order.get("status", "")).lower() == "success":
-                        return {"status": "success", "order": order, "mode": mode}
+                        return _finalize_flatten_success({"status": "success", "order": order, "mode": mode})
 
                 # 若返回结构不标准，二次确认仓位是否已消失，避免误判。
                 latest_pos = self.position_data.get_current_position(symbol)
                 if not isinstance(latest_pos, dict):
-                    return {
+                    return _finalize_flatten_success({
                         "status": "success",
                         "order": order,
                         "mode": mode,
                         "message": "position closed after emergency request",
-                    }
+                    })
                 errors.append(f"{mode}: unexpected response={order}")
             except Exception as e:
                 errors.append(f"{mode}: {e}")
@@ -5562,7 +5836,7 @@ class TradingBot:
         ctx = flow_context if isinstance(flow_context, dict) else {}
         timeframes = ctx.get("timeframes") if isinstance(ctx.get("timeframes"), dict) else {}
         candidates = []
-        ff_cfg = self.config.get("fund_flow", {}) or {}
+        ff_cfg = getattr(self, "config", {}).get("fund_flow", {}) if isinstance(getattr(self, "config", {}), dict) else {}
         for tf in (
             str(md.get("entry_timeframe") or "").strip().lower(),
             str(ctx.get("active_timeframe") or "").strip().lower(),
@@ -5641,9 +5915,122 @@ class TradingBot:
             total = model_score + slope_score + macd_score + bb_score + risk_score
             return round(total, 6)
 
+        if strategy_mode in {"macd_mtf_strategy", "macd_mtf_strategy_v2"}:
+            signal_score = self._to_float(md.get("signal_score"), 0.0)
+            if signal_score > 0:
+                return round(signal_score, 6)
+
         long_score = self._to_float(md.get("long_score"), 0.0)
         short_score = self._to_float(md.get("short_score"), 0.0)
         return max(long_score, short_score)
+
+    @staticmethod
+    def _normalize_entry_gate_log_value(value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value.isoformat()
+        if isinstance(value, dict):
+            normalized: Dict[str, Any] = {}
+            for key, item in list(value.items())[:12]:
+                normalized_item = TradingBot._normalize_entry_gate_log_value(item)
+                if normalized_item in (None, {}, []):
+                    continue
+                normalized[str(key)] = normalized_item
+            return normalized
+        if isinstance(value, (list, tuple, set)):
+            normalized_items: List[Any] = []
+            for item in list(value)[:12]:
+                normalized_item = TradingBot._normalize_entry_gate_log_value(item)
+                if normalized_item in (None, {}, []):
+                    continue
+                normalized_items.append(normalized_item)
+            return normalized_items
+        if isinstance(value, float):
+            if not math.isfinite(value):
+                return str(value)
+            return round(float(value), 6)
+        if isinstance(value, (bool, int, str)):
+            return value
+        return str(value)
+
+    def _log_entry_gate_block(
+        self,
+        *,
+        symbol: str,
+        gate: str,
+        reason: str,
+        threshold: Any = None,
+        value: Any = None,
+        decision: Optional[FundFlowDecision] = None,
+        flow_context: Optional[Dict[str, Any]] = None,
+        trigger_context: Optional[Dict[str, Any]] = None,
+        market_data: Optional[Dict[str, Any]] = None,
+        flow_snapshot: Any = None,
+        side: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        md = decision.metadata if isinstance(getattr(decision, "metadata", None), dict) else {}
+        macd_v2_debug = md.get("macd_v2_debug") if isinstance(md.get("macd_v2_debug"), dict) else {}
+        kline_tf, tf_ctx = self._decision_kline_context(flow_context, md)
+        kline_ts = getattr(flow_snapshot, "timestamp", None)
+        if kline_ts is None and isinstance(tf_ctx, dict):
+            for ts_key in ("timestamp", "close_time", "open_time"):
+                candidate = tf_ctx.get(ts_key)
+                if candidate is not None:
+                    kline_ts = candidate
+                    break
+        if kline_ts is None and isinstance(market_data, dict):
+            kline_ts = market_data.get("timestamp")
+        if not side and decision is not None:
+            if decision.operation == FundFlowOperation.BUY:
+                side = "LONG"
+            elif decision.operation == FundFlowOperation.SELL:
+                side = "SHORT"
+        signal_score = self._to_float(
+            md.get("signal_score"),
+            self._to_float(macd_v2_debug.get("total_score"), 0.0),
+        )
+        signal_threshold = self._to_float(
+            macd_v2_debug.get("signal_score_threshold"),
+            self._to_float(macd_v2_debug.get("min_signal_score"), 0.0),
+        )
+        payload: Dict[str, Any] = {
+            "symbol": str(symbol or "").upper(),
+            "side": side or "-",
+            "engine": str(md.get("engine") or md.get("regime") or "-").upper(),
+            "strategy_mode": str(md.get("strategy_mode") or "-"),
+            "gate": str(gate or "-"),
+            "reason": str(reason or "-"),
+            "threshold": self._normalize_entry_gate_log_value(threshold),
+            "value": self._normalize_entry_gate_log_value(value),
+            "kline_tf": str(kline_tf or "unknown"),
+            "kline_ts": self._normalize_entry_gate_log_value(kline_ts),
+            "signal_pool_id": str(
+                (trigger_context or {}).get("signal_pool_id")
+                or md.get("signal_pool_id")
+                or md.get("selected_pool_id")
+                or "-"
+            ),
+            "signal_score": round(signal_score, 6),
+            "signal_threshold": round(signal_threshold, 6),
+            "th_src": str(macd_v2_debug.get("threshold_source") or "-"),
+            "entry_15m": str(md.get("entry_type_15m") or macd_v2_debug.get("entry_type_15m") or "-"),
+            "signal_1h": str(md.get("signal_type_1h") or macd_v2_debug.get("signal_type_1h") or "-"),
+            "signal_4h": str(macd_v2_debug.get("signal_type_4h") or "-"),
+            "vwap_score": round(
+                self._to_float(md.get("vwap_score"), self._to_float(macd_v2_debug.get("vwap_score"), 0.0)),
+                6,
+            ),
+            "veto_type": str(md.get("veto_type") or macd_v2_debug.get("veto_type") or "none"),
+            "stage": str(macd_v2_debug.get("stage") or "-"),
+            "reject_code": str(macd_v2_debug.get("reject_reason_code") or "-"),
+        }
+        extra_payload = self._normalize_entry_gate_log_value(extra)
+        if extra_payload not in (None, {}, []):
+            payload["extra"] = extra_payload
+        compact_payload = {k: v for k, v in payload.items() if v not in (None, "", [], {})}
+        print(f"🚧 ENTRY_GATE_BLOCK {compact_json_dumps(compact_payload)}")
 
     def _is_ai_gate_enabled(self) -> bool:
         ff_cfg = self.config.get("fund_flow", {}) or {}
@@ -5665,19 +6052,48 @@ class TradingBot:
             return
 
         if decision.operation == FundFlowOperation.CLOSE:
+            for pos_side in ("LONG", "SHORT"):
+                self._protection_plan_by_pos.pop(self._position_track_key(symbol, pos_side), None)
+            self._save_risk_state()
             self._clear_dca_tracking_for_symbol(symbol)
             return
 
         md_raw = getattr(decision, "metadata", None)
         md: Dict[str, Any] = md_raw if isinstance(md_raw, dict) else {}
-        dca_triggered = bool(md.get("dca_triggered"))
-        winner_triggered = bool(md.get("winner_pyramiding_triggered"))
-        if not dca_triggered and not winner_triggered:
-            return
-
         side = "LONG" if decision.operation == FundFlowOperation.BUY else "SHORT"
         pos_key = self._position_track_key(symbol, side)
         changed = False
+
+        tp_levels_raw = md.get("tp_levels") if isinstance(md, dict) else None
+        tp_levels: List[Dict[str, float]] = []
+        if isinstance(tp_levels_raw, list):
+            for item in tp_levels_raw:
+                if not isinstance(item, dict):
+                    continue
+                price = self._to_float(item.get("price"), 0.0)
+                reduce_pct = self._to_float(item.get("reduce_pct"), 0.0)
+                if price > 0 and reduce_pct > 0:
+                    tp_levels.append({"price": price, "reduce_pct": reduce_pct})
+        protection_plan = {
+            "stop_loss_price": self._to_float(decision.stop_loss_price, 0.0) or None,
+            "take_profit_price": self._to_float(decision.take_profit_price, 0.0) or None,
+            "tp_levels": tp_levels,
+        }
+        if (
+            protection_plan["stop_loss_price"] is not None
+            or protection_plan["take_profit_price"] is not None
+            or protection_plan["tp_levels"]
+        ):
+            if self._protection_plan_by_pos.get(pos_key) != protection_plan:
+                self._protection_plan_by_pos[pos_key] = protection_plan
+                changed = True
+
+        dca_triggered = bool(md.get("dca_triggered"))
+        winner_triggered = bool(md.get("winner_pyramiding_triggered"))
+        if not dca_triggered and not winner_triggered:
+            if changed:
+                self._save_risk_state()
+            return
 
         if dca_triggered:
             try:
@@ -5829,8 +6245,8 @@ class TradingBot:
             for item in protection.get("orders", []):
                 if not isinstance(item, dict):
                     continue
-                order_type = str(item.get("type") or item.get("strategyType") or "").upper()
-                oid = item.get("orderId")
+                order_type = str(item.get("type") or item.get("orderType") or item.get("strategyType") or "").upper()
+                oid = item.get("orderId") or item.get("algoId") or item.get("strategyId")
                 if oid is None:
                     continue
                 if "TAKE_PROFIT" in order_type:
@@ -6101,7 +6517,10 @@ class TradingBot:
             ema_mult = self._to_float(md.get("ema_multiplier"), self._to_float(macd_v2_debug.get("ema_multiplier"), 1.0))
             ema_status = str(md.get("ema_structure_status") or macd_v2_debug.get("ema_status") or "-")
             score_total = self._to_float(md.get("signal_score"), self._to_float(macd_v2_debug.get("total_score"), 0.0))
-            score_min = self._to_float(macd_v2_debug.get("min_signal_score"), 0.0)
+            score_threshold = self._to_float(
+                macd_v2_debug.get("signal_score_threshold"),
+                self._to_float(macd_v2_debug.get("min_signal_score"), 0.0),
+            )
             primary_tf = str(macd_v2_debug.get("primary_timeframe") or "4h").upper()
             score_1h = self._to_float(macd_v2_debug.get("score_1h"), 0.0)
             score_4h = self._to_float(macd_v2_debug.get("score_4h"), 0.0)
@@ -6114,6 +6533,10 @@ class TradingBot:
             entry_score_15m = self._to_float(macd_v2_debug.get("entry_score_15m"), 0.0)
             volume_ratio_dbg = self._to_float(macd_v2_debug.get("volume_ratio"), 0.0)
             veto_type_dbg = str(md.get("veto_type") or macd_v2_debug.get("veto_type") or "none")
+            threshold_source = str(macd_v2_debug.get("threshold_source") or "-")
+            is_trial_entry_dbg = bool(macd_v2_debug.get("is_trial_entry", False))
+            stable_side_dbg = str(macd_v2_debug.get("stable_continuation_side") or "-")
+            stable_active_dbg = bool(macd_v2_debug.get("stable_continuation_active", False))
             print(
                 "   MACD_V2评分: "
                 f"stage={stage}, dir={macd_dir}, primary={primary_tf}:{score_4h:.4f}({sig4h}), "
@@ -6121,7 +6544,9 @@ class TradingBot:
                 f"VWAP={score_vwap:.4f}(dev={vwap_dev:+.2f}%), "
                 f"15M={score_15m:.4f}({sig15m}/{refine15m}, raw={entry_score_15m:.2f}), "
                 f"VOL={score_vol:.4f}(r={volume_ratio_dbg:.2f}), "
-                f"EMA={ema_mult:.2f}x/{ema_status}, total={score_total:.4f}/{score_min:.4f}, veto={veto_type_dbg}"
+                f"EMA={ema_mult:.2f}x/{ema_status}, total={score_total:.4f}/{score_threshold:.4f}, "
+                f"th_src={threshold_source}, trial={is_trial_entry_dbg}, "
+                f"stable={stable_side_dbg if stable_active_dbg else '-'}, veto={veto_type_dbg}"
             )
             stop_price_dbg = self._to_float(md.get("suggested_stop_price"), self._to_float(macd_v2_debug.get("stop_price"), 0.0))
             stop_pct_dbg = self._to_float(md.get("stop_loss_pct"), self._to_float(macd_v2_debug.get("stop_loss_pct"), 0.0))
@@ -6148,7 +6573,10 @@ class TradingBot:
                     print(
                         "   HOLD归因: "
                         f"stage={str(macd_v2_debug.get('stage') or '-')}, "
+                        f"path={str(macd_v2_debug.get('stage_path_text') or '-')}, "
                         f"reason={str(macd_v2_debug.get('reason') or '-')}, "
+                        f"code={str(macd_v2_debug.get('reject_reason_code') or '-')}, "
+                        f"detail={str(macd_v2_debug.get('reject_reason_detail') or '-')}, "
                         f"signal_1h={str(macd_v2_debug.get('signal_type_1h') or '-')}, "
                         f"entry_15m={str(macd_v2_debug.get('entry_type_15m') or '-')}, "
                         f"veto={str(md.get('veto_type') or macd_v2_debug.get('veto_type') or 'none')}, "
@@ -6208,6 +6636,16 @@ class TradingBot:
         status = str(execution_result.get("status", "")).lower()
         if status not in ("success", "pending"):
             return {}
+        protection_obj = execution_result.get("protection") if isinstance(execution_result, dict) else None
+        if status == "pending" and isinstance(protection_obj, dict):
+            protection_status = str(protection_obj.get("status", "")).lower()
+            protection_message = str(protection_obj.get("message", "")).lower()
+            if protection_status == "pending" and "entry not filled yet" in protection_message:
+                return {
+                    "status": "pending",
+                    "message": "entry_pending_protection_deferred",
+                    "protection": protection_obj,
+                }
         try:
             latest_position = self.position_data.get_current_position(symbol)
         except Exception:
@@ -6219,7 +6657,7 @@ class TradingBot:
             return {"status": "skipped", "message": f"invalid_position_side:{side}"}
 
         coverage = self._protection_coverage(symbol, side=side)
-        covered = bool(coverage.get("has_tp")) and bool(coverage.get("has_sl"))
+        covered = self._protection_is_covered(coverage)
         if covered:
             return {"status": "ok", "message": "coverage_ready", "coverage": coverage}
 
@@ -6229,7 +6667,10 @@ class TradingBot:
         )
         repair = self._repair_missing_protection(symbol, latest_position)
         coverage_after = self._protection_coverage(symbol, side=side)
-        covered_after = bool(coverage_after.get("has_tp")) and bool(coverage_after.get("has_sl"))
+        covered_after = self._protection_is_covered(coverage_after) or self._repair_result_satisfies_protection_requirements(
+            repair,
+            coverage_after,
+        )
         if covered_after:
             print(f"   ✅ {symbol} 执行后保护钩子补挂成功")
             return {
@@ -6246,14 +6687,11 @@ class TradingBot:
             "repair": repair,
             "coverage_before": coverage,
             "coverage_after": coverage_after,
+            "immediate_close_suppressed": bool(
+                self._protection_sla_config().get("immediate_close_on_repair_fail", False)
+            ),
         }
-        if bool(self._protection_sla_config().get("immediate_close_on_repair_fail", False)):
-            flatten = self._emergency_flatten_unprotected(symbol, latest_position, reduce_ratio=1.0)
-            result["flatten"] = flatten
-            print(
-                f"   🧯 {symbol} 执行后保护钩子修复失败，触发强制减仓/平仓: "
-                f"status={flatten.get('status')} detail={flatten.get('message') or flatten.get('order')}"
-            )
+        print(f"   ⚠️ {symbol} 执行后保护钩子修复失败，继续SLA监控")
         return result
 
     def run_cycle(
@@ -6298,6 +6736,11 @@ class TradingBot:
         batch_size = symbols_per_cycle if 0 < symbols_per_cycle < len(symbols) else len(symbols)
         total_batches = math.ceil(len(symbols) / float(batch_size)) if batch_size > 0 else 0
         processed_count = 0
+
+        try:
+            self._sync_recent_trade_fills(symbols)
+        except Exception as e:
+            print(f"⚠️ recent userTrades 回补失败: {e}")
 
         for batch_index, batch_start in enumerate(range(0, len(symbols), batch_size), start=1):
             batch_symbols = symbols[batch_start : batch_start + batch_size]
@@ -6620,7 +7063,7 @@ class TradingBot:
                     self._update_position_extrema(symbol, leg_position, current_price)
             
                     coverage = self._protection_coverage(symbol, side=side)
-                    covered = bool(coverage.get("has_tp")) and bool(coverage.get("has_sl"))
+                    covered = self._protection_is_covered(coverage)
                     if covered:
                         self._protection_missing_since_ts.pop(pos_key, None)
                         self._protection_last_alert_ts.pop(pos_key, None)
@@ -6638,7 +7081,10 @@ class TradingBot:
                         f"msg={repair.get('message')}"
                     )
                     coverage_after = self._protection_coverage(symbol, side=side)
-                    covered_after = bool(coverage_after.get("has_tp")) and bool(coverage_after.get("has_sl"))
+                    covered_after = self._protection_is_covered(coverage_after) or self._repair_result_satisfies_protection_requirements(
+                        repair,
+                        coverage_after,
+                    )
                     if covered_after:
                         self._protection_missing_since_ts.pop(pos_key, None)
                         self._protection_last_alert_ts.pop(pos_key, None)
@@ -6649,29 +7095,12 @@ class TradingBot:
                         continue
             
                     if str(repair.get("status", "")).lower() != "success":
-                        if immediate_close_on_repair_fail:
-                            close_res = self._emergency_flatten_unprotected(
-                                symbol,
-                                leg_position,
-                                reduce_ratio=repair_fail_reduce_ratio,
-                            )
-                            print(
-                                f"   🧯 ({side}) 保护单补挂失败，触发强制减仓/平仓(ratio={repair_fail_reduce_ratio:.2f}): "
-                                f"status={close_res.get('status')} detail={close_res.get('message') or close_res.get('order')}"
-                            )
-                            self._emit_protection_sla_alert(
-                                symbol=symbol,
-                                side=side,
-                                detail="protection_repair_failed_immediate_flatten",
-                                extra={"repair": repair, "flatten": close_res},
-                            )
-                            continue
-                        print(f"   ⚠️ ({side}) 保护单补挂失败，已按配置跳过立即强平，继续SLA监控")
+                        print(f"   ⚠️ ({side}) 保护单补挂失败，继续SLA监控")
                         self._emit_protection_sla_alert(
                             symbol=symbol,
                             side=side,
                             detail="protection_repair_failed_no_immediate_close",
-                            extra={"repair": repair},
+                            extra={"repair": repair, "immediate_close_suppressed": bool(immediate_close_on_repair_fail)},
                         )
             
                     first_seen = self._position_first_seen_ts.get(pos_key, now_ts)
@@ -6734,7 +7163,7 @@ class TradingBot:
             self._update_position_extrema(symbol, position, current_price)
             
             coverage = self._protection_coverage(symbol, side=side)
-            covered = bool(coverage.get("has_tp")) and bool(coverage.get("has_sl"))
+            covered = self._protection_is_covered(coverage)
             if covered:
                 self._protection_missing_since_ts.pop(pos_key, None)
                 self._protection_last_alert_ts.pop(pos_key, None)
@@ -6751,7 +7180,10 @@ class TradingBot:
                     f"msg={repair.get('message')}"
                 )
                 coverage_after = self._protection_coverage(symbol, side=side)
-                covered_after = bool(coverage_after.get("has_tp")) and bool(coverage_after.get("has_sl"))
+                covered_after = self._protection_is_covered(coverage_after) or self._repair_result_satisfies_protection_requirements(
+                    repair,
+                    coverage_after,
+                )
                 if covered_after:
                     self._protection_missing_since_ts.pop(pos_key, None)
                     self._protection_last_alert_ts.pop(pos_key, None)
@@ -6766,29 +7198,12 @@ class TradingBot:
                     protection_gap_symbols.append(symbol)
             
                 if str(repair.get("status", "")).lower() != "success":
-                    if immediate_close_on_repair_fail:
-                        close_res = self._emergency_flatten_unprotected(
-                            symbol,
-                            position,
-                            reduce_ratio=repair_fail_reduce_ratio,
-                        )
-                        print(
-                            f"   🧯 保护单补挂失败，触发强制减仓/平仓(ratio={repair_fail_reduce_ratio:.2f}): "
-                            f"status={close_res.get('status')} detail={close_res.get('message') or close_res.get('order')}"
-                        )
-                        self._emit_protection_sla_alert(
-                            symbol=symbol,
-                            side=side,
-                            detail="protection_repair_failed_immediate_flatten",
-                            extra={"repair": repair, "flatten": close_res},
-                        )
-                        continue
-                    print("   ⚠️ 保护单补挂失败，已按配置跳过立即强平，继续SLA监控")
+                    print("   ⚠️ 保护单补挂失败，继续SLA监控")
                     self._emit_protection_sla_alert(
                         symbol=symbol,
                         side=side,
                         detail="protection_repair_failed_no_immediate_close",
-                        extra={"repair": repair},
+                        extra={"repair": repair, "immediate_close_suppressed": bool(immediate_close_on_repair_fail)},
                     )
             
                 first_seen = self._position_first_seen_ts.get(pos_key, now_ts)
@@ -6877,6 +7292,21 @@ class TradingBot:
                     f"threshold={self._to_float(volatility_guard.get('threshold'), 0.0):.4f}, "
                     f"tf={volatility_guard.get('timeframe')}"
                 )
+                self._log_entry_gate_block(
+                    symbol=symbol,
+                    gate="extreme_volatility_cooldown",
+                    reason=str(volatility_guard.get("reason") or "cooldown_active"),
+                    threshold=volatility_guard.get("threshold"),
+                    value=volatility_guard.get("atr_pct"),
+                    flow_context=flow_context,
+                    market_data=market_data,
+                    flow_snapshot=flow_snapshot,
+                    extra={
+                        "remaining_seconds": int(volatility_guard.get("remaining_seconds", 0) or 0),
+                        "streak": int(volatility_guard.get("streak", 0) or 0),
+                        "timeframe": volatility_guard.get("timeframe"),
+                    },
+                )
                 continue
             if position is None and bool(conflict_symbol_cooldown.get("blocked")):
                 print(
@@ -6884,6 +7314,20 @@ class TradingBot:
                     f"remaining={int(conflict_symbol_cooldown.get('remaining_seconds', 0) or 0)}s, "
                     f"streak={int(conflict_symbol_cooldown.get('streak', 0) or 0)}, "
                     f"reason={conflict_symbol_cooldown.get('reason')}"
+                )
+                self._log_entry_gate_block(
+                    symbol=symbol,
+                    gate="conflict_symbol_cooldown",
+                    reason=str(conflict_symbol_cooldown.get("reason") or "cooldown_active"),
+                    threshold=self._strict_trend_strategy_config().get("conflict_cooldown_trigger_count"),
+                    value=conflict_symbol_cooldown.get("streak"),
+                    flow_context=flow_context,
+                    market_data=market_data,
+                    flow_snapshot=flow_snapshot,
+                    extra={
+                        "remaining_seconds": int(conflict_symbol_cooldown.get("remaining_seconds", 0) or 0),
+                        "enabled": bool(conflict_symbol_cooldown.get("enabled", False)),
+                    },
                 )
                 continue
             
@@ -6895,6 +7339,17 @@ class TradingBot:
                 trigger_id=trigger_id,
             ):
                 print(f"⏭️ {symbol} 触发去重命中，跳过本轮。trigger_id={trigger_id}")
+                self._log_entry_gate_block(
+                    symbol=symbol,
+                    gate="trigger_dedupe",
+                    reason="trigger_dedupe_hit",
+                    threshold=ff_cfg.get("trigger_dedupe_seconds"),
+                    value=trigger_id,
+                    flow_context=flow_context,
+                    market_data=market_data,
+                    flow_snapshot=flow_snapshot,
+                    extra={"trigger_type": trigger_type},
+                )
                 continue
             
             positions_payload: Dict[str, Any] = {}
@@ -6974,6 +7429,19 @@ class TradingBot:
                         f"⏭️ {symbol} 当前不允许入场，跳过开仓/加仓信号: "
                         f"reason={window_reason}"
                     )
+                    self._log_entry_gate_block(
+                        symbol=symbol,
+                        gate="entry_window_closed",
+                        reason=window_reason,
+                        threshold=entry_window_state.get("allowed_hours_utc"),
+                        value=entry_window_state.get("current_hour_utc"),
+                        decision=decision,
+                        flow_context=flow_context,
+                        trigger_context=trigger_context,
+                        market_data=market_data,
+                        flow_snapshot=flow_snapshot,
+                        extra={"allow_entry_window": allow_entry_window},
+                    )
                     continue
                 signal_side = "LONG" if decision.operation == FundFlowOperation.BUY else "SHORT"
                 current_side = str(position.get("side", "")).upper()
@@ -6992,134 +7460,167 @@ class TradingBot:
                 )
                 print(f"⏭️ {symbol} 当前不允许入场，开仓信号降级为HOLD并继续执行持仓风控")
                 decision_md = decision.metadata if isinstance(decision.metadata, dict) else decision_md
-            
-            if confluence:
-                try:
-                    decision_md.update(confluence)
-                    if not isinstance(getattr(decision, "metadata", None), dict):
-                        decision.metadata = decision_md
-            
-                    # DecisionEngine owns trigger scoring. Bot side only keeps raw values
-                    # for diagnostics and lets the hard entry filter enforce safety.
-                    long_raw = self._to_float(decision_md.get("long_score"), 0.0)
-                    short_raw = self._to_float(decision_md.get("short_score"), 0.0)
-                    decision_md["long_score_raw"] = float(long_raw)
-                    decision_md["short_score_raw"] = float(short_raw)
-                    decision_md["long_score_adj"] = float(long_raw)
-                    decision_md["short_score_adj"] = float(short_raw)
-                    decision_md["ma10_macd_score_delta"] = {
-                        "long": 0.0,
-                        "short": 0.0,
-                        "disabled": True,
-                    }
-                except Exception as e:
-                    print(f"⚠️ {symbol} MA10+MACD 共振特征计算失败: {e}")
+
+                if confluence:
+                    try:
+                        decision_md.update(confluence)
+                        if not isinstance(getattr(decision, "metadata", None), dict):
+                            decision.metadata = decision_md
+                        
+                        # DecisionEngine owns trigger scoring. Bot side only keeps raw values
+                        # for diagnostics and lets the hard entry filter enforce safety.
+                        long_raw = self._to_float(decision_md.get("long_score"), 0.0)
+                        short_raw = self._to_float(decision_md.get("short_score"), 0.0)
+                        decision_md["long_score_raw"] = float(long_raw)
+                        decision_md["short_score_raw"] = float(short_raw)
+                        decision_md["long_score_adj"] = float(long_raw)
+                        decision_md["short_score_adj"] = float(short_raw)
+                        decision_md["ma10_macd_score_delta"] = {
+                            "long": 0.0,
+                            "short": 0.0,
+                            "disabled": True,
+                        }
+                    except Exception as e:
+                        print(f"⚠️ {symbol} MA10+MACD 共振特征计算失败：{e}")
             engine_override_raw = decision_md.get("params_override")
             engine_override: Dict[str, Any] = (
                 engine_override_raw if isinstance(engine_override_raw, dict) else {}
             )
             engine_tag_now = str(decision_md.get("engine") or decision_md.get("regime") or "").upper()
+            global_signal_pool_cfg = (
+                ff_cfg.get("signal_pool") if isinstance(ff_cfg.get("signal_pool"), dict) else {}
+            )
+            signal_pool_enabled = self._to_bool(
+                global_signal_pool_cfg.get("enabled", True),
+                True,
+            )
             base_pool_id = str(
                 decision_md.get("signal_pool_id")
                 or decision_md.get("selected_pool_id")
                 or ff_cfg.get("active_signal_pool_id")
                 or ""
             ).strip()
-            selected_pool_id = base_pool_id
-            if engine_tag_now == "TREND":
-                major_pool_raw = ff_cfg.get("major_symbol_signal_pool")
-                major_pool_cfg = major_pool_raw if isinstance(major_pool_raw, dict) else {}
-                if major_pool_cfg and self._to_bool(major_pool_cfg.get("enabled", False), False):
-                    major_symbols_raw = major_pool_cfg.get("symbols")
-                    major_symbols = {
-                        str(s).strip().upper()
-                        for s in (major_symbols_raw if isinstance(major_symbols_raw, list) else [])
-                        if str(s).strip()
-                    }
-                    major_pool_id = str(major_pool_cfg.get("trend_pool_id") or "").strip()
-                    if major_pool_id and symbol.upper() in major_symbols:
-                        selected_pool_id = major_pool_id
-            runtime_pool_cfg = self._resolve_runtime_signal_pool_config(selected_pool_id)
-            if (
-                selected_pool_id != base_pool_id
-                and (not isinstance(runtime_pool_cfg, dict) or not runtime_pool_cfg)
-            ):
+            selected_pool_cfg: Dict[str, Any] = {}
+            if signal_pool_enabled:
                 selected_pool_id = base_pool_id
+                if engine_tag_now == "TREND":
+                    major_pool_raw = ff_cfg.get("major_symbol_signal_pool")
+                    major_pool_cfg = major_pool_raw if isinstance(major_pool_raw, dict) else {}
+                    if major_pool_cfg and self._to_bool(major_pool_cfg.get("enabled", False), False):
+                        major_symbols_raw = major_pool_cfg.get("symbols")
+                        major_symbols = {
+                            str(s).strip().upper()
+                            for s in (major_symbols_raw if isinstance(major_symbols_raw, list) else [])
+                            if str(s).strip()
+                        }
+                        major_pool_id = str(major_pool_cfg.get("trend_pool_id") or "").strip()
+                        if major_pool_id and symbol.upper() in major_symbols:
+                            selected_pool_id = major_pool_id
                 runtime_pool_cfg = self._resolve_runtime_signal_pool_config(selected_pool_id)
-            if engine_tag_now == "RANGE":
-                edge_cd_default = int(self._to_float(ff_cfg.get("trigger_dedupe_seconds"), 30.0))
-                edge_cd = edge_cd_default
-                if isinstance(runtime_pool_cfg, dict) and runtime_pool_cfg:
-                    edge_cd = max(
-                        0,
-                        int(
-                            self._to_float(
-                                runtime_pool_cfg.get("edge_cooldown_seconds"),
-                                float(edge_cd_default),
-                            )
-                        ),
-                    )
-                dynamic_pool_id = selected_pool_id or "range_quantile_pool"
-                trigger_context["signal_pool_id"] = dynamic_pool_id
-                # RANGE 开仓由 DecisionEngine 分位数门控决定；这里仅保留冷却去抖。
-                selected_pool_cfg = {
-                    "enabled": True,
-                    "pool_id": dynamic_pool_id,
-                    "id": dynamic_pool_id,
-                    "logic": "OR",
-                    "min_pass_count": 1,
-                    "min_long_score": 0.0,
-                    "min_short_score": 0.0,
-                    "scheduled_trigger_bypass": False,
-                    "apply_when_position_exists": False,
-                    "edge_trigger_enabled": True,
-                    "edge_cooldown_seconds": edge_cd,
-                    "rules": [
-                        {
-                            "name": "range_dynamic_long_gate",
-                            "side": "LONG",
-                            "metric": "long_score",
-                            "operator": ">=",
-                            "threshold": 0.0,
-                        },
-                        {
-                            "name": "range_dynamic_short_gate",
-                            "side": "SHORT",
-                            "metric": "short_score",
-                            "operator": ">=",
-                            "threshold": 0.0,
-                        },
-                    ],
-                }
-            else:
-                selected_pool_cfg = runtime_pool_cfg if isinstance(runtime_pool_cfg, dict) else {}
-                if isinstance(selected_pool_cfg, dict) and selected_pool_cfg:
-                    trigger_context["signal_pool_id"] = (
-                        selected_pool_cfg.get("pool_id")
-                        or selected_pool_cfg.get("id")
-                        or selected_pool_id
-                    )
+                if (
+                    selected_pool_id != base_pool_id
+                    and (not isinstance(runtime_pool_cfg, dict) or not runtime_pool_cfg)
+                ):
+                    selected_pool_id = base_pool_id
+                    runtime_pool_cfg = self._resolve_runtime_signal_pool_config(selected_pool_id)
+                if engine_tag_now == "RANGE":
+                    edge_cd_default = int(self._to_float(ff_cfg.get("trigger_dedupe_seconds"), 30.0))
+                    edge_cd = edge_cd_default
+                    edge_enabled = True
+                    if isinstance(runtime_pool_cfg, dict) and runtime_pool_cfg:
+                        edge_enabled = self._to_bool(
+                            runtime_pool_cfg.get("edge_trigger_enabled", True),
+                            True,
+                        )
+                        edge_cd = max(
+                            0,
+                            int(
+                                self._to_float(
+                                    runtime_pool_cfg.get("edge_cooldown_seconds"),
+                                    float(edge_cd_default),
+                                )
+                            ),
+                        )
+                    dynamic_pool_id = selected_pool_id or "range_quantile_pool"
+                    trigger_context["signal_pool_id"] = dynamic_pool_id
+                    # RANGE 开仓由 DecisionEngine 分位数门控决定；这里仅保留冷却去抖。
+                    selected_pool_cfg = {
+                        "enabled": True,
+                        "pool_id": dynamic_pool_id,
+                        "id": dynamic_pool_id,
+                        "logic": "OR",
+                        "min_pass_count": 1,
+                        "min_long_score": 0.0,
+                        "min_short_score": 0.0,
+                        "scheduled_trigger_bypass": False,
+                        "apply_when_position_exists": False,
+                        "edge_trigger_enabled": edge_enabled,
+                        "edge_cooldown_seconds": edge_cd,
+                        "rules": [
+                            {
+                                "name": "range_dynamic_long_gate",
+                                "side": "LONG",
+                                "metric": "long_score",
+                                "operator": ">=",
+                                "threshold": 0.0,
+                            },
+                            {
+                                "name": "range_dynamic_short_gate",
+                                "side": "SHORT",
+                                "metric": "short_score",
+                                "operator": ">=",
+                                "threshold": 0.0,
+                            },
+                        ],
+                    }
                 else:
-                    trigger_context["signal_pool_id"] = selected_pool_id or None
-            pool_eval = self.fund_flow_trigger_engine.evaluate_signal_pool(
-                symbol=symbol,
-                trigger_type=trigger_type,
-                market_flow_context=flow_context,
-                decision=decision,
-                has_position=isinstance(position, dict),
-                signal_pool_config=selected_pool_cfg if isinstance(selected_pool_cfg, dict) else None,
-            )
-            if decision.operation in (FundFlowOperation.BUY, FundFlowOperation.SELL):
-                if not bool(pool_eval.get("passed", True)):
-                    edge_raw = pool_eval.get("edge")
-                    edge_obj: Dict[str, Any] = edge_raw if isinstance(edge_raw, dict) else {}
-                    print(
-                        f"⏭️ {symbol} signal_pool过滤未通过，跳过开仓/加仓: "
-                        f"pool={trigger_context.get('signal_pool_id')}, "
-                        f"reason={pool_eval.get('reason')}, "
-                        f"edge={edge_obj.get('reason')}"
-                    )
-                    continue
+                    selected_pool_cfg = runtime_pool_cfg if isinstance(runtime_pool_cfg, dict) else {}
+                    if isinstance(selected_pool_cfg, dict) and selected_pool_cfg:
+                        trigger_context["signal_pool_id"] = (
+                            selected_pool_cfg.get("pool_id")
+                            or selected_pool_cfg.get("id")
+                            or selected_pool_id
+                        )
+                    else:
+                        trigger_context["signal_pool_id"] = selected_pool_id or None
+            else:
+                trigger_context["signal_pool_id"] = None
+            if signal_pool_enabled:
+                pool_eval = self.fund_flow_trigger_engine.evaluate_signal_pool(
+                    symbol=symbol,
+                    trigger_type=trigger_type,
+                    market_flow_context=flow_context,
+                    decision=decision,
+                    has_position=isinstance(position, dict),
+                    signal_pool_config=selected_pool_cfg if isinstance(selected_pool_cfg, dict) else None,
+                )
+                if decision.operation in (FundFlowOperation.BUY, FundFlowOperation.SELL):
+                    if not bool(pool_eval.get("passed", True)):
+                        edge_raw = pool_eval.get("edge")
+                        edge_obj: Dict[str, Any] = edge_raw if isinstance(edge_raw, dict) else {}
+                        print(
+                            f"⏭️ {symbol} signal_pool过滤未通过，跳过开仓/加仓: "
+                            f"pool={trigger_context.get('signal_pool_id')}, "
+                            f"reason={pool_eval.get('reason')}, "
+                            f"edge={edge_obj.get('reason')}"
+                        )
+                        self._log_entry_gate_block(
+                            symbol=symbol,
+                            gate="signal_pool_filter",
+                            reason=str(pool_eval.get("reason") or edge_obj.get("reason") or "signal_pool_block"),
+                            threshold=selected_pool_cfg if isinstance(selected_pool_cfg, dict) else {"pool": trigger_context.get("signal_pool_id")},
+                            value={
+                                "passed": bool(pool_eval.get("passed", False)),
+                                "edge": edge_obj.get("reason"),
+                            },
+                            decision=decision,
+                            flow_context=flow_context,
+                            trigger_context=trigger_context,
+                            market_data=market_data,
+                            flow_snapshot=flow_snapshot,
+                            extra={"signal_pool_id": trigger_context.get("signal_pool_id")},
+                        )
+                        continue
             
             decision = self._apply_ma10_macd_entry_filter(symbol, decision)
             decision_md_candidate = getattr(decision, "metadata", None)
@@ -7150,6 +7651,18 @@ class TradingBot:
                     f"⏭️ {symbol} 账户级冷却中，阻止新开仓 "
                     f"(remaining={self._cooldown_remaining_seconds()}s, reason={self._cooldown_reason})"
                 )
+                self._log_entry_gate_block(
+                    symbol=symbol,
+                    gate="account_cooldown",
+                    reason=str(self._cooldown_reason or "account_cooldown"),
+                    threshold="cooldown_active",
+                    value=self._cooldown_remaining_seconds(),
+                    decision=decision,
+                    flow_context=flow_context,
+                    trigger_context=trigger_context,
+                    market_data=market_data,
+                    flow_snapshot=flow_snapshot,
+                )
                 continue
             if isinstance(position, dict):
                 current_side = str(position.get("side", "")).upper()
@@ -7170,6 +7683,19 @@ class TradingBot:
                     if current_side != signal_side:
                         print(
                             f"⏭️ {symbol} 已有反向持仓({current_side})，当前策略不做同周期反手，跳过开仓信号"
+                        )
+                        self._log_entry_gate_block(
+                            symbol=symbol,
+                            gate="reverse_position_suppression",
+                            reason="no_same_cycle_flip",
+                            threshold=current_side,
+                            value=signal_side,
+                            decision=decision,
+                            flow_context=flow_context,
+                            trigger_context=trigger_context,
+                            market_data=market_data,
+                            flow_snapshot=flow_snapshot,
+                            side=current_side,
                         )
                         continue
             
@@ -7702,6 +8228,29 @@ class TradingBot:
                                 f"price_change={price_change_hard:+.4f}, "
                                 f"min_move={hard_price_change_min:.4f}"
                             )
+                        if decision.operation in (FundFlowOperation.BUY, FundFlowOperation.SELL):
+                            self._log_entry_gate_block(
+                                symbol=symbol,
+                                gate="conflict_protection_hard",
+                                reason=str(protection_reason or "conflict_hard_block"),
+                                threshold={
+                                    "reduce_pct": reduce_pct,
+                                    "hard_drawdown_override": hard_drawdown_override,
+                                    "max_stop_loss_ratio": max_stop_loss_ratio,
+                                },
+                                value={
+                                    "reduce_confirmed": reduce_confirmed,
+                                    "drawdown": drawdown_hard,
+                                    "price_change": price_change_hard,
+                                    "risk_state": risk_state,
+                                },
+                                decision=decision,
+                                flow_context=flow_context,
+                                trigger_context=trigger_context,
+                                market_data=market_data,
+                                flow_snapshot=flow_snapshot,
+                                side=current_side,
+                            )
                         # 否则禁止加仓
                         continue
             
@@ -7875,6 +8424,28 @@ class TradingBot:
                                     "mfe_threshold": light_min_mfe_ratio,
                                 },
                             )
+                        if decision.operation in (FundFlowOperation.BUY, FundFlowOperation.SELL):
+                            self._log_entry_gate_block(
+                                symbol=symbol,
+                                gate="conflict_protection_light",
+                                reason=str(protection.get("reason") or "conflict_light_block"),
+                                threshold={
+                                    "light_min_hold_seconds": light_min_hold_seconds,
+                                    "light_min_mfe_ratio": light_min_mfe_ratio,
+                                    "take_profit_pct": take_profit_pct,
+                                },
+                                value={
+                                    "hold_seconds": hold_seconds_runtime,
+                                    "mfe_ratio": mfe_runtime / 100.0,
+                                    "cooldown_active": cooldown_active,
+                                },
+                                decision=decision,
+                                flow_context=flow_context,
+                                trigger_context=trigger_context,
+                                market_data=market_data,
+                                flow_snapshot=flow_snapshot,
+                                side=current_side,
+                            )
                         # 轻度冲突：冻结加仓/新开同向（保留持仓管理/止盈止损继续运行）
                         continue
             
@@ -7896,13 +8467,40 @@ class TradingBot:
                             f"⏭️ {symbol} 同向加仓被拦截: "
                             f"reason={block_reason}"
                         )
+                        self._log_entry_gate_block(
+                            symbol=symbol,
+                            gate="same_side_add_guard",
+                            reason=str(block_reason or "same_side_add_block"),
+                            threshold={"allow_same_side_add": False},
+                            value={"local_score": local_entry_score},
+                            decision=decision,
+                            flow_context=flow_context,
+                            trigger_context=trigger_context,
+                            market_data=market_data,
+                            flow_snapshot=flow_snapshot,
+                            side=current_side,
+                        )
                         continue
-            
+
                     remaining = max(0.0, float(local_max_symbol_position_portion) - float(current_portion))
                     if remaining < min_open_portion:
                         print(
                             f"⏭️ {symbol} 已达到单币仓位上限({local_max_symbol_position_portion:.2f})，"
                             f"当前占比={current_portion:.2f}，跳过加仓"
+                        )
+                        self._log_entry_gate_block(
+                            symbol=symbol,
+                            gate="single_symbol_position_cap",
+                            reason="max_symbol_position_portion_reached",
+                            threshold=local_max_symbol_position_portion,
+                            value=current_portion,
+                            decision=decision,
+                            flow_context=flow_context,
+                            trigger_context=trigger_context,
+                            market_data=market_data,
+                            flow_snapshot=flow_snapshot,
+                            side=current_side,
+                            extra={"remaining": remaining},
                         )
                         continue
             
@@ -7930,6 +8528,20 @@ class TradingBot:
                         print(
                             f"⏭️ {symbol} 剩余可加仓比例不足最小下单阈值，"
                             f"remaining={remaining:.3f}, min_open={min_open_portion:.3f}"
+                        )
+                        self._log_entry_gate_block(
+                            symbol=symbol,
+                            gate="min_open_portion",
+                            reason="remaining_below_min_open",
+                            threshold=min_open_portion,
+                            value=decision.target_portion_of_balance,
+                            decision=decision,
+                            flow_context=flow_context,
+                            trigger_context=trigger_context,
+                            market_data=market_data,
+                            flow_snapshot=flow_snapshot,
+                            side=current_side,
+                            extra={"remaining": remaining},
                         )
                         continue
                     if is_dca:
@@ -7963,6 +8575,43 @@ class TradingBot:
                     print(
                         f"⛔ {symbol} 禁止新开仓：存在缺保护持仓 "
                         f"symbols={','.join(protection_gap_symbols)}"
+                    )
+                    self._log_entry_gate_block(
+                        symbol=symbol,
+                        gate="protection_gap_block",
+                        reason="missing_protection_order",
+                        threshold=protection_gap_symbols,
+                        value=symbol,
+                        decision=decision,
+                        flow_context=flow_context,
+                        trigger_context=trigger_context,
+                        market_data=market_data,
+                        flow_snapshot=flow_snapshot,
+                        extra={"open_new_entry": True},
+                    )
+                    continue
+                min_open_portion = max(
+                    0.01,
+                    float(getattr(self.fund_flow_risk_engine, "min_open_portion", 0.1) or 0.1),
+                )
+                if float(decision.target_portion_of_balance) < min_open_portion:
+                    print(
+                        f"⏭️ {symbol} 目标开仓比例低于最小下单阈值，跳过开仓: "
+                        f"target={float(decision.target_portion_of_balance):.4f}, "
+                        f"min_open={min_open_portion:.4f}"
+                    )
+                    self._log_entry_gate_block(
+                        symbol=symbol,
+                        gate="min_open_portion",
+                        reason="target_below_min_open",
+                        threshold=min_open_portion,
+                        value=float(decision.target_portion_of_balance),
+                        decision=decision,
+                        flow_context=flow_context,
+                        trigger_context=trigger_context,
+                        market_data=market_data,
+                        flow_snapshot=flow_snapshot,
+                        extra={"open_new_entry": True},
                     )
                     continue
                 item_max_active_symbols = max(
@@ -8066,8 +8715,28 @@ class TradingBot:
                 if position is None:
                     self._clear_sla_tracking_for_symbol(symbol)
                     self._clear_dca_tracking_for_symbol(symbol)
+                    stale_cleanup = self._cancel_stale_pending_entry_orders(symbol)
+                    if int(stale_cleanup.get("cancelled", 0) or 0) > 0:
+                        print(
+                            f"🧹 {symbol} 未成交开仓单超时清理: "
+                            f"cancelled={int(stale_cleanup.get('cancelled', 0) or 0)}, "
+                            f"stale={int(stale_cleanup.get('stale', 0) or 0)}, "
+                            f"threshold={int(stale_cleanup.get('threshold_seconds', 0) or 0)}s"
+                        )
                 if position is None and self._has_pending_entry_order(symbol):
                     print(f"⏭️ {symbol} 存在未成交开仓单，跳过重复开仓决策")
+                    self._log_entry_gate_block(
+                        symbol=symbol,
+                        gate="pending_entry_order",
+                        reason="open_order_exists",
+                        threshold=stale_cleanup.get("threshold_seconds"),
+                        value={
+                            "stale_cancelled": int(stale_cleanup.get("cancelled", 0) or 0),
+                            "stale_detected": int(stale_cleanup.get("stale", 0) or 0),
+                        },
+                        market_data=market_data,
+                        extra={"skip_duplicate_open": True},
+                    )
                     continue
 
                 skip_symbol, block_new_entries_due_to_protection_gap = self._handle_symbol_protection_and_sla(
@@ -8144,7 +8813,8 @@ class TradingBot:
         ai_review_cfg = ai_review_cfg_raw if isinstance(ai_review_cfg_raw, dict) else {}
         ai_review_mode = str(context.get("ai_review_mode") or "disabled").lower()
         ai_flat_top_n = max(1, int(self._to_float(ai_review_cfg.get("flat_top_n", 2), 2)))
-        ai_review_flat_enabled = self._ai_review_mode_supports_flat_candidates(ai_review_mode)
+        ai_review_enabled = bool(ai_review_cfg.get("enabled", True))
+        ai_review_flat_enabled = ai_review_enabled and self._ai_review_mode_supports_flat_candidates(ai_review_mode)
 
         def _item_decision(item: Dict[str, Any]) -> Optional[FundFlowDecision]:
             decision_raw = item.get("decision")
@@ -8162,25 +8832,62 @@ class TradingBot:
                 "⛔ 本轮禁止新开仓：检测到持仓缺少保护单，已清空候选开仓队列 "
                 f"symbols={','.join(protection_gap_symbols)}"
             )
+            for item in open_candidates:
+                decision_i = _item_decision(item)
+                self._log_entry_gate_block(
+                    symbol=str(item.get("symbol") or getattr(decision_i, "symbol", "") or ""),
+                    gate="finalize_protection_gap",
+                    reason="missing_protection_order",
+                    threshold=protection_gap_symbols,
+                    value={
+                        "candidate_score": self._to_float(item.get("score"), 0.0),
+                        "rank": int(self._to_float(item.get("ai_shortlist_rank"), 0)),
+                    },
+                    decision=decision_i,
+                    flow_context=item.get("flow_context") if isinstance(item.get("flow_context"), dict) else None,
+                    trigger_context=item.get("trigger_context") if isinstance(item.get("trigger_context"), dict) else None,
+                    extra={"open_new_entry": True},
+                )
             open_candidates = []
 
         if open_candidates:
             open_candidates = sorted(
                 open_candidates,
-                key=lambda x: float(x.get("score", 0.0)),
+                key=lambda x: float(x.get("competition_score", x.get("score", 0.0))),
                 reverse=True,
             )
-            if ai_gate_enabled and ai_review_flat_enabled and len(open_candidates) > ai_flat_top_n:
+            if ai_gate_enabled and ai_review_flat_enabled:
                 skipped = open_candidates[ai_flat_top_n:]
+                if skipped:
+                    skipped_symbols = [str(item.get("symbol") or "") for item in skipped]
+                    print(
+                        f"🤖 空仓AI候选收敛: 仅保留前{ai_flat_top_n}个标的进入终审, "
+                        f"跳过={','.join([s for s in skipped_symbols if s])}"
+                    )
+                    for rank, item in enumerate(skipped, start=ai_flat_top_n + 1):
+                        decision_i = _item_decision(item)
+                        self._log_entry_gate_block(
+                            symbol=str(item.get("symbol") or getattr(decision_i, "symbol", "") or ""),
+                            gate="ai_shortlist_cut",
+                            reason="shortlist_trimmed",
+                            threshold=ai_flat_top_n,
+                            value={
+                                "rank": rank,
+                                "score": self._to_float(item.get("score"), 0.0),
+                            },
+                            decision=decision_i,
+                            flow_context=item.get("flow_context") if isinstance(item.get("flow_context"), dict) else None,
+                            trigger_context=item.get("trigger_context") if isinstance(item.get("trigger_context"), dict) else None,
+                            extra={"shortlist_rank": rank},
+                        )
                 open_candidates = open_candidates[:ai_flat_top_n]
-                skipped_symbols = [str(item.get("symbol") or "") for item in skipped]
-                print(
-                    f"🤖 空仓AI候选收敛: 仅分析前{ai_flat_top_n}个标的, "
-                    f"跳过={','.join([s for s in skipped_symbols if s])}"
-                )
+                for shortlist_rank, item in enumerate(open_candidates, start=1):
+                    item["ai_shortlist_rank"] = shortlist_rank
             if ai_gate_enabled and ai_review_flat_enabled:
                 shortlist_parts: List[str] = []
                 for rank, item in enumerate(open_candidates, start=1):
+                    if int(self._to_float(item.get("ai_shortlist_rank"), 0)) <= 0:
+                        continue
                     symbol_i = str(item.get("symbol") or "")
                     score_i = float(item.get("score", 0.0))
                     decision_i = _item_decision(item)
@@ -8220,6 +8927,17 @@ class TradingBot:
                         f"持仓交易对已满({active_count}/{item_max_active_symbols})，"
                         f"候选排名={rank}"
                     )
+                    self._log_entry_gate_block(
+                        symbol=str(item.get("symbol") or getattr(decision_i, "symbol", "") or ""),
+                        gate="active_symbol_capacity",
+                        reason="active_symbol_cap_reached",
+                        threshold=item_max_active_symbols,
+                        value=active_count,
+                        decision=decision_i,
+                        flow_context=item.get("flow_context") if isinstance(item.get("flow_context"), dict) else None,
+                        trigger_context=item.get("trigger_context") if isinstance(item.get("trigger_context"), dict) else None,
+                        extra={"rank": rank, "bypass_capacity_guard": bypass_capacity_guard},
+                    )
                     continue
 
                 account_summary_i = item.get("account_summary")
@@ -8241,11 +8959,12 @@ class TradingBot:
                 current_price_i = self._to_float(item.get("current_price"), 0.0)
                 symbol_i = str(item.get("symbol") or getattr(decision_i, "symbol", "") or "")
                 bypass_ai_final_review = bool(item.get("bypass_ai_final_review", False)) or is_close_candidate
-                if ai_gate_enabled and ai_review_flat_enabled and (not bypass_ai_final_review):
+                shortlist_rank = max(0, int(self._to_float(item.get("ai_shortlist_rank"), 0)))
+                if ai_gate_enabled and ai_review_flat_enabled and (not bypass_ai_final_review) and shortlist_rank > 0:
                     local_score = float(item.get("score", 0.0))
                     if decision_i.operation in (FundFlowOperation.BUY, FundFlowOperation.SELL) and current_price_i > 0:
                         print(
-                            f"🤖 {symbol_i} AI终审请求: rank={rank} "
+                            f"🤖 {symbol_i} AI终审请求: rank={rank} shortlist={shortlist_rank} "
                             f"local={decision_i.operation.value.upper()} "
                             f"price={current_price_i:.6f}"
                         )
@@ -8269,10 +8988,26 @@ class TradingBot:
                         ai_conf = self._to_float(ai_md.get("ds_confidence"), 0.0)
                         if ai_decision.operation != decision_i.operation:
                             print(
-                                f"⛔ {symbol_i} AI终审未通过: rank={rank} "
+                                f"⛔ {symbol_i} AI终审未通过: rank={rank} shortlist={shortlist_rank} "
                                 f"local={decision_i.operation.value.upper()} "
                                 f"ai={ai_decision.operation.value.upper()} "
                                 f"source={ai_source} conf={ai_conf:.3f}"
+                            )
+                            self._log_entry_gate_block(
+                                symbol=symbol_i,
+                                gate="ai_final_review_action_mismatch",
+                                reason="ai_action_mismatch",
+                                threshold=decision_i.operation.value,
+                                value=ai_decision.operation.value,
+                                decision=decision_i,
+                                flow_context=flow_context_i,
+                                trigger_context=trigger_context_i,
+                                extra={
+                                    "rank": rank,
+                                    "shortlist_rank": shortlist_rank,
+                                    "ds_source": ai_source,
+                                    "ds_confidence": ai_conf,
+                                },
                             )
                             continue
                         allow_ai_entry, block_reason = self._ai_entry_guard(
@@ -8282,24 +9017,61 @@ class TradingBot:
                             ai_review_cfg=ai_review_cfg,
                             position=item.get("position") if isinstance(item.get("position"), dict) else None,
                         )
+                        local_md = (
+                            decision_i.metadata if isinstance(getattr(decision_i, "metadata", None), dict) else {}
+                        )
+                        local_md["ai_final_review"] = {
+                            "mode": "enforced",
+                            "shortlist_rank": shortlist_rank,
+                            "candidate_rank": rank,
+                            "local_operation": decision_i.operation.value,
+                            "ai_operation": ai_decision.operation.value,
+                            "local_score": local_score,
+                            "allow_ai_entry": bool(allow_ai_entry),
+                            "block_reason": block_reason,
+                            "ds_source": ai_source,
+                            "ds_confidence": ai_conf,
+                        }
+                        decision_i.metadata = local_md
+                        ai_exec_md = ai_decision.metadata if isinstance(getattr(ai_decision, "metadata", None), dict) else {}
+                        ai_exec_md["ai_final_review"] = dict(local_md["ai_final_review"])
+                        ai_decision.metadata = ai_exec_md
                         if not allow_ai_entry:
                             print(
-                                f"⛔ {symbol_i} AI终审结构拦截: rank={rank} "
+                                f"⛔ {symbol_i} AI终审结构拦截: rank={rank} shortlist={shortlist_rank} "
                                 f"local={decision_i.operation.value.upper()} "
                                 f"reason={block_reason} "
                                 f"source={ai_source} conf={ai_conf:.3f}"
                             )
+                            self._log_entry_gate_block(
+                                symbol=symbol_i,
+                                gate="ai_final_review_structure",
+                                reason=str(block_reason or "ai_final_review_block"),
+                                threshold=ai_review_cfg,
+                                value={
+                                    "local_score": local_score,
+                                    "ds_confidence": ai_conf,
+                                },
+                                decision=decision_i,
+                                flow_context=flow_context_i,
+                                trigger_context=trigger_context_i,
+                                extra={
+                                    "rank": rank,
+                                    "shortlist_rank": shortlist_rank,
+                                    "ds_source": ai_source,
+                                },
+                            )
                             continue
-                        if ai_source != "ai_weight_router":
+                        elif ai_source != "ai_weight_router":
                             print(
-                                f"⚠️ {symbol_i} AI终审回退本地: rank={rank} "
+                                f"⚠️ {symbol_i} AI终审回退本地: rank={rank} shortlist={shortlist_rank} "
                                 f"local={decision_i.operation.value.upper()} "
                                 f"ai={ai_decision.operation.value.upper()} "
                                 f"source={ai_source} conf={ai_conf:.3f}"
                             )
                         else:
                             print(
-                                f"🤖 {symbol_i} AI终审通过: rank={rank} "
+                                f"🤖 {symbol_i} AI终审通过: rank={rank} shortlist={shortlist_rank} "
                                 f"action={ai_decision.operation.value.upper()} "
                                 f"source={ai_source} conf={ai_conf:.3f}"
                             )
@@ -8308,7 +9080,7 @@ class TradingBot:
                         item["score"] = self._decision_signal_score(decision_i, flow_context_i)
                     else:
                         print(
-                            f"🤖 {symbol_i} 未进入AI终审: rank={rank} "
+                            f"🤖 {symbol_i} 未进入AI终审: rank={rank} shortlist={shortlist_rank} "
                             f"local={decision_i.operation.value.upper()}"
                         )
                 self._execute_and_log_decision(

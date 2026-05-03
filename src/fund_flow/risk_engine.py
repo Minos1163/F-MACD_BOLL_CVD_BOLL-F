@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, Iterable, Optional
 
 from src.config.config_loader import ConfigLoader
@@ -31,6 +32,8 @@ class FundFlowRiskEngine:
         self.price_deviation_limit_percent = float(
             fund_flow_cfg.get("price_deviation_limit_percent", 1.0)
         )
+        account_risk_cfg = fund_flow_cfg.get("account_risk", {})
+        self.account_risk_cfg = account_risk_cfg if isinstance(account_risk_cfg, dict) else {}
         self.symbol_whitelist = {s.upper() for s in symbol_whitelist or []}
 
     def validate_symbol(
@@ -91,6 +94,96 @@ class FundFlowRiskEngine:
             )
         return val
 
+    @staticmethod
+    def _cfg_bool(cfg: Dict[str, Any], key: str, default: bool = False) -> bool:
+        value = cfg.get(key, default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return default
+
+    @staticmethod
+    def _cfg_float(cfg: Dict[str, Any], key: str, default: float) -> float:
+        try:
+            return float(cfg.get(key, default))
+        except Exception:
+            return float(default)
+
+    @staticmethod
+    def _cfg_int(cfg: Dict[str, Any], key: str, default: int) -> int:
+        try:
+            return int(float(cfg.get(key, default)))
+        except Exception:
+            return int(default)
+
+    @staticmethod
+    def _scale_leverage(leverage: int, scaler: float, rounding: str) -> int:
+        raw = float(leverage) * float(scaler)
+        mode = str(rounding or "floor").strip().lower()
+        if mode == "ceil":
+            return int(math.ceil(raw))
+        if mode in {"round", "nearest"}:
+            return int(round(raw))
+        return int(math.floor(raw))
+
+    def _apply_account_risk_scaler(self, decision: FundFlowDecision) -> FundFlowDecision:
+        cfg = self.account_risk_cfg
+        if not cfg or not self._cfg_bool(cfg, "enabled", False):
+            return decision
+        if decision.operation not in (Operation.BUY, Operation.SELL):
+            return decision
+        if isinstance(decision.metadata, dict) and decision.metadata.get("account_risk_scaler_applied") is True:
+            return decision
+
+        original_portion = float(decision.target_portion_of_balance)
+        original_leverage = int(decision.leverage)
+
+        exposure_scaler = (
+            self._cfg_float(cfg, "exposure_scaler_value", 1.0)
+            if self._cfg_bool(cfg, "exposure_scaler_enabled", False)
+            else 1.0
+        )
+        leverage_scaler = (
+            self._cfg_float(cfg, "leverage_scaler_value", 1.0)
+            if self._cfg_bool(cfg, "leverage_scaler_enabled", False)
+            else 1.0
+        )
+        rounding = str(cfg.get("leverage_rounding", "floor") or "floor")
+
+        scaled_portion = original_portion * exposure_scaler
+        if scaled_portion > self.max_open_portion:
+            raise ValueError(
+                "account_risk scaled target_portion_of_balance 越界: "
+                f"{scaled_portion:.4f}, 要求 [{self.min_open_portion}, {self.max_open_portion}]"
+            )
+
+        min_scaled_leverage = max(1, self._cfg_int(cfg, "min_scaled_leverage", self.min_leverage))
+        scaled_leverage = self._scale_leverage(original_leverage, leverage_scaler, rounding)
+        scaled_leverage = max(min_scaled_leverage, scaled_leverage)
+        decision.leverage = self.clamp_leverage(scaled_leverage)
+        decision.target_portion_of_balance = scaled_portion
+
+        metadata = dict(decision.metadata or {})
+        metadata["account_risk_scaler_applied"] = True
+        if self._cfg_bool(cfg, "metadata_enabled", False):
+            metadata.update(
+                {
+                    "original_target_portion_of_balance": original_portion,
+                    "scaled_target_portion_of_balance": scaled_portion,
+                    "original_leverage": original_leverage,
+                    "scaled_leverage": decision.leverage,
+                    "exposure_scaler_value": exposure_scaler,
+                    "leverage_scaler_value": leverage_scaler,
+                    "leverage_rounding": rounding,
+                }
+            )
+        decision.metadata = metadata
+
+        return decision
+
     def enforce_price_bounds(self, price: float, oracle_price: float) -> float:
         if price <= 0 or oracle_price <= 0:
             raise ValueError("price/oracle_price 必须大于 0")
@@ -134,4 +227,5 @@ class FundFlowRiskEngine:
             decision.target_portion_of_balance,
             decision.operation,
         )
+        decision = self._apply_account_risk_scaler(decision)
         return decision

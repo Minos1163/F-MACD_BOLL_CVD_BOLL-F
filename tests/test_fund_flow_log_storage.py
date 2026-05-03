@@ -17,6 +17,12 @@ def _sample_decision() -> FundFlowDecision:
         "regime": "TREND",
         "direction_lock": "LONG",
         "signal_pool_id": "pool_a",
+        "vol_vwap_warn": True,
+        "vol_vwap_warn_position_scaled": True,
+        "vol_vwap_warn_position_scale": 0.5,
+        "vol_vwap_warn_adjusted_portion": 0.125,
+        "score_volume": 0.033333,
+        "vwap_score": 0.04,
         "score_15m": {"long": 2.3456789, "short": -1.2345678, "signal_strength": 0.9876543},
         "score_5m": {"long": 1.3456789, "short": -0.2345678, "signal_strength": 0.8876543},
         "final_score": {"long": 3.6913578, "short": -1.4691356},
@@ -84,6 +90,13 @@ def test_compaction_trims_large_decision_and_flow_context():
     raw_decision = json.dumps(decision.to_dict(), ensure_ascii=False)
     compact_decision = json.dumps(compact_decision_payload(decision), ensure_ascii=False)
     assert len(compact_decision) < len(raw_decision) * 0.5
+    compact_payload = compact_decision_payload(decision)
+    assert compact_payload["metadata"]["vol_vwap_warn"] is True
+    assert compact_payload["metadata"]["vol_vwap_warn_position_scaled"] is True
+    assert compact_payload["metadata"]["vol_vwap_warn_position_scale"] == 0.5
+    assert compact_payload["metadata"]["vol_vwap_warn_adjusted_portion"] == 0.125
+    assert compact_payload["metadata"]["score_volume"] == 0.033333
+    assert compact_payload["metadata"]["vwap_score"] == 0.04
 
     compact_flow = compact_flow_context_payload(flow_context)
     assert set(compact_flow["timeframes"].keys()) == {"5m", "15m"}

@@ -243,3 +243,93 @@ def test_pretrade_risk_gate_marks_passive_only_entry_execution_policy(monkeypatc
     assert gated.metadata["disable_market_fallback"] is True
     assert gate_meta["entry_execution_policy"] == "PASSIVE_ONLY"
     assert "EXECUTION_1M_PASSIVE" in gated.reason
+
+
+def test_pretrade_risk_gate_disabled_bypasses_all_entry_blocks():
+    bot = _make_bot(enabled=False)
+    decision = FundFlowDecision(
+        operation=FundFlowOperation.BUY,
+        symbol="BTCUSDT",
+        target_portion_of_balance=0.2,
+        leverage=3,
+        reason="base",
+        metadata={},
+    )
+
+    gated, gate_meta = bot._apply_pretrade_risk_gate(
+        symbol="BTCUSDT",
+        decision=decision,
+        position=None,
+        flow_context={
+            "execution_quality_1m": {
+                "mode": "BLOCK",
+                "block_entry": True,
+                "reason": "should_be_ignored",
+            }
+        },
+        current_price=100.0,
+        account_summary={"equity": 1000.0, "max_leverage": 10.0},
+    )
+
+    assert gated is decision
+    assert gate_meta == {"enabled": False, "action": "BYPASS"}
+
+
+def test_pretrade_risk_gate_phase1_entry_only_skips_forced_exit(monkeypatch):
+    bot = _make_bot(force_exit_on_gate=True, phase1_entry_only=True)
+    pos_key = bot._position_track_key("BTCUSDT", "LONG")
+    bot._position_first_seen_ts[pos_key] = time.time() - 900
+    bot._pre_risk_exit_streak_by_pos[pos_key] = 3
+
+    monkeypatch.setattr(
+        bot_module,
+        "gate_trade_decision",
+        lambda *args, **kwargs: {"action": "EXIT", "score": -0.5, "details": {}},
+    )
+
+    original = _decision(last_close=99.0)
+    gated, gate_meta = bot._apply_pretrade_risk_gate(
+        symbol="BTCUSDT",
+        decision=original,
+        position=_position(),
+        flow_context={},
+        current_price=99.0,
+        account_summary={"equity": 1000.0, "max_leverage": 10.0},
+    )
+
+    assert gated is original
+    assert gated.operation == FundFlowOperation.HOLD
+    assert gate_meta["action"] == "EXIT"
+    assert gate_meta["phase1_entry_only"] is True
+
+
+def test_pretrade_risk_gate_shadow_mode_records_but_preserves_entry(monkeypatch):
+    bot = _make_bot(shadow_mode=True)
+    decision = FundFlowDecision(
+        operation=FundFlowOperation.BUY,
+        symbol="BTCUSDT",
+        target_portion_of_balance=0.2,
+        leverage=3,
+        reason="base",
+        metadata={},
+    )
+    monkeypatch.setattr(
+        bot_module,
+        "gate_trade_decision",
+        lambda *args, **kwargs: {"action": "BLOCK", "score": -0.2, "enter": False, "exit": False, "details": {"why": "test"}},
+    )
+
+    gated, gate_meta = bot._apply_pretrade_risk_gate(
+        symbol="BTCUSDT",
+        decision=decision,
+        position=None,
+        flow_context={},
+        current_price=100.0,
+        account_summary={"equity": 1000.0, "max_leverage": 10.0},
+    )
+
+    assert gated is decision
+    assert gated.operation == FundFlowOperation.BUY
+    assert gate_meta["shadow_mode"] is True
+    assert gate_meta["shadow_action"] == "BLOCK"
+    assert gated.metadata["pretrade_risk_gate"]["shadow_mode"] is True

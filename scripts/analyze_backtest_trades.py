@@ -197,11 +197,54 @@ def write_csv(path: Path, rows: List[dict]) -> None:
         writer.writerows(rows)
 
 
+def build_cancel_quality_summary(trades_df: pd.DataFrame, pending_cancels_df: pd.DataFrame) -> dict:
+    filled_scores = pd.to_numeric(trades_df.get("signal_score", pd.Series(dtype=float)), errors="coerce").dropna()
+    canceled_scores = pd.to_numeric(pending_cancels_df.get("signal_score", pd.Series(dtype=float)), errors="coerce").dropna()
+
+    def _percentiles(series: pd.Series) -> dict:
+        if series.empty:
+            return {"p10": 0.0, "p25": 0.0, "p50": 0.0, "p75": 0.0, "p90": 0.0}
+        return {
+            "p10": float(series.quantile(0.10)),
+            "p25": float(series.quantile(0.25)),
+            "p50": float(series.quantile(0.50)),
+            "p75": float(series.quantile(0.75)),
+            "p90": float(series.quantile(0.90)),
+        }
+
+    by_signal_type: Dict[str, dict] = {}
+    trade_type_counts = (
+        trades_df.groupby("signal_type_1h").size().to_dict()
+        if "signal_type_1h" in trades_df.columns and not trades_df.empty
+        else {}
+    )
+    cancel_type_counts = (
+        pending_cancels_df.groupby("signal_type_1h").size().to_dict()
+        if "signal_type_1h" in pending_cancels_df.columns and not pending_cancels_df.empty
+        else {}
+    )
+    for signal_type in sorted(set(trade_type_counts) | set(cancel_type_counts)):
+        by_signal_type[str(signal_type)] = {
+            "filled": int(trade_type_counts.get(signal_type, 0) or 0),
+            "canceled": int(cancel_type_counts.get(signal_type, 0) or 0),
+        }
+
+    return {
+        "filled_count": int(len(filled_scores)),
+        "canceled_count": int(len(canceled_scores)),
+        "filled_avg_score": float(filled_scores.mean()) if not filled_scores.empty else 0.0,
+        "canceled_avg_score": float(canceled_scores.mean()) if not canceled_scores.empty else 0.0,
+        "canceled_score_percentiles": _percentiles(canceled_scores),
+        "by_signal_type": by_signal_type,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Analyze a backtest trades CSV into symbol and drawdown breakdowns.")
     parser.add_argument("--trades", required=True, help="path to backtest trades csv")
     parser.add_argument("--initial-capital", type=float, default=10000.0, help="initial capital used in the backtest")
     parser.add_argument("--equity-curve", default=None, help="optional per-bar equity curve csv for true drawdown analysis")
+    parser.add_argument("--pending-cancels", default=None, help="optional pending cancel audit csv")
     parser.add_argument("--output-prefix", default=None, help="output prefix; defaults next to the trades file")
     args = parser.parse_args()
 
@@ -220,17 +263,26 @@ def main() -> None:
     drawdown_csv = prefix.parent / f"{prefix.name}_drawdown_breakdown.csv"
     true_drawdown_csv = prefix.parent / f"{prefix.name}_true_drawdown_breakdown.csv"
     summary_json = prefix.parent / f"{prefix.name}_analysis_summary.json"
+    cancel_quality_json = prefix.parent / f"{prefix.name}_cancel_quality_summary.json"
 
     write_csv(symbol_csv, symbol_rows)
     write_csv(drawdown_csv, realized_drawdown_rows)
     write_csv(true_drawdown_csv, true_drawdown_rows)
+    cancel_quality_summary = None
+    if args.pending_cancels:
+        pending_cancels_df = pd.read_csv(args.pending_cancels, encoding="utf-8-sig")
+        trades_df = pd.DataFrame(trades)
+        cancel_quality_summary = build_cancel_quality_summary(trades_df, pending_cancels_df)
+        cancel_quality_json.write_text(json.dumps(cancel_quality_summary, ensure_ascii=False, indent=2), encoding="utf-8")
     summary = {
         "trades_file": str(trades_path),
         "initial_capital": float(args.initial_capital),
         "equity_curve_file": str(args.equity_curve) if args.equity_curve else "",
+        "pending_cancels_file": str(args.pending_cancels) if args.pending_cancels else "",
         "symbol_breakdown_file": str(symbol_csv),
         "drawdown_breakdown_file": str(drawdown_csv),
         "true_drawdown_breakdown_file": str(true_drawdown_csv),
+        "cancel_quality_summary_file": str(cancel_quality_json) if cancel_quality_summary is not None else "",
         "symbols_traded": len(symbol_rows),
         "drawdown_episodes": len(realized_drawdown_rows),
         "true_drawdown_episodes": len(true_drawdown_rows),
@@ -244,6 +296,8 @@ def main() -> None:
     print(f"symbol_breakdown: {symbol_csv}")
     print(f"drawdown_breakdown: {drawdown_csv}")
     print(f"true_drawdown_breakdown: {true_drawdown_csv}")
+    if cancel_quality_summary is not None:
+        print(f"cancel_quality_summary: {cancel_quality_json}")
     print(f"summary: {summary_json}")
 
 

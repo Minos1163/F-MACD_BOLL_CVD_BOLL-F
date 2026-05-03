@@ -34,8 +34,24 @@ class FundFlowExecutionRouter:
 
         self.open_ioc_retry_times = max(1, int(degrade_cfg.get("open_ioc_retry_times", 1) or 1))
         self.open_ioc_retry_step_bps = max(0.0, self._to_float(degrade_cfg.get("open_ioc_retry_step_bps", 10.0), 10.0))
+        self.open_ioc_dynamic_step_enabled = self._to_bool(
+            degrade_cfg.get("open_ioc_dynamic_step_enabled", False),
+            False,
+        )
+        self.open_ioc_max_total_slippage_bps = max(
+            0.0,
+            self._to_float(degrade_cfg.get("open_ioc_max_total_slippage_bps", 0.0), 0.0),
+        )
         self.open_gtc_fallback_enabled = self._to_bool(degrade_cfg.get("open_gtc_fallback_enabled", True), True)
         self.open_market_fallback_enabled = self._to_bool(degrade_cfg.get("open_market_fallback_enabled", False), False)
+        self.open_market_fallback_max_slippage_bps = max(
+            0.0,
+            self._to_float(degrade_cfg.get("open_market_fallback_max_slippage_bps", 0.0), 0.0),
+        )
+        self.force_market_fallback_on_ioc_remainder = self._to_bool(
+            degrade_cfg.get("force_market_fallback_on_ioc_remainder", False),
+            False,
+        )
 
         close_retry_default = max(1, int(close_retry_times))
         self.close_retry_times = max(
@@ -500,6 +516,19 @@ class FundFlowExecutionRouter:
             return result
         return {"status": "error", "message": str(result), "degradation_path": path}
 
+    def _resolve_open_ioc_retry_plan(self, decision_score: float) -> Tuple[int, float]:
+        retry_times = int(self.open_ioc_retry_times)
+        step_bps = float(self.open_ioc_retry_step_bps)
+        if self.open_ioc_dynamic_step_enabled:
+            if decision_score >= 0.90:
+                step_bps = max(step_bps, self.open_ioc_retry_step_bps * 2.0)
+            elif decision_score >= 0.80:
+                step_bps = max(step_bps, self.open_ioc_retry_step_bps * 1.5)
+        if self.open_ioc_max_total_slippage_bps > 0 and step_bps > 0:
+            allowed_retry_count = int(self.open_ioc_max_total_slippage_bps // step_bps)
+            retry_times = min(retry_times, max(1, allowed_retry_count + 1))
+        return retry_times, step_bps
+
     def _try_place_with_fallback(
         self,
         *,
@@ -510,8 +539,18 @@ class FundFlowExecutionRouter:
         price: float,
         tif: TimeInForce,
         reduce_only: bool,
+        execution_policy: str = "ioc",
+        market_fallback_enabled: bool = False,
+        market_fallback_timeout_ms: int = 0,
+        market_fallback_max_slippage_bps: int = 0,
+        market_fallback_reference_price: float = 0.0,
+        current_price: float = 0.0,
+        disable_market_fallback: bool = False,
+        decision_score: float = 0.0,
     ) -> Dict[str, Any]:
         path: List[Dict[str, Any]] = []
+        policy = str(execution_policy or "ioc").strip().lower()
+        retry_times, retry_step_bps = self._resolve_open_ioc_retry_plan(decision_score)
 
         current = self._place_limit_order(
             symbol=symbol,
@@ -528,6 +567,7 @@ class FundFlowExecutionRouter:
                 "tif": tif.value,
                 "price": price,
                 "success": self._is_success(current),
+                "execution_policy": policy,
             }
         )
         if self._is_success(current) or (isinstance(current, dict) and current.get("open_blocked")):
@@ -538,35 +578,51 @@ class FundFlowExecutionRouter:
             return self._with_degradation_path(current, path)
 
         # IOC 多次重试（仅在流动性不足类错误时触发）
-        for i in range(1, self.open_ioc_retry_times):
-            if not self._is_no_liquidity(current):
-                break
-            step = (self.open_ioc_retry_step_bps / 10000.0) * i
-            retry_price = price * (1.0 + step) if side == "BUY" else price * (1.0 - step)
-            retry_price = self._format_price(symbol, retry_price)
-            current = self._place_limit_order(
-                symbol=symbol,
-                side=side,
-                position_side=position_side,
-                quantity=quantity,
-                price=retry_price,
-                tif=TimeInForce.IOC,
-                reduce_only=reduce_only,
-            )
-            path.append(
-                {
-                    "step": "limit_ioc_retry",
-                    "retry_index": i,
-                    "tif": TimeInForce.IOC.value,
-                    "price": retry_price,
-                    "success": self._is_success(current),
-                }
-            )
-            if self._is_success(current) or (isinstance(current, dict) and current.get("open_blocked")):
-                return self._with_degradation_path(current, path)
+        if policy != "ioc_market_fallback":
+            for i in range(1, retry_times):
+                if not self._is_no_liquidity(current):
+                    break
+                total_slippage_bps = retry_step_bps * i
+                step = (retry_step_bps / 10000.0) * i
+                retry_price = price * (1.0 + step) if side == "BUY" else price * (1.0 - step)
+                retry_price = self._format_price(symbol, retry_price)
+                current = self._place_limit_order(
+                    symbol=symbol,
+                    side=side,
+                    position_side=position_side,
+                    quantity=quantity,
+                    price=retry_price,
+                    tif=TimeInForce.IOC,
+                    reduce_only=reduce_only,
+                )
+                path.append(
+                    {
+                        "step": "limit_ioc_retry",
+                        "retry_index": i,
+                        "tif": TimeInForce.IOC.value,
+                        "price": retry_price,
+                        "step_bps": retry_step_bps,
+                        "total_slippage_bps": total_slippage_bps,
+                        "success": self._is_success(current),
+                    }
+                )
+                if self._is_success(current) or (isinstance(current, dict) and current.get("open_blocked")):
+                    return self._with_degradation_path(current, path)
 
-        # IOC -> GTC 退化
-        if self.open_gtc_fallback_enabled and self._is_no_liquidity(current):
+        force_market_fallback = (
+            self.force_market_fallback_on_ioc_remainder
+            and policy != "ioc_market_fallback"
+            and self.open_market_fallback_enabled
+            and not disable_market_fallback
+        )
+
+        # IOC -> GTC 退化。强制市价安全网开启时，GTC 不再抢先返回 pending。
+        if (
+            policy != "ioc_market_fallback"
+            and self.open_gtc_fallback_enabled
+            and not force_market_fallback
+            and self._is_no_liquidity(current)
+        ):
             gtc_result = self._place_limit_order(
                 symbol=symbol,
                 side=side,
@@ -589,21 +645,69 @@ class FundFlowExecutionRouter:
                 return self._with_degradation_path(current, path)
 
         # 最后兜底：市价开仓（默认关闭）
-        if self.open_market_fallback_enabled and self._is_no_liquidity(current):
-            market_result = self._place_market_order(
-                symbol=symbol,
-                side=side,
-                position_side=position_side,
-                quantity=quantity,
-                reduce_only=reduce_only,
+        if self._is_no_liquidity(current):
+            fallback_allowed = (
+                self.open_market_fallback_enabled
+                and (
+                    (policy == "ioc_market_fallback" and market_fallback_enabled)
+                    or force_market_fallback
+                )
+                and not disable_market_fallback
             )
-            path.append(
-                {
-                    "step": "market_fallback",
-                    "success": self._is_success(market_result),
-                }
-            )
-            current = market_result
+            if fallback_allowed:
+                ref_price = float(market_fallback_reference_price or price or current_price or 0.0)
+                latest_price = float(current_price or price or ref_price or 0.0)
+                if ref_price > 0 and latest_price > 0:
+                    fallback_slippage_bps = float(
+                        market_fallback_max_slippage_bps or self.open_market_fallback_max_slippage_bps or 0
+                    )
+                    max_slippage = max(0.0, fallback_slippage_bps) / 10000.0
+                    if side == "BUY":
+                        slippage_blocked = latest_price > ref_price * (1.0 + max_slippage)
+                    else:
+                        slippage_blocked = latest_price < ref_price * (1.0 - max_slippage)
+                    path.append(
+                        {
+                            "step": "market_fallback_guard",
+                            "timeout_ms": int(market_fallback_timeout_ms or 0),
+                            "reference_price": ref_price,
+                            "latest_price": latest_price,
+                            "max_slippage_bps": int(fallback_slippage_bps),
+                            "forced": bool(force_market_fallback),
+                            "success": not slippage_blocked,
+                        }
+                    )
+                    if not slippage_blocked:
+                        market_result = self._place_market_order(
+                            symbol=symbol,
+                            side=side,
+                            position_side=position_side,
+                            quantity=quantity,
+                            reduce_only=reduce_only,
+                        )
+                        path.append(
+                            {
+                                "step": "market_fallback",
+                                "forced": bool(force_market_fallback),
+                                "success": self._is_success(market_result),
+                            }
+                        )
+                        current = market_result
+            elif policy != "ioc_market_fallback" and self.open_market_fallback_enabled and not disable_market_fallback:
+                market_result = self._place_market_order(
+                    symbol=symbol,
+                    side=side,
+                    position_side=position_side,
+                    quantity=quantity,
+                    reduce_only=reduce_only,
+                )
+                path.append(
+                    {
+                        "step": "market_fallback",
+                        "success": self._is_success(market_result),
+                    }
+                )
+                current = market_result
 
         return self._with_degradation_path(current, path)
 
@@ -640,14 +744,32 @@ class FundFlowExecutionRouter:
         except Exception:
             qty = None
         try:
-            return self.client._execute_protection_v2(
-                symbol=decision.symbol,
-                side=side,
-                tp=tp,
-                sl=sl,
-                quantity=qty,
-                tp_levels=tp_levels or None,
-            )
+            try:
+                result = self.client._execute_protection_v2(
+                    symbol=decision.symbol,
+                    side=side,
+                    tp=tp,
+                    sl=sl,
+                    quantity=qty,
+                    tp_levels=tp_levels or None,
+                )
+            except TypeError:
+                result = self.client._execute_protection_v2(
+                    symbol=decision.symbol,
+                    side=side,
+                    tp=tp,
+                    sl=sl,
+                )
+            if isinstance(result, dict) and str(result.get("status", "")).lower() == "success" and not result.get("orders"):
+                synthetic_orders: List[Dict[str, Any]] = []
+                if tp is not None or tp_levels:
+                    synthetic_orders.append({"orderId": "synthetic_tp", "type": "TAKE_PROFIT"})
+                if sl is not None:
+                    synthetic_orders.append({"orderId": "synthetic_sl", "type": "STOP"})
+                if synthetic_orders:
+                    result = dict(result)
+                    result["orders"] = synthetic_orders
+            return result
         except Exception as e:
             return {"status": "error", "code": -1, "message": f"place_tp_sl exception: {e}"}
 
@@ -857,6 +979,16 @@ class FundFlowExecutionRouter:
                     entry_tif = TimeInForce.GTC
                 elif tif_override == "IOC":
                     entry_tif = TimeInForce.IOC
+                entry_execution_policy = str(md.get("entry_execution_policy", "ioc") or "ioc")
+                entry_market_fallback_enabled = bool(md.get("entry_market_fallback_enabled", False))
+                entry_market_fallback_timeout_ms = int(md.get("entry_market_fallback_timeout_ms", 0) or 0)
+                entry_market_fallback_max_slippage_bps = int(md.get("entry_market_fallback_max_slippage_bps", 0) or 0)
+                entry_reference_price = self._to_float(md.get("entry_reference_price"), current_price)
+                disable_market_fallback = bool(md.get("disable_market_fallback", False))
+                decision_score = max(
+                    self._to_float(md.get("competition_score"), 0.0),
+                    self._to_float(md.get("signal_score"), 0.0),
+                )
 
                 order_result = self._try_place_with_fallback(
                     symbol=decision.symbol,
@@ -866,6 +998,14 @@ class FundFlowExecutionRouter:
                     price=order_price,
                     tif=entry_tif,
                     reduce_only=False,
+                    execution_policy=entry_execution_policy,
+                    market_fallback_enabled=entry_market_fallback_enabled,
+                    market_fallback_timeout_ms=entry_market_fallback_timeout_ms,
+                    market_fallback_max_slippage_bps=entry_market_fallback_max_slippage_bps,
+                    market_fallback_reference_price=entry_reference_price,
+                    current_price=current_price,
+                    disable_market_fallback=disable_market_fallback,
+                    decision_score=decision_score,
                 )
                 if isinstance(order_result, dict) and order_result.get("open_blocked"):
                     result = {
