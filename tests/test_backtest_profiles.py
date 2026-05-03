@@ -175,13 +175,16 @@ def test_live_runtime_config_uses_rsi_rhythm_defaults() -> None:
     assert v2_cfg["scoring_weights"]["weight_1h_direction"] == 0.15
     assert v2_cfg["scoring_weights"]["weight_rsi_rhythm"] == 0.30
     assert v2_cfg["scoring_weights"]["weight_vwap"] == 0.05
-    assert v2_cfg["scoring_weights"]["weight_15m_entry"] == 0.0
+    assert v2_cfg["scoring_weights"]["weight_15m_entry"] == 0.05
     assert v2_cfg["entry_thresholds"]["min_signal_score"] == 0.68
     assert v2_cfg["entry_thresholds"]["red_bar_growing"] == 0.68
     assert v2_cfg["entry_thresholds"]["green_bar_growing"] == 0.69
     assert v2_cfg["entry_thresholds"]["flip_bearish"] == 0.66
     assert v2_cfg["entry_thresholds"]["flip_bullish"] == 0.64
     assert v2_cfg["entry_filters"]["min_vwap_score_for_entry"] == 0.0
+    assert v2_cfg["entry_filters"]["short_min_vwap_score_for_entry"] == 0.06
+    assert v2_cfg["entry_filters"]["flip_bearish_short_min_vwap_score_for_entry"] == 0.08
+    assert v2_cfg["entry_filters"]["flip_bearish_require_enhancement_or_15m_confirmation"] is True
     assert v2_cfg["entry_filters"]["enable_flip_bullish_strict_filter"] is False
     assert v2_cfg["entry_filters"]["enable_flip_bullish_cvd_context_filter"] is False
     assert v2_cfg["entry_filters"]["disable_flip_bullish_entries"] is True
@@ -191,6 +194,7 @@ def test_live_runtime_config_uses_rsi_rhythm_defaults() -> None:
     assert v2_cfg["position_management"]["enable_green_bar_growing_probe_overlay"] is True
     assert v2_cfg["position_management"]["green_bar_growing_probe_position_penalty"] == 0.10
     assert v2_cfg["position_management"]["green_bar_growing_probe_max_leverage"] == 2
+    assert v2_cfg["rsi_config"]["short_rsi_probe_only_below"] == 40.0
     assert runtime_cfg["fund_flow"]["execution_degradation"]["open_market_fallback_enabled"] is True
     assert runtime_cfg["fund_flow"]["execution_degradation"]["open_ioc_retry_times"] == 4
     assert runtime_cfg["fund_flow"]["execution_degradation"]["open_ioc_dynamic_step_enabled"] is True

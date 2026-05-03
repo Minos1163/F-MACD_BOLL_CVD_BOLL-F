@@ -305,13 +305,17 @@ def test_macd_v2_live_defaults_use_rsi_rhythm_weights() -> None:
     assert engine.macd_v2_config.weight_1h_direction == 0.15
     assert engine.macd_v2_config.weight_rsi_rhythm == 0.30
     assert engine.macd_v2_config.weight_vwap == 0.05
-    assert engine.macd_v2_config.weight_15m_entry == 0.0
+    assert engine.macd_v2_config.weight_15m_entry == 0.05
     assert engine.macd_v2_config.min_signal_score == 0.85
     assert engine.macd_v2_config.red_bar_growing_min_signal_score == 0.90
     assert engine.macd_v2_config.green_bar_growing_min_signal_score == 0.87
     assert engine.macd_v2_config.flip_bearish_min_signal_score == 0.84
     assert engine.macd_v2_config.flip_bullish_min_signal_score == 0.82
     assert engine.macd_v2_config.min_vwap_score_for_entry == 0.10
+    assert engine.macd_v2_config.short_min_vwap_score_for_entry == 0.06
+    assert engine.macd_v2_config.flip_bearish_short_min_vwap_score_for_entry == 0.08
+    assert engine.macd_v2_config.short_rsi_probe_only_below == 40.0
+    assert engine.macd_v2_config.flip_bearish_require_enhancement_or_15m_confirmation is True
 
 
 def test_macd_v2_legacy_soft_15m_flags_emit_deprecation_warning(caplog) -> None:

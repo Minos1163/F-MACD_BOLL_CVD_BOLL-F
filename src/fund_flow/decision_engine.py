@@ -570,7 +570,7 @@ class FundFlowDecisionEngine:
                 weight_4h_enhancement=self._to_float(weights_cfg.get("weight_4h_enhancement"), 0.10),
                 weight_rsi_rhythm=self._to_float(weights_cfg.get("weight_rsi_rhythm"), 0.30),
                 weight_vwap=self._to_float(weights_cfg.get("weight_vwap"), 0.05),
-                weight_15m_entry=self._to_float(weights_cfg.get("weight_15m_entry"), 0.0),
+                weight_15m_entry=self._to_float(weights_cfg.get("weight_15m_entry"), 0.05),
                 weight_volume=self._to_float(weights_cfg.get("weight_volume"), 0.10),
                 # 入场阈值
                 min_entry_score=self._to_float(thresholds_cfg.get("min_entry_score"), 0.25),
@@ -695,6 +695,17 @@ class FundFlowDecisionEngine:
                 spring_override_score_bonus=self._to_float(filter_cfg.get("spring_override_score_bonus"), 0.10),
                 enable_priority_allocation=bool(filter_cfg.get("enable_priority_allocation", True)),
                 priority_allocation_overdraft_pct=self._to_float(filter_cfg.get("priority_allocation_overdraft_pct"), 0.08),
+                short_min_vwap_score_for_entry=self._to_float(
+                    filter_cfg.get("short_min_vwap_score_for_entry"),
+                    0.06,
+                ),
+                flip_bearish_short_min_vwap_score_for_entry=self._to_float(
+                    filter_cfg.get("flip_bearish_short_min_vwap_score_for_entry"),
+                    0.08,
+                ),
+                flip_bearish_require_enhancement_or_15m_confirmation=bool(
+                    filter_cfg.get("flip_bearish_require_enhancement_or_15m_confirmation", True)
+                ),
                 enable_red_bar_growing_probe_overlay=bool(position_mgmt_cfg.get("enable_red_bar_growing_probe_overlay", False)),
                 red_bar_growing_probe_position_penalty=self._to_float(
                     position_mgmt_cfg.get("red_bar_growing_probe_position_penalty"),
@@ -728,6 +739,7 @@ class FundFlowDecisionEngine:
                 rsi_spring_confirm=self._to_float(rsi_cfg.get("spring_confirm"), 50.0),
                 rsi_1h_long_support=self._to_float(rsi_cfg.get("rsi_1h_long_support"), 52.0),
                 rsi_1h_short_support=self._to_float(rsi_cfg.get("rsi_1h_short_support"), 48.0),
+                short_rsi_probe_only_below=self._to_float(rsi_cfg.get("short_rsi_probe_only_below"), 40.0),
                 rsi_extension_penalty_threshold_long=self._to_float(
                     rsi_cfg.get("extension_penalty_threshold_long"),
                     62.0,

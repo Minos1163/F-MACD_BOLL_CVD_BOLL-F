@@ -82,7 +82,7 @@ class MACDStrategyV2Config:
     weight_4h_enhancement: float = 0.10  # 兼容旧配置：运行时折叠进 4H 主方向
     weight_rsi_rhythm: float = 0.30  # RSI节奏评分权重
     weight_vwap: float = 0.05  # VWAP评分权重
-    weight_15m_entry: float = 0.00  # 兼容旧配置：不再单独计分
+    weight_15m_entry: float = 0.05
     weight_volume: float = 0.10  # 成交量确认评分权重
     
     # 入场阈值
@@ -175,6 +175,7 @@ class MACDStrategyV2Config:
     rsi_probe_exposure_mult: float = 0.20
     rsi_probe_portion_scale: float = 0.25
     rsi_probe_forced_leverage: int = 2
+    short_rsi_probe_only_below: float = 40.0
     enable_15m_spring_threshold_override: bool = True
     spring_override_min_signal_score: float = 0.82
     spring_override_score_bonus: float = 0.10
@@ -241,6 +242,9 @@ class MACDStrategyV2Config:
     preflip_trial_min_vwap_score: float = 0.06
     preflip_trial_entry_scale: float = 0.35
     preflip_trial_max_leverage: int = 2
+    short_min_vwap_score_for_entry: float = 0.06
+    flip_bearish_short_min_vwap_score_for_entry: float = 0.08
+    flip_bearish_require_enhancement_or_15m_confirmation: bool = True
     enable_trial_short_below_structure_continuation_promotion: bool = False
     trial_short_below_structure_promotion_min_signal_score: float = 0.82
     trial_short_below_structure_promotion_min_vwap_score: float = 0.075
@@ -972,12 +976,29 @@ class MACDStrategyV2Engine:
     def _resolve_min_vwap_score_for_entry(
         self,
         *,
+        trade_direction: Optional[str],
         signal_type_1h: Optional[str],
         is_trial_entry: bool,
     ) -> float:
-        if self.config.enable_vwap_flip_exemption and str(signal_type_1h or "").strip() in {"flip_bullish", "flip_bearish"}:
+        direction = str(trade_direction or "").strip().lower()
+        signal_type = str(signal_type_1h or "").strip().lower()
+
+        if is_trial_entry:
+            return float(self.config.preflip_trial_min_vwap_score)
+
+        if direction == "long":
+            if self.config.enable_vwap_flip_exemption and signal_type == "flip_bullish":
+                return 0.0
+            return float(self.config.min_vwap_score_for_entry)
+
+        if direction == "short":
+            if signal_type == "flip_bearish":
+                return float(self.config.flip_bearish_short_min_vwap_score_for_entry)
+            return float(self.config.short_min_vwap_score_for_entry)
+
+        if self.config.enable_vwap_flip_exemption and signal_type in {"flip_bullish", "flip_bearish"}:
             return 0.0
-        return float(self.config.preflip_trial_min_vwap_score if is_trial_entry else self.config.min_vwap_score_for_entry)
+        return float(self.config.min_vwap_score_for_entry)
 
     @staticmethod
     def _resolve_priority_signal(signal_type_1h: Optional[str], vwap_state: Optional[str]) -> bool:
@@ -1000,6 +1021,21 @@ class MACDStrategyV2Engine:
             self.config.enable_green_bar_growing_probe_overlay
             and str(signal_type_1h or "").strip().lower() == "green_bar_growing"
         )
+
+    def _has_meaningful_short_15m_confirmation(
+        self,
+        *,
+        trade_direction: str,
+        entry_type_15m: Optional[str],
+        entry_score_15m: float,
+    ) -> bool:
+        if str(trade_direction or "").strip().lower() != "short":
+            return False
+
+        entry_type = str(entry_type_15m or "").strip().lower()
+        if entry_type in {"flip_bearish", "green_bar_growing", "rsi_spring", "rsi_neutral_resume"}:
+            return True
+        return float(entry_score_15m or 0.0) > 0
 
     def _is_weak_signal_probe_overlay(self, signal_type_1h: Optional[str]) -> bool:
         return bool(
@@ -1651,6 +1687,16 @@ class MACDStrategyV2Engine:
         result["weighted_score"] = raw_score * float(self.config.weight_rsi_rhythm)
         result["exposure_mult"] = self._resolve_rsi_exposure_multiplier(raw_score)
         result["probe_mode"] = raw_score < float(self.config.rsi_rhythm_block_score)
+        if (
+            direction == "short"
+            and np.isfinite(current_rsi_1h)
+            and current_rsi_1h < float(self.config.short_rsi_probe_only_below)
+        ):
+            result["probe_mode"] = True
+            result["exposure_mult"] = min(
+                float(result.get("exposure_mult", 1.0)),
+                float(self.config.rsi_probe_exposure_mult),
+            )
         return result
 
     def _resolve_rsi_entry_refinement(
@@ -2531,7 +2577,7 @@ class MACDStrategyV2Engine:
         elif direction == 'short':
             if hist_0 < 0:
                 enhancement_score += 0.5
-                if hist_0 < hist_1:
+                if hist_1 < 0 and hist_0 < hist_1:
                     enhancement_score += 0.3
                     is_enhanced = True
                 elif hist_0 > hist_1:
@@ -4257,6 +4303,7 @@ class MACDStrategyV2Engine:
         min_vwap_score_for_entry = max(
             0.0,
             self._resolve_min_vwap_score_for_entry(
+                trade_direction=trade_direction,
                 signal_type_1h=signal_type_1h,
                 is_trial_entry=is_trial_entry,
             ),
@@ -4338,6 +4385,11 @@ class MACDStrategyV2Engine:
         score = 0.0
 
         signal_strength_1h = details_1h.get('signal_strength', 0.5)
+        meaningful_short_15m_confirmation = self._has_meaningful_short_15m_confirmation(
+            trade_direction=trade_direction,
+            entry_type_15m=entry_type_15m,
+            entry_score_15m=entry_score_15m,
+        )
         score_1h_base = 0.0
         if direction_1h == trade_direction and signal_type_1h in ['flip_bullish', 'flip_bearish']:
             score_1h_base = self.config.weight_1h_direction
@@ -4354,6 +4406,14 @@ class MACDStrategyV2Engine:
             score_4h_base = self.config.weight_4h_direction * preflip_4h_strength
         elif direction_4h == trade_direction and signal_type_4h in ['flip_bullish', 'flip_bearish']:
             score_4h_base = self.config.weight_4h_direction
+            if (
+                trade_direction == "short"
+                and signal_type_4h == "flip_bearish"
+                and self.config.flip_bearish_require_enhancement_or_15m_confirmation
+                and not is_4h_enhanced
+                and not meaningful_short_15m_confirmation
+            ):
+                score_4h_base = self.config.weight_4h_direction * 0.5
         elif direction_4h == trade_direction and signal_type_4h in ['red_bar_growing', 'green_bar_growing']:
             score_4h_base = self.config.weight_4h_direction * 0.875
         elif direction_4h == trade_direction:
@@ -4397,6 +4457,14 @@ class MACDStrategyV2Engine:
         score += score_vwap
 
         score_15m = 0.0
+        if self.config.weight_15m_entry > 0:
+            score_15m = min(
+                self.config.weight_15m_entry,
+                max(0.0, float(entry_score_15m or 0.0)) * self.config.weight_15m_entry,
+            )
+            if score_15m == 0.0 and meaningful_short_15m_confirmation:
+                score_15m = self.config.weight_15m_entry
+        score += score_15m
 
         # 成交量评分
         if volume_ratio > 1.5:
@@ -4773,6 +4841,14 @@ class MACDStrategyV2Engine:
             'score_4h_base': score_4h_base,
             'score_4h': score_4h,
             'score_4h_trend': score_4h_trend,
+            'meaningful_short_15m_confirmation': meaningful_short_15m_confirmation,
+            'flip_bearish_4h_guard_applied': bool(
+                trade_direction == "short"
+                and signal_type_4h == "flip_bearish"
+                and self.config.flip_bearish_require_enhancement_or_15m_confirmation
+                and not is_4h_enhanced
+                and not meaningful_short_15m_confirmation
+            ),
             'score_4h_enhancement_base': score_4h_enhancement_base,
             'score_4h_enhancement': score_4h_enhancement,
             'score_rsi_rhythm_raw': score_rsi_rhythm_raw,
