@@ -5189,6 +5189,57 @@ class TradingBot:
             return 0.0
         return float(best) if best > 0 else 0.0
 
+    def _resolve_macd_v2_stop_summary(
+        self,
+        *,
+        symbol: str,
+        decision: FundFlowDecision,
+        position_for_log: Any,
+    ) -> Dict[str, Any]:
+        md = decision.metadata if isinstance(decision.metadata, dict) else {}
+        macd_v2_debug = md.get("macd_v2_debug") if isinstance(md.get("macd_v2_debug"), dict) else {}
+        entry_price = self._to_float(
+            position_for_log.get("entry_price") if isinstance(position_for_log, dict) else 0.0,
+            0.0,
+        )
+
+        exchange_stop = 0.0
+        try:
+            exchange_stop = self._get_existing_sl_price(self.client.get_open_orders(symbol) or [])
+        except Exception:
+            exchange_stop = 0.0
+
+        if exchange_stop > 0:
+            stop_pct = abs(exchange_stop - entry_price) / entry_price if entry_price > 0 else 0.0
+            return {"stop_price": exchange_stop, "stop_pct": stop_pct, "stop_source": "exchange"}
+
+        plan_stop = self._to_float(
+            md.get("suggested_stop_price"),
+            self._to_float(macd_v2_debug.get("stop_price"), 0.0),
+        )
+        if plan_stop > 0:
+            stop_pct = abs(plan_stop - entry_price) / entry_price if entry_price > 0 else self._to_float(
+                md.get("stop_loss_pct"),
+                self._to_float(macd_v2_debug.get("stop_loss_pct"), 0.0),
+            )
+            return {"stop_price": plan_stop, "stop_pct": stop_pct, "stop_source": "metadata"}
+
+        stop_pct = self._to_float(
+            md.get("stop_loss_pct"),
+            self._to_float(macd_v2_debug.get("stop_loss_pct"), 0.0),
+        )
+        if isinstance(position_for_log, dict) and decision.operation in (FundFlowOperation.BUY, FundFlowOperation.SELL):
+            try:
+                self._repair_missing_protection(symbol, position_for_log)
+            except Exception as exc:
+                return {
+                    "stop_price": 0.0,
+                    "stop_pct": stop_pct,
+                    "stop_source": "MISSING",
+                    "repair_error": str(exc),
+                }
+        return {"stop_price": 0.0, "stop_pct": stop_pct, "stop_source": "MISSING"}
+
     def _is_new_sl_tighter(self, side: str, old_sl: float, new_sl: float) -> bool:
         """
         LONG: tighter SL => higher stop price (closer to current price / entry)
@@ -6548,12 +6599,18 @@ class TradingBot:
                 f"th_src={threshold_source}, trial={is_trial_entry_dbg}, "
                 f"stable={stable_side_dbg if stable_active_dbg else '-'}, veto={veto_type_dbg}"
             )
-            stop_price_dbg = self._to_float(md.get("suggested_stop_price"), self._to_float(macd_v2_debug.get("stop_price"), 0.0))
-            stop_pct_dbg = self._to_float(md.get("stop_loss_pct"), self._to_float(macd_v2_debug.get("stop_loss_pct"), 0.0))
+            stop_summary = self._resolve_macd_v2_stop_summary(
+                symbol=symbol,
+                decision=decision,
+                position_for_log=position_for_log,
+            )
+            stop_price_dbg = self._to_float(stop_summary.get("stop_price"), 0.0)
+            stop_pct_dbg = self._to_float(stop_summary.get("stop_pct"), 0.0)
+            stop_source_dbg = str(stop_summary.get("stop_source") or "-")
             if stop_price_dbg > 0 or stop_pct_dbg > 0:
                 print(
                     "   MACD_V2止损: "
-                    f"stop={stop_price_dbg:.4f}, stop_pct={stop_pct_dbg*100:.2f}%"
+                    f"stop={stop_price_dbg:.4f}({stop_source_dbg}), stop_pct={stop_pct_dbg*100:.2f}%"
                 )
         if decision.reason:
             decision_reason = str(decision.reason)

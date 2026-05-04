@@ -1008,6 +1008,11 @@ class FundFlowDecisionEngine:
                     symbol_risk_cfg.get("watchlist_session_scale_multiplier"),
                     0.80,
                 ),
+                symbol_risk_max_stop_loss_pct_by_symbol={
+                    str(symbol).strip().upper(): self._to_float(value, 0.0)
+                    for symbol, value in (symbol_risk_cfg.get("max_stop_loss_pct_by_symbol", {}) or {}).items()
+                    if str(symbol).strip() and self._to_float(value, 0.0) > 0.0
+                } if isinstance(symbol_risk_cfg.get("max_stop_loss_pct_by_symbol"), dict) else {},
                 dual_pressure_target_portion_bonus=self._to_float(
                     leverage_cfg.get("dual_pressure_target_portion_bonus"),
                     0.0,
@@ -1018,10 +1023,21 @@ class FundFlowDecisionEngine:
                 ),
                 # 空头质量过滤器（V3专家组建议）
                 enable_short_quality_filter=bool(v2_cfg.get("short_quality_filter", {}).get("enabled", True)),
+                flip_bearish_independent_short_quality_filter_enabled=bool(
+                    v2_cfg.get("short_quality_filter", {}).get("flip_bearish_independent_enabled", False)
+                ),
                 short_filter_min_funding_rate=self._to_float(v2_cfg.get("short_quality_filter", {}).get("min_funding_rate"), 0.0005),
                 short_filter_max_oi_delta_ratio=self._to_float(v2_cfg.get("short_quality_filter", {}).get("max_oi_delta_ratio"), 0.0),
                 short_filter_min_vwap_deviation=self._to_float(v2_cfg.get("short_quality_filter", {}).get("min_vwap_deviation"), 0.005),
             )
+            regime_entry_cfg = v2_cfg.get("regime_entry", {}) if isinstance(v2_cfg.get("regime_entry"), dict) else {}
+            self.macd_v2_regime_entry_cfg = {
+                "range_long_min_vwap_score": self._to_float(regime_entry_cfg.get("range_long_min_vwap_score"), 0.20),
+                "range_long_min_signal_score": self._to_float(regime_entry_cfg.get("range_long_min_signal_score"), 0.72),
+                "no_trade_long_blocked_unless_override": bool(
+                    regime_entry_cfg.get("no_trade_long_blocked_unless_override", True)
+                ),
+            }
             self.vol_vwap_warn_position_scale = max(
                 0.0,
                 min(
@@ -1084,6 +1100,11 @@ class FundFlowDecisionEngine:
             self.macd_v2_engine = None
             self.macd_4h_regime_state_cfg = {"enabled": False}
             self.vol_vwap_warn_position_scale = 0.50
+            self.macd_v2_regime_entry_cfg = {
+                "range_long_min_vwap_score": 0.20,
+                "range_long_min_signal_score": 0.72,
+                "no_trade_long_blocked_unless_override": True,
+            }
     
     def _parse_default_weights(self, dw_cfg: Dict[str, Any], prefix: str) -> Dict[str, float]:
         """
@@ -1673,6 +1694,85 @@ class FundFlowDecisionEngine:
 
         return state
 
+    def _resolve_macd_v2_entry_leverage(
+        self,
+        *,
+        strategy_leverage: int,
+        signal_score: float,
+        is_trial_entry: bool,
+        metadata: Dict[str, Any],
+    ) -> int:
+        raw_leverage = max(1, int(strategy_leverage or 1))
+        capped = min(self.max_leverage, raw_leverage)
+        weak_entry = (
+            bool(is_trial_entry)
+            or bool(metadata.get("vol_vwap_warn", False))
+            or float(signal_score or 0.0) < 0.72
+        )
+        metadata["leverage_min_bypass_applied"] = bool(weak_entry and capped < self.min_leverage)
+        metadata["strategy_leverage_before_clamp"] = raw_leverage
+        if weak_entry:
+            return max(1, capped)
+        return max(self.min_leverage, capped)
+
+    def _macd_v2_regime_long_entry_veto(
+        self,
+        *,
+        signal: MACDSignalV2,
+        regime_info: Dict[str, Any],
+        metadata: Dict[str, Any],
+    ) -> Optional[FundFlowDecision]:
+        regime = str((regime_info or {}).get("regime", "") or "").strip().upper()
+        cfg = getattr(self, "macd_v2_regime_entry_cfg", {}) or {}
+        vwap_score = max(0.0, self._to_float(signal.vwap_score, 0.0))
+        signal_score = max(0.0, self._to_float(signal.signal_score, 0.0))
+        range_min_vwap = self._to_float(cfg.get("range_long_min_vwap_score"), 0.20)
+        range_min_score = self._to_float(cfg.get("range_long_min_signal_score"), 0.72)
+
+        if regime == "NO_TRADE" and bool(cfg.get("no_trade_long_blocked_unless_override", True)):
+            metadata["regime_long_quality_gate"] = {
+                "regime": regime,
+                "blocked": True,
+                "reason": "no_trade_long_block",
+                "vwap_score": vwap_score,
+                "signal_score": signal_score,
+            }
+            return FundFlowDecision(
+                operation=Operation.HOLD,
+                symbol=str(metadata.get("symbol") or ""),
+                reason="macd_v2_no_trade_long_block",
+                metadata=metadata,
+            )
+
+        if regime == "RANGE" and (vwap_score < range_min_vwap or signal_score < range_min_score):
+            metadata["regime_long_quality_gate"] = {
+                "regime": regime,
+                "blocked": True,
+                "reason": "range_long_quality_gate",
+                "vwap_score": vwap_score,
+                "min_vwap_score": range_min_vwap,
+                "signal_score": signal_score,
+                "min_signal_score": range_min_score,
+            }
+            return FundFlowDecision(
+                operation=Operation.HOLD,
+                symbol=str(metadata.get("symbol") or ""),
+                reason=(
+                    f"macd_v2_range_long_quality_gate "
+                    f"vwap={vwap_score:.4f}/{range_min_vwap:.4f} "
+                    f"score={signal_score:.4f}/{range_min_score:.4f}"
+                ),
+                metadata=metadata,
+            )
+
+        metadata["regime_long_quality_gate"] = {
+            "regime": regime,
+            "blocked": False,
+            "vwap_score": vwap_score,
+            "signal_score": signal_score,
+        }
+        return None
+
     def _build_macd_v2_regime_entry_decision(
         self,
         *,
@@ -1726,7 +1826,6 @@ class FundFlowDecisionEngine:
             rsi_probe_mode=rsi_probe_mode,
         )
         leverage = min(leverage, max(1, int(regime_state.get("max_leverage", leverage))))
-        leverage = max(self.min_leverage, min(self.max_leverage, leverage))
 
         local_metadata = dict(metadata)
         local_metadata["signal_direction"] = side
@@ -1735,8 +1834,14 @@ class FundFlowDecisionEngine:
         local_metadata["entry_scale"] = entry_scale
         local_metadata["rsi_probe_mode"] = rsi_probe_mode
         local_metadata["competition_score"] = self._resolve_macd_v2_competition_score(signal, macd_v2_engine)
-        local_metadata["final_leverage_after_rsi"] = leverage
         portion = self._apply_macd_v2_vol_vwap_warn_position_scale(portion, signal, local_metadata)
+        leverage = self._resolve_macd_v2_entry_leverage(
+            strategy_leverage=leverage,
+            signal_score=score,
+            is_trial_entry=is_trial_entry,
+            metadata=local_metadata,
+        )
+        local_metadata["final_leverage_after_rsi"] = leverage
         local_metadata["final_portion_after_rsi"] = portion
         local_metadata["entry_type_15m"] = local_metadata.get("entry_type_15m") or f"regime_{regime_state.get('phase', 'neutral')}"
         local_metadata["macd_4h_regime_entry"] = True
@@ -4178,6 +4283,7 @@ class FundFlowDecisionEngine:
             atr_1h=atr_1h,
             funding_rate=funding_rate,
             oi_delta_ratio=oi_delta_ratio,
+            symbol=symbol,
         )
         entry_tif, entry_routing_metadata = self._extract_macd_v2_entry_routing(signal)
         
@@ -4438,6 +4544,14 @@ class FundFlowDecisionEngine:
         
         # 根据信号方向决定操作
         if signal.direction == 'long':
+            metadata["symbol"] = symbol
+            regime_long_veto = self._macd_v2_regime_long_entry_veto(
+                signal=signal,
+                regime_info=regime_info,
+                metadata=metadata,
+            )
+            if regime_long_veto is not None:
+                return regime_long_veto
             if not long_allowed_by_regime:
                 metadata["regime_block"] = {
                     "blocked_signal_direction": "long",
@@ -4545,7 +4659,12 @@ class FundFlowDecisionEngine:
                     operation=Operation.BUY,
                     symbol=symbol,
                     target_portion_of_balance=portion,
-                    leverage=max(self.min_leverage, min(self.max_leverage, leverage)),
+                    leverage=self._resolve_macd_v2_entry_leverage(
+                        strategy_leverage=leverage,
+                        signal_score=signal.signal_score,
+                        is_trial_entry=bool(signal.is_trial_entry),
+                        metadata=metadata,
+                    ),
                     max_price=price * (1.0 + self.entry_slippage),
                     take_profit_price=take_profit_price,
                     stop_loss_price=stop_loss_price,
@@ -4671,7 +4790,12 @@ class FundFlowDecisionEngine:
                     operation=Operation.SELL,
                     symbol=symbol,
                     target_portion_of_balance=portion,
-                    leverage=max(self.min_leverage, min(self.max_leverage, leverage)),
+                    leverage=self._resolve_macd_v2_entry_leverage(
+                        strategy_leverage=leverage,
+                        signal_score=signal.signal_score,
+                        is_trial_entry=bool(signal.is_trial_entry),
+                        metadata=metadata,
+                    ),
                     min_price=price * (1.0 - self.entry_slippage),
                     take_profit_price=take_profit_price,
                     stop_loss_price=stop_loss_price,
@@ -4785,7 +4909,8 @@ class FundFlowDecisionEngine:
             idx_15m=len(macd_hist_15m) - 1,
             idx_1h=len(macd_hist_1h) - 1,
             idx_4h=len(macd_hist_4h) - 1,
-            volume_ratio=volume_ratio
+            volume_ratio=volume_ratio,
+            symbol=symbol,
         )
         
         # 构建元数据

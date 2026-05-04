@@ -293,6 +293,7 @@ class MACDStrategyV2Config:
     symbol_risk_watchlist_max_leverage: int = 0
     symbol_risk_watchlist_apply_session_scale_double: bool = False
     symbol_risk_watchlist_session_scale_multiplier: float = 0.80
+    symbol_risk_max_stop_loss_pct_by_symbol: Dict[str, float] = field(default_factory=dict)
     vol_vwap_warn_position_scale: float = 0.50
 
     # 过热惩罚
@@ -339,6 +340,7 @@ class MACDStrategyV2Config:
     
     # 空头质量过滤器（V3专家组建议）
     enable_short_quality_filter: bool = True  # 启用空头质量过滤
+    flip_bearish_independent_short_quality_filter_enabled: bool = False
     short_filter_min_funding_rate: float = 0.0005  # funding_rate > 0.05%
     short_filter_max_oi_delta_ratio: float = 0.0  # oi_delta_ratio < 0 (多头减仓)
     short_filter_min_vwap_deviation: float = 0.005  # price > vwap * 1.005
@@ -434,7 +436,6 @@ class MACDStrategyV2Config:
             return False
         return abs(float(ema_multiplier) - float(self.ema_multiplier_normal)) < 1e-9
 
-
 @dataclass
 class MACDSignalV2:
     """MACD信号V2.0"""
@@ -486,6 +487,21 @@ class MACDStrategyV2Engine:
         details["min_entry_score"] = self.config.min_entry_score
         details["min_vwap_score_for_entry"] = self.config.min_vwap_score_for_entry
         return details
+
+    def _should_apply_short_quality_filter(
+        self,
+        signal_type_1h: Optional[str],
+        *,
+        strict_1h_filters_enabled: bool,
+    ) -> bool:
+        if not strict_1h_filters_enabled:
+            return False
+        if str(signal_type_1h or "").strip().lower() != "flip_bearish":
+            return False
+        return bool(
+            self.config.enable_short_quality_filter
+            or self.config.flip_bearish_independent_short_quality_filter_enabled
+        )
 
     @staticmethod
     def _normalize_stage_path(stage_path: Any) -> List[str]:
@@ -819,6 +835,23 @@ class MACDStrategyV2Engine:
             )
         return self._clamp(scale, 0.05, 1.0)
 
+    def resolve_symbol_max_stop_loss_pct(self, symbol: object) -> Tuple[float, bool]:
+        global_max = max(0.0, float(self.config.max_stop_loss_pct or 0.0))
+        symbol_up = self._normalize_symbol(symbol)
+        if not symbol_up:
+            return global_max, False
+
+        raw_map = self.config.symbol_risk_max_stop_loss_pct_by_symbol or {}
+        try:
+            symbol_max = float(raw_map.get(symbol_up, 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return global_max, False
+
+        if symbol_max <= 0.0:
+            return global_max, False
+        effective = min(global_max, symbol_max) if global_max > 0 else symbol_max
+        return effective, effective < global_max
+
     def resolve_vwap_score_position_multiplier(
         self,
         vwap_score: float,
@@ -982,23 +1015,34 @@ class MACDStrategyV2Engine:
     ) -> float:
         direction = str(trade_direction or "").strip().lower()
         signal_type = str(signal_type_1h or "").strip().lower()
+        global_floor = max(0.0, float(self.config.min_vwap_score_for_entry))
+        short_floor = max(global_floor, float(self.config.short_min_vwap_score_for_entry))
 
         if is_trial_entry:
-            return float(self.config.preflip_trial_min_vwap_score)
+            trial_floor = max(0.0, float(self.config.preflip_trial_min_vwap_score))
+            if direction == "short":
+                if signal_type == "flip_bearish":
+                    return max(
+                        trial_floor,
+                        short_floor,
+                        float(self.config.flip_bearish_short_min_vwap_score_for_entry),
+                    )
+                return max(trial_floor, short_floor)
+            return max(trial_floor, global_floor)
 
         if direction == "long":
             if self.config.enable_vwap_flip_exemption and signal_type == "flip_bullish":
-                return 0.0
-            return float(self.config.min_vwap_score_for_entry)
+                return max(global_floor, float(self.config.flip_bullish_min_vwap_score))
+            return global_floor
 
         if direction == "short":
             if signal_type == "flip_bearish":
-                return float(self.config.flip_bearish_short_min_vwap_score_for_entry)
-            return float(self.config.short_min_vwap_score_for_entry)
+                return max(short_floor, float(self.config.flip_bearish_short_min_vwap_score_for_entry))
+            return short_floor
 
         if self.config.enable_vwap_flip_exemption and signal_type in {"flip_bullish", "flip_bearish"}:
-            return 0.0
-        return float(self.config.min_vwap_score_for_entry)
+            return short_floor if signal_type == "flip_bearish" else global_floor
+        return global_floor
 
     @staticmethod
     def _resolve_priority_signal(signal_type_1h: Optional[str], vwap_state: Optional[str]) -> bool:
@@ -2116,7 +2160,11 @@ class MACDStrategyV2Engine:
 
         if side == "short":
             enabled = bool(self.config.enable_stable_bear_continuation)
-            min_vwap_score = float(self.config.stable_bear_continuation_min_vwap_score)
+            min_vwap_score = max(
+                float(self.config.stable_bear_continuation_min_vwap_score),
+                float(self.config.short_min_vwap_score_for_entry),
+                float(self.config.min_vwap_score_for_entry),
+            )
             min_adx_1h = float(self.config.stable_bear_continuation_min_adx_1h)
             min_4h_bars = max(1, int(self.config.stable_bear_continuation_min_4h_bars))
             hist_bars = int(stable_trend_context.get("negative_bars", 0) or 0)
@@ -2130,7 +2178,10 @@ class MACDStrategyV2Engine:
             allowed_entry_types = {"green_bar_growing", "rsi_spring", "rsi_neutral_resume"}
         else:
             enabled = bool(self.config.enable_stable_bull_continuation)
-            min_vwap_score = float(self.config.stable_bull_continuation_min_vwap_score)
+            min_vwap_score = max(
+                float(self.config.stable_bull_continuation_min_vwap_score),
+                float(self.config.min_vwap_score_for_entry),
+            )
             min_adx_1h = float(self.config.stable_bull_continuation_min_adx_1h)
             min_4h_bars = max(1, int(self.config.stable_bull_continuation_min_4h_bars))
             hist_bars = int(stable_trend_context.get("positive_bars", 0) or 0)
@@ -2212,7 +2263,11 @@ class MACDStrategyV2Engine:
         shrink_pct = max(0.0, float(shrink_4h_context.get("shrink_pct", 0.0) or 0.0))
         shrink_bars = max(0, int(shrink_4h_context.get("shrink_bars", 0) or 0))
         min_signal_score = float(self.config.trial_short_below_structure_promotion_min_signal_score)
-        min_vwap_score = float(self.config.trial_short_below_structure_promotion_min_vwap_score)
+        min_vwap_score = max(
+            float(self.config.trial_short_below_structure_promotion_min_vwap_score),
+            float(self.config.short_min_vwap_score_for_entry),
+            float(self.config.min_vwap_score_for_entry),
+        )
         min_adx_1h = float(self.config.trial_short_below_structure_promotion_min_adx_1h)
         min_shrink_pct = float(self.config.trial_short_below_structure_promotion_min_4h_shrink_pct)
         min_shrink_bars = max(1, int(self.config.trial_short_below_structure_promotion_min_4h_shrink_bars))
@@ -3193,7 +3248,8 @@ class MACDStrategyV2Engine:
         bb_lower_1h: float,
         atr_1h: float,
         vwap: float,
-        direction: str
+        direction: str,
+        symbol: Optional[str] = None,
     ) -> Tuple[float, float, Dict]:
         """
         计算动态止损
@@ -3204,6 +3260,9 @@ class MACDStrategyV2Engine:
         - details: 详情
         """
         details = {}
+        max_stop_loss_pct, symbol_override_applied = self.resolve_symbol_max_stop_loss_pct(symbol)
+        details['effective_max_stop_loss_pct'] = max_stop_loss_pct
+        details['symbol_stop_override_applied'] = symbol_override_applied
         
         if direction == 'long':
             if bb_middle_1h > 0 and close_1h >= bb_middle_1h:
@@ -3213,10 +3272,10 @@ class MACDStrategyV2Engine:
                 stop = bb_lower_1h - atr_1h * 0.2
                 details['stop_anchor'] = 'bb_lower'
             else:
-                stop = entry_price * (1 - self.config.max_stop_loss_pct)
+                stop = entry_price * (1 - max_stop_loss_pct)
                 details['stop_anchor'] = 'default'
             
-            max_stop = entry_price * (1 - self.config.max_stop_loss_pct)
+            max_stop = entry_price * (1 - max_stop_loss_pct)
             stop = max(stop, max_stop)
             
             if vwap > 0:
@@ -3231,17 +3290,17 @@ class MACDStrategyV2Engine:
                 stop = bb_upper_1h + atr_1h * 0.2
                 details['stop_anchor'] = 'bb_upper'
             else:
-                stop = entry_price * (1 + self.config.max_stop_loss_pct)
+                stop = entry_price * (1 + max_stop_loss_pct)
                 details['stop_anchor'] = 'default'
             
-            max_stop = entry_price * (1 + self.config.max_stop_loss_pct)
+            max_stop = entry_price * (1 + max_stop_loss_pct)
             stop = min(stop, max_stop)
             
             if vwap > 0:
                 vwap_alert = vwap * (1 + self.config.vwap_alert_deviation)
                 details['vwap_alert_price'] = vwap_alert
         else:
-            stop = entry_price * (1 - self.config.max_stop_loss_pct)
+            stop = entry_price * (1 - max_stop_loss_pct)
             details['stop_anchor'] = 'default'
         
         stop_pct = abs(entry_price - stop) / entry_price
@@ -3291,7 +3350,8 @@ class MACDStrategyV2Engine:
         atr_1h: float = 0.0,
         # 空头质量过滤参数（V3专家组建议）
         funding_rate: float = 0.0,
-        oi_delta_ratio: float = 0.0
+        oi_delta_ratio: float = 0.0,
+        symbol: Optional[str] = None,
     ) -> MACDSignalV2:
         """
         V2.0综合分析
@@ -4642,10 +4702,9 @@ class MACDStrategyV2Engine:
             )
         
         # ========== Step 7.5: 空头质量过滤（V3专家组建议）==========
-        if (
-            strict_1h_filters_enabled
-            and signal_type_1h == 'flip_bearish'
-            and self.config.enable_short_quality_filter
+        if self._should_apply_short_quality_filter(
+            signal_type_1h,
+            strict_1h_filters_enabled=strict_1h_filters_enabled,
         ):
             short_filter_passed = True
             short_filter_reasons = []
@@ -4756,7 +4815,8 @@ class MACDStrategyV2Engine:
             bb_lower_1h=bb_lower_1h,
             atr_1h=atr_1h,
             vwap=vwap,
-            direction=trade_direction
+            direction=trade_direction,
+            symbol=symbol,
         )
         
         # ========== Step 10: 返回结果 ==========

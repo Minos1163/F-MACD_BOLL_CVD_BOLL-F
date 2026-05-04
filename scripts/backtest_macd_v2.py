@@ -74,6 +74,7 @@ class BacktestConfig:
     
     # 止损止盈
     default_stop_loss_pct: float = 0.02   # 默认止损2%
+    hard_stop_loss_pct: float = 0.0  # 回测实验用硬止损上限；0 表示关闭
     default_take_profit_pct: float = 0.04  # 默认止盈4%
     take_profit_pct_levels: List[float] = field(default_factory=list)
     take_profit_reduce_pct_levels: List[float] = field(default_factory=list)
@@ -332,6 +333,7 @@ def build_backtest_summary(
             "max_leverage": config.max_leverage,
             "fixed_leverage": config.fixed_leverage,
             "stop_loss_pct": config.default_stop_loss_pct,
+            "hard_stop_loss_pct": config.hard_stop_loss_pct,
             "take_profit_pct": config.default_take_profit_pct,
             "take_profit_pct_levels": config.take_profit_pct_levels,
             "take_profit_reduce_pct_levels": config.take_profit_reduce_pct_levels,
@@ -404,6 +406,7 @@ def build_backtest_config(
                 runtime_cfg.get("risk", {}).get("stop_loss_default_percent", 0.02),
             )
         ),
+        hard_stop_loss_pct=max(0.0, float(fund_flow_cfg.get("hard_stop_loss_pct", 0.0) or 0.0)),
         default_take_profit_pct=float(
             fund_flow_cfg.get(
                 "take_profit_pct",
@@ -785,6 +788,11 @@ def build_strategy_config(runtime_cfg: dict) -> MACDStrategyV2Config:
         symbol_risk_watchlist_max_leverage=int(float(symbol_risk_cfg.get("watchlist_max_leverage", 0))),
         symbol_risk_watchlist_apply_session_scale_double=bool(symbol_risk_cfg.get("watchlist_apply_session_scale_double", False)),
         symbol_risk_watchlist_session_scale_multiplier=float(symbol_risk_cfg.get("watchlist_session_scale_multiplier", 0.80)),
+        symbol_risk_max_stop_loss_pct_by_symbol={
+            str(symbol).strip().upper(): float(value)
+            for symbol, value in (symbol_risk_cfg.get("max_stop_loss_pct_by_symbol", {}) or {}).items()
+            if str(symbol).strip() and float(value) > 0
+        } if isinstance(symbol_risk_cfg.get("max_stop_loss_pct_by_symbol"), dict) else {},
         dual_pressure_target_portion_bonus=float(leverage_cfg.get("dual_pressure_target_portion_bonus", 0.0)),
         dual_pressure_max_symbol_position_portion=float(leverage_cfg.get("dual_pressure_max_symbol_position_portion", 0.0)),
         use_cvd_bonus_filter=bool(leverage_cfg.get("use_cvd_bonus_filter", False)),
@@ -1757,6 +1765,7 @@ class BacktestEngine:
             atr_1h=row_1h['atr'],
             funding_rate=funding_rate,
             oi_delta_ratio=oi_delta_ratio,
+            symbol=symbol,
         )
         cvd_veto_context = self.build_cvd_veto_context(signal, row_1h, row_15m)
         if cvd_veto_context.get('cvd_veto_triggered'):
@@ -2497,6 +2506,14 @@ class BacktestEngine:
         min_mfe = max(0.0, float(conflict_cfg.get("light_take_profit_min_mfe", 0.0025) or 0.0025))
         min_pnl = max(0.0, float(conflict_cfg.get("light_take_profit_min_pnl", 0.001) or 0.001))
         take_pct = min(1.0, max(0.0, float(conflict_cfg.get("light_take_profit_pct", 0.75) or 0.75)))
+        max_adx_raw = conflict_cfg.get("light_take_profit_max_adx_1h")
+        max_score_raw = conflict_cfg.get("light_take_profit_max_signal_score")
+        adx_1h = float(pos.get("adx_1h", signal_details.get("adx_1h", 0.0)) or 0.0)
+        signal_score = float(pos.get("signal_score", getattr(signal, "signal_score", 0.0)) or 0.0)
+        if max_adx_raw is not None and adx_1h > float(max_adx_raw):
+            return False
+        if max_score_raw is not None and signal_score > float(max_score_raw):
+            return False
         if hold_seconds < min_hold_seconds or mfe_ratio < min_mfe or current_pnl_ratio < min_pnl or take_pct <= 0:
             return False
 
@@ -2629,6 +2646,16 @@ class BacktestEngine:
 
         stop_hit = False
         target_hit = False
+        hard_stop_price = None
+        hard_stop_hit = False
+        if self.config.hard_stop_loss_pct > 0:
+            if pos['side'] == 'long':
+                hard_stop_price = pos['entry_price'] * (1.0 - self.config.hard_stop_loss_pct)
+                hard_stop_hit = low_price <= hard_stop_price
+            else:
+                hard_stop_price = pos['entry_price'] * (1.0 + self.config.hard_stop_loss_pct)
+                hard_stop_hit = high_price >= hard_stop_price
+
         if pos['side'] == 'long':
             stop_hit = low_price <= pos['stop_price']
             target_hit = pos['take_profit'] is not None and high_price >= pos['take_profit']
@@ -2636,6 +2663,14 @@ class BacktestEngine:
             stop_hit = high_price >= pos['stop_price']
             target_hit = pos['take_profit'] is not None and low_price <= pos['take_profit']
         
+        if hard_stop_hit and hard_stop_price is not None:
+            exit_price = self._stop_fill_price(pos, row, hard_stop_price)
+            reason = "hard_stop_loss_intrabar"
+            if target_hit:
+                reason = "hard_stop_loss_intrabar_both_hit"
+            self.close_position(symbol, exit_price, time, reason)
+            return True
+
         if stop_hit:
             exit_price = self._stop_fill_price(pos, row, pos['stop_price'])
             reason = "stop_loss_intrabar"

@@ -1,21 +1,31 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from scripts.backtest_macd_v2 import (
     BacktestConfig,
     BacktestEngine,
     MACDSignalV2,
+    MACDStrategyV2Engine,
     MACDStrategyV2Config,
     apply_backtest_profile,
+    build_strategy_config,
     main as backtest_main,
     resolve_runtime_config_for_backtest,
 )
+from src.app.fund_flow_bot import TradingBot
+from src.fund_flow.decision_engine import FundFlowDecisionEngine
+from src.fund_flow.models import FundFlowDecision, Operation
 from scripts.analyze_backtest_trades import build_cancel_quality_summary
 from scripts.diagnose_ioc_fallback import diagnose_ioc_fallback
 from scripts.diagnose_macd_v2_mdd_round1 import diagnose_mdd_round1
@@ -147,6 +157,291 @@ def test_resolve_runtime_config_for_backtest_rejects_profile_with_strict_live_mo
             profile_name="macd_v2_disable_short_filter",
             strict_live_mode=True,
         )
+
+
+def test_dynamic_stop_uses_symbol_scoped_max_stop_when_tighter() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            max_stop_loss_pct=0.025,
+            symbol_risk_max_stop_loss_pct_by_symbol={"XLMUSDT": 0.01},
+        )
+    )
+
+    stop_price, stop_pct, details = engine.calculate_dynamic_stop(
+        entry_price=100.0,
+        close_1h=100.0,
+        bb_middle_1h=90.0,
+        bb_upper_1h=0.0,
+        bb_lower_1h=0.0,
+        atr_1h=0.0,
+        vwap=0.0,
+        direction="long",
+        symbol="XLMUSDT",
+    )
+
+    assert stop_price == 99.0
+    assert stop_pct == pytest.approx(0.01)
+    assert details["effective_max_stop_loss_pct"] == 0.01
+    assert details["symbol_stop_override_applied"] is True
+
+
+def test_dynamic_stop_ignores_symbol_scoped_max_stop_when_looser() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            max_stop_loss_pct=0.025,
+            symbol_risk_max_stop_loss_pct_by_symbol={"XLMUSDT": 0.04},
+        )
+    )
+
+    stop_price, stop_pct, details = engine.calculate_dynamic_stop(
+        entry_price=100.0,
+        close_1h=100.0,
+        bb_middle_1h=90.0,
+        bb_upper_1h=0.0,
+        bb_lower_1h=0.0,
+        atr_1h=0.0,
+        vwap=0.0,
+        direction="long",
+        symbol="XLMUSDT",
+    )
+
+    assert stop_price == 97.5
+    assert stop_pct == pytest.approx(0.025)
+    assert details["effective_max_stop_loss_pct"] == 0.025
+    assert details["symbol_stop_override_applied"] is False
+
+
+def test_build_strategy_config_loads_symbol_scoped_max_stop() -> None:
+    runtime_cfg = {
+        "fund_flow": {
+            "macd_mtf_strategy_v2": {
+                "stop_loss_config": {"max_stop_loss_pct": 0.025},
+                "symbol_risk_tiers": {
+                    "max_stop_loss_pct_by_symbol": {
+                        "XLMUSDT": 0.01,
+                        "SOLUSDT": 0.015,
+                    }
+                },
+            }
+        }
+    }
+
+    config = build_strategy_config(runtime_cfg)
+
+    assert config.symbol_risk_max_stop_loss_pct_by_symbol == {
+        "XLMUSDT": 0.01,
+        "SOLUSDT": 0.015,
+    }
+
+
+def test_trial_entry_vwap_floor_cannot_bypass_global_entry_floor() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            min_vwap_score_for_entry=0.12,
+            preflip_trial_min_vwap_score=0.0,
+        )
+    )
+
+    floor = engine._resolve_min_vwap_score_for_entry(
+        trade_direction="long",
+        signal_type_1h="red_bar_growing",
+        is_trial_entry=True,
+    )
+
+    assert floor == pytest.approx(0.12)
+
+
+def test_flip_bullish_exemption_keeps_global_vwap_floor() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            enable_vwap_flip_exemption=True,
+            min_vwap_score_for_entry=0.12,
+        )
+    )
+
+    floor = engine._resolve_min_vwap_score_for_entry(
+        trade_direction="long",
+        signal_type_1h="flip_bullish",
+        is_trial_entry=False,
+    )
+
+    assert floor == pytest.approx(0.12)
+
+
+def test_trial_flip_bearish_short_keeps_dedicated_vwap_floor() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            min_vwap_score_for_entry=0.12,
+            short_min_vwap_score_for_entry=0.12,
+            preflip_trial_min_vwap_score=0.0,
+            flip_bearish_short_min_vwap_score_for_entry=0.25,
+        )
+    )
+
+    floor = engine._resolve_min_vwap_score_for_entry(
+        trade_direction="short",
+        signal_type_1h="flip_bearish",
+        is_trial_entry=True,
+    )
+
+    assert floor == pytest.approx(0.25)
+
+
+def test_stable_bear_continuation_vwap_floor_cannot_bypass_global_short_floor() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            enable_stable_bear_continuation=True,
+            stable_bear_continuation_min_vwap_score=0.0,
+            short_min_vwap_score_for_entry=0.12,
+        )
+    )
+
+    result = engine._evaluate_stable_continuation(
+        primary_mode="4h",
+        trade_direction="short",
+        signal_type_1h="flip_bearish",
+        entry_type_15m="green_bar_growing",
+        vwap_score=0.04,
+        vwap_state="short_dual_pressure",
+        adx_1h=35.0,
+        stable_trend_context={"bear_active": True, "negative_bars": 4},
+        is_trial_entry=False,
+    )
+
+    assert result["stable_continuation_active"] is False
+    assert result["stable_continuation_reason"] == "vwap_score_too_low"
+    assert result["stable_continuation_min_vwap_score"] == pytest.approx(0.12)
+
+
+def test_trial_short_promotion_vwap_floor_cannot_bypass_global_short_floor() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            enable_trial_short_below_structure_continuation_promotion=True,
+            trial_short_below_structure_promotion_min_vwap_score=0.0,
+            short_min_vwap_score_for_entry=0.12,
+        )
+    )
+
+    result = engine._evaluate_trial_short_below_structure_continuation_promotion(
+        primary_mode="4h",
+        trade_direction="short",
+        signal_type_1h="green_bar_growing",
+        entry_type_15m="flip_bearish",
+        vwap_state="short_below_session_above_structure",
+        vwap_score=0.04,
+        adx_1h=35.0,
+        signal_score=0.90,
+        shrink_4h_context={"shrink_pct": 0.90, "shrink_bars": 8},
+        is_trial_entry=True,
+    )
+
+    assert result["trial_short_below_structure_promotion_active"] is False
+    assert result["trial_short_below_structure_promotion_reason"] == "vwap_score_too_low"
+    assert result["trial_short_below_structure_promotion_min_vwap_score"] == pytest.approx(0.12)
+
+
+def test_flip_bearish_independent_short_quality_filter_runs_when_global_disabled() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            enable_short_quality_filter=False,
+            flip_bearish_independent_short_quality_filter_enabled=True,
+        )
+    )
+
+    assert engine._should_apply_short_quality_filter("flip_bearish", strict_1h_filters_enabled=True) is True
+    assert engine._should_apply_short_quality_filter("green_bar_growing", strict_1h_filters_enabled=True) is False
+
+
+def test_macd_v2_regime_long_gate_blocks_weak_range_and_no_trade_longs() -> None:
+    decision_engine = FundFlowDecisionEngine(
+        {
+            "fund_flow": {
+                "min_leverage": 3,
+                "default_leverage": 4,
+                "max_leverage": 5,
+                "macd_mtf_strategy_v2": {
+                    "regime_entry": {
+                        "range_long_min_vwap_score": 0.20,
+                        "range_long_min_signal_score": 0.72,
+                        "no_trade_long_blocked_unless_override": True,
+                    }
+                },
+            }
+        }
+    )
+    signal = MACDSignalV2(direction="long", signal_score=0.70, vwap_score=0.04)
+
+    range_result = decision_engine._macd_v2_regime_long_entry_veto(
+        signal=signal,
+        regime_info={"regime": "RANGE"},
+        metadata={},
+    )
+    no_trade_result = decision_engine._macd_v2_regime_long_entry_veto(
+        signal=signal,
+        regime_info={"regime": "NO_TRADE"},
+        metadata={},
+    )
+
+    assert range_result is not None
+    assert range_result.operation == Operation.HOLD
+    assert "range_long_quality_gate" in range_result.reason
+    assert no_trade_result is not None
+    assert no_trade_result.operation == Operation.HOLD
+    assert "no_trade_long_block" in no_trade_result.reason
+
+
+def test_macd_v2_weak_entry_leverage_is_not_lifted_by_min_leverage() -> None:
+    decision_engine = FundFlowDecisionEngine(
+        {"fund_flow": {"min_leverage": 3, "default_leverage": 4, "max_leverage": 5}}
+    )
+    metadata = {"vol_vwap_warn": False}
+
+    leverage = decision_engine._resolve_macd_v2_entry_leverage(
+        strategy_leverage=1,
+        signal_score=0.70,
+        is_trial_entry=False,
+        metadata=metadata,
+    )
+
+    assert leverage == 1
+    assert metadata["leverage_min_bypass_applied"] is True
+
+
+def test_macd_v2_stop_summary_resolves_exchange_stop_and_repairs_missing_stop() -> None:
+    bot = object.__new__(TradingBot)
+    bot.client = SimpleNamespace(
+        get_open_orders=lambda symbol: [
+            {"type": "STOP_MARKET", "stopPrice": "99.25", "side": "SELL"},
+        ]
+    )
+    bot._repair_missing_protection_calls = []
+    bot._repair_missing_protection = lambda symbol, position: bot._repair_missing_protection_calls.append((symbol, position)) or {"status": "success"}
+
+    decision = FundFlowDecision(
+        operation=Operation.BUY,
+        symbol="SOLUSDT",
+        metadata={"macd_v2_debug": {"stop_price": 0.0, "stop_loss_pct": 0.02}},
+    )
+    resolved = bot._resolve_macd_v2_stop_summary(
+        symbol="SOLUSDT",
+        decision=decision,
+        position_for_log={"side": "LONG", "entry_price": 100.0},
+    )
+
+    assert resolved["stop_price"] == pytest.approx(99.25)
+    assert resolved["stop_source"] == "exchange"
+    assert bot._repair_missing_protection_calls == []
+
+    bot.client = SimpleNamespace(get_open_orders=lambda symbol: [])
+    missing = bot._resolve_macd_v2_stop_summary(
+        symbol="SOLUSDT",
+        decision=decision,
+        position_for_log={"side": "LONG", "entry_price": 100.0, "amount": 1.0},
+    )
+
+    assert missing["stop_price"] == 0.0
+    assert missing["stop_source"] == "MISSING"
+    assert bot._repair_missing_protection_calls
 
 
 def test_backtest_cli_rejects_profile_with_strict_live_mode() -> None:
