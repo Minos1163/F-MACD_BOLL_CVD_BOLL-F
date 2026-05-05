@@ -18,6 +18,7 @@ from scripts.backtest_macd_v2 import (
     MACDSignalV2,
     MACDStrategyV2Engine,
     MACDStrategyV2Config,
+    VetoType,
     apply_backtest_profile,
     build_strategy_config,
     main as backtest_main,
@@ -234,6 +235,90 @@ def test_build_strategy_config_loads_symbol_scoped_max_stop() -> None:
     }
 
 
+def test_build_strategy_config_loads_short_vwap_entry_floors() -> None:
+    runtime_cfg = {
+        "fund_flow": {
+            "macd_mtf_strategy_v2": {
+                "entry_filters": {
+                    "min_vwap_score_for_entry": 0.10,
+                    "short_min_vwap_score_for_entry": 0.12,
+                    "flip_bearish_short_min_vwap_score_for_entry": 0.25,
+                }
+            }
+        }
+    }
+
+    config = build_strategy_config(runtime_cfg)
+
+    assert config.min_vwap_score_for_entry == pytest.approx(0.10)
+    assert config.short_min_vwap_score_for_entry == pytest.approx(0.12)
+    assert config.flip_bearish_short_min_vwap_score_for_entry == pytest.approx(0.25)
+
+
+def test_build_strategy_config_loads_resonance_gate_settings() -> None:
+    runtime_cfg = {
+        "fund_flow": {
+            "macd_mtf_strategy_v2": {
+                "resonance_gate": {
+                    "enabled": True,
+                    "long_rsi_rhythm_min": 0.36,
+                    "short_rsi_rhythm_min": 0.37,
+                    "flip_bearish_rsi_rhythm_min": 0.41,
+                    "volume_warn_ratio": 0.75,
+                    "volume_warn_position_scale": 0.45,
+                    "structural_vwap_telemetry_position_scale_threshold": 0.06,
+                    "structural_vwap_telemetry_position_scale": 0.65,
+                }
+            }
+        }
+    }
+
+    config = build_strategy_config(runtime_cfg)
+
+    assert config.resonance_gate_enabled is True
+    assert config.resonance_long_rsi_rhythm_min == pytest.approx(0.36)
+    assert config.resonance_short_rsi_rhythm_min == pytest.approx(0.37)
+    assert config.flip_bearish_resonance_rsi_rhythm_min == pytest.approx(0.41)
+    assert config.resonance_volume_warn_ratio == pytest.approx(0.75)
+    assert config.resonance_volume_warn_position_scale == pytest.approx(0.45)
+    assert config.structural_vwap_telemetry_position_scale_threshold == pytest.approx(0.06)
+    assert config.structural_vwap_telemetry_position_scale == pytest.approx(0.65)
+
+
+def test_candidate_ablation_configs_apply_expected_vwap_and_resonance_settings() -> None:
+    live_cfg = json.loads(Path("config/trading_config_fund_flow.json").read_text(encoding="utf-8"))
+    candidate_a = json.loads(Path("config/candidate_a_no_vwap_gate.json").read_text(encoding="utf-8"))
+    candidate_b = json.loads(Path("config/candidate_b_no_vwap_score.json").read_text(encoding="utf-8"))
+    candidate_c = json.loads(Path("config/candidate_c_resonance_gate.json").read_text(encoding="utf-8"))
+
+    live_v2 = live_cfg["fund_flow"]["macd_mtf_strategy_v2"]
+    a_v2 = candidate_a["fund_flow"]["macd_mtf_strategy_v2"]
+    b_v2 = candidate_b["fund_flow"]["macd_mtf_strategy_v2"]
+    c_v2 = candidate_c["fund_flow"]["macd_mtf_strategy_v2"]
+
+    for v2 in (live_v2, a_v2, b_v2, c_v2):
+        filters = v2["entry_filters"]
+        assert filters["min_vwap_score_for_entry"] == pytest.approx(0.0)
+        assert filters["short_min_vwap_score_for_entry"] == pytest.approx(0.0)
+        assert filters["flip_bearish_short_min_vwap_score_for_entry"] == pytest.approx(0.0)
+        assert filters["preflip_trial_min_vwap_score"] == pytest.approx(0.0)
+        assert filters["trial_short_below_structure_promotion_min_vwap_score"] == pytest.approx(0.0)
+        assert filters["stable_bear_continuation_min_vwap_score"] == pytest.approx(0.0)
+        assert filters["stable_bull_continuation_min_vwap_score"] == pytest.approx(0.0)
+        assert filters["flip_bullish_min_vwap_score"] == pytest.approx(0.0)
+        assert filters["vol_vwap_warn_min_vwap_score"] == pytest.approx(0.0)
+        assert v2["vwap_config"]["vwap_deviation_hard_block"] == pytest.approx(999.0)
+
+    assert a_v2["scoring_weights"]["weight_vwap"] == pytest.approx(0.05)
+    assert a_v2["scoring_weights"]["weight_rsi_rhythm"] == pytest.approx(0.30)
+    assert b_v2["scoring_weights"]["weight_vwap"] == pytest.approx(0.0)
+    assert b_v2["scoring_weights"]["weight_rsi_rhythm"] == pytest.approx(0.35)
+    assert c_v2["scoring_weights"]["weight_vwap"] == pytest.approx(0.0)
+    assert c_v2["scoring_weights"]["weight_rsi_rhythm"] == pytest.approx(0.35)
+    assert c_v2["resonance_gate"]["enabled"] is True
+    assert c_v2["short_quality_filter"]["min_vwap_deviation"] == pytest.approx(0.0)
+
+
 def test_trial_entry_vwap_floor_cannot_bypass_global_entry_floor() -> None:
     engine = MACDStrategyV2Engine(
         MACDStrategyV2Config(
@@ -285,6 +370,22 @@ def test_trial_flip_bearish_short_keeps_dedicated_vwap_floor() -> None:
     )
 
     assert floor == pytest.approx(0.25)
+
+
+def test_debug_details_preserve_resolved_vwap_entry_floor() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            min_vwap_score_for_entry=0.12,
+            flip_bearish_short_min_vwap_score_for_entry=0.25,
+        )
+    )
+
+    details = engine._build_debug_details(
+        stage="vwap_score_filter",
+        min_vwap_score_for_entry=0.25,
+    )
+
+    assert details["min_vwap_score_for_entry"] == pytest.approx(0.25)
 
 
 def test_stable_bear_continuation_vwap_floor_cannot_bypass_global_short_floor() -> None:
@@ -350,6 +451,91 @@ def test_flip_bearish_independent_short_quality_filter_runs_when_global_disabled
 
     assert engine._should_apply_short_quality_filter("flip_bearish", strict_1h_filters_enabled=True) is True
     assert engine._should_apply_short_quality_filter("green_bar_growing", strict_1h_filters_enabled=True) is False
+
+
+def test_flip_bearish_resonance_gate_blocks_each_protection_layer() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            resonance_gate_enabled=True,
+            flip_bearish_resonance_rsi_rhythm_min=0.40,
+        )
+    )
+    base = {
+        "signal_type_1h": "flip_bearish",
+        "trade_direction": "short",
+        "is_trial_entry": False,
+        "direction_4h": "short",
+        "signal_type_4h": "green_bar_growing",
+        "direction_1h": "short",
+        "entry_type_15m": "green_bar_growing",
+        "ema_status": "normal",
+        "rsi_rhythm": {"raw_score": 0.45, "veto_reason": "", "entry_type": "rsi_neutral_resume"},
+        "rsi_conflict_type": "none",
+        "adx_1h": 35.0,
+        "is_4h_enhanced": False,
+        "funding_rate": 0.001,
+        "oi_delta_ratio": -0.01,
+        "volume_ratio": 1.0,
+        "structural_vwap_deviation": 0.0,
+    }
+
+    assert engine._check_resonance_gate(**base)["passed"] is True
+
+    cases = [
+        ({"adx_1h": 20.0}, "flip_bearish_resonance_adx_fail"),
+        ({"direction_4h": "long"}, "flip_bearish_resonance_4h_fail"),
+        ({"entry_type_15m": "", "is_4h_enhanced": False}, "flip_bearish_resonance_confirmation_fail"),
+        ({"ema_status": "against"}, "flip_bearish_resonance_ema_against"),
+        ({"rsi_rhythm": {"raw_score": 0.35}}, "flip_bearish_resonance_rsi_fail"),
+        ({"rsi_conflict_type": "divergence"}, "flip_bearish_resonance_rsi_conflict"),
+        ({"funding_rate": 0.0}, "flip_bearish_resonance_funding_fail"),
+        ({"oi_delta_ratio": 0.02}, "flip_bearish_resonance_oi_fail"),
+    ]
+    for overrides, expected_reason in cases:
+        payload = dict(base)
+        payload.update(overrides)
+
+        result = engine._check_resonance_gate(**payload)
+
+        assert result["passed"] is False
+        assert result["reason"] == expected_reason
+
+
+def test_resonance_gate_scales_low_volume_without_vwap_veto() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            resonance_gate_enabled=True,
+            resonance_volume_warn_ratio=0.80,
+            resonance_volume_warn_position_scale=0.50,
+            structural_vwap_telemetry_position_scale_threshold=0.05,
+            structural_vwap_telemetry_position_scale=0.70,
+        )
+    )
+
+    result = engine._check_resonance_gate(
+        signal_type_1h="red_bar_growing",
+        trade_direction="long",
+        is_trial_entry=False,
+        direction_4h="long",
+        signal_type_4h="red_bar_growing",
+        direction_1h="long",
+        entry_type_15m="rsi_neutral_resume",
+        ema_status="normal",
+        rsi_rhythm={"raw_score": 0.40, "veto_reason": ""},
+        rsi_conflict_type="none",
+        adx_1h=20.0,
+        is_4h_enhanced=False,
+        funding_rate=0.0,
+        oi_delta_ratio=0.0,
+        volume_ratio=0.70,
+        structural_vwap_deviation=0.06,
+    )
+
+    assert result["passed"] is True
+    assert result["reason"] == "resonance_gate_long_pass"
+    assert result["position_scale"] == pytest.approx(0.35)
+    assert result["volume_warn"] is True
+    assert result["vwap_telemetry_warn"] is True
 
 
 def test_macd_v2_regime_long_gate_blocks_weak_range_and_no_trade_longs() -> None:
@@ -612,6 +798,85 @@ def test_cancel_pending_order_tracks_full_cancel_audit_row() -> None:
     assert row["signal_type_1h"] == "red_bar_growing"
     assert row["reason"] == "ioc_no_fill"
     assert row["bars_waited"] == 2
+
+
+def test_neutral_vwap_veto_attribution_records_floor_context() -> None:
+    engine = BacktestEngine(
+        BacktestConfig(symbols=["SOLUSDT"], initial_capital=10000.0),
+        MACDStrategyV2Config(),
+        runtime_config={},
+    )
+    signal = MACDSignalV2(
+        direction="neutral",
+        signal_score=0.0,
+        signal_type_1h="red_bar_growing",
+        vwap_score=0.09,
+        is_trial_entry=True,
+        veto_type=VetoType.VWAP_SCORE_FILTER,
+        details={
+            "trade_direction": "long",
+            "entry_type_15m": "soft_long",
+            "min_vwap_score_for_entry": 0.12,
+            "vwap_score": 0.09,
+            "vwap_state": "long_dual_support",
+        },
+    )
+
+    candidates = engine._build_entry_candidates(
+        {"SOLUSDT": _analysis(signal=signal)},
+        closed_symbols_this_bar=set(),
+    )
+
+    assert candidates == []
+    assert engine.execution_audit["neutral_veto_reasons"]["vwap_score_filter"] == 1
+    breakdown = engine.execution_audit["vwap_filter_breakdown"]
+    assert breakdown["vwap_score_filter|red_bar_growing|trial|long|preflip_trial_floor|0.1200"] == 1
+    assert engine.execution_audit["vwap_filter_examples"] == [
+        {
+            "symbol": "SOLUSDT",
+            "veto_type": "vwap_score_filter",
+            "signal_type_1h": "red_bar_growing",
+            "entry_type_15m": "soft_long",
+            "is_trial": True,
+            "is_short": False,
+            "trade_direction": "long",
+            "floor_source": "preflip_trial_floor",
+            "min_vwap_score_for_entry": 0.12,
+            "vwap_score": 0.09,
+            "vwap_state": "long_dual_support",
+            "stage": "",
+            "reason": "",
+        }
+    ]
+
+
+def test_neutral_resonance_gate_attribution_records_reason_signal_and_side() -> None:
+    engine = BacktestEngine(
+        BacktestConfig(symbols=["SOLUSDT"], initial_capital=10000.0),
+        MACDStrategyV2Config(),
+        runtime_config={},
+    )
+    signal = MACDSignalV2(
+        direction="neutral",
+        signal_score=0.0,
+        signal_type_1h="flip_bearish",
+        veto_type=VetoType.RESONANCE_GATE,
+        details={
+            "trade_direction": "short",
+            "resonance_gate_reason": "flip_bearish_resonance_rsi_fail",
+        },
+    )
+
+    candidates = engine._build_entry_candidates(
+        {"SOLUSDT": _analysis(signal=signal)},
+        closed_symbols_this_bar=set(),
+    )
+
+    assert candidates == []
+    assert engine.execution_audit["neutral_veto_reasons"]["resonance_gate"] == 1
+    assert engine.execution_audit["resonance_gate_block_by_reason"]["flip_bearish_resonance_rsi_fail"] == 1
+    assert engine.execution_audit["resonance_gate_block_by_signal"]["flip_bearish"] == 1
+    assert engine.execution_audit["resonance_gate_block_by_side"]["short"] == 1
 
 
 def test_build_cancel_quality_summary_compares_canceled_vs_filled_scores() -> None:

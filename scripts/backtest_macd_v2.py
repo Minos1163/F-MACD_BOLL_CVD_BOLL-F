@@ -458,6 +458,7 @@ def build_strategy_config(runtime_cfg: dict) -> MACDStrategyV2Config:
     penalty_cfg = v2_cfg.get("penalty_config", {}) if isinstance(v2_cfg.get("penalty_config"), dict) else {}
     rsi_cfg = v2_cfg.get("rsi_config", {}) if isinstance(v2_cfg.get("rsi_config"), dict) else {}
     position_mgmt_cfg = v2_cfg.get("position_management", {}) if isinstance(v2_cfg.get("position_management"), dict) else {}
+    resonance_cfg = v2_cfg.get("resonance_gate", {}) if isinstance(v2_cfg.get("resonance_gate"), dict) else {}
     flip_bullish_sniper_cfg = filter_cfg.get("flip_bullish_sniper", {}) if isinstance(filter_cfg.get("flip_bullish_sniper"), dict) else {}
     flip_bullish_cooling_cfg = filter_cfg.get("flip_bullish_cooling", {}) if isinstance(filter_cfg.get("flip_bullish_cooling"), dict) else {}
     rsi_rhythm_cfg = rsi_cfg.get("rhythm", {}) if isinstance(rsi_cfg.get("rhythm"), dict) else {}
@@ -653,6 +654,10 @@ def build_strategy_config(runtime_cfg: dict) -> MACDStrategyV2Config:
         preflip_trial_min_vwap_score=float(filter_cfg.get("preflip_trial_min_vwap_score", 0.06)),
         preflip_trial_entry_scale=float(filter_cfg.get("preflip_trial_entry_scale", 0.35)),
         preflip_trial_max_leverage=int(float(filter_cfg.get("preflip_trial_max_leverage", 2))),
+        short_min_vwap_score_for_entry=float(filter_cfg.get("short_min_vwap_score_for_entry", 0.06)),
+        flip_bearish_short_min_vwap_score_for_entry=float(
+            filter_cfg.get("flip_bearish_short_min_vwap_score_for_entry", 0.08)
+        ),
         enable_trial_short_below_structure_continuation_promotion=bool(
             filter_cfg.get("enable_trial_short_below_structure_continuation_promotion", False)
         ),
@@ -822,6 +827,22 @@ def build_strategy_config(runtime_cfg: dict) -> MACDStrategyV2Config:
         short_filter_min_funding_rate=float(v2_cfg.get("short_quality_filter", {}).get("min_funding_rate", 0.0005)),
         short_filter_max_oi_delta_ratio=float(v2_cfg.get("short_quality_filter", {}).get("max_oi_delta_ratio", 0.0)),
         short_filter_min_vwap_deviation=float(v2_cfg.get("short_quality_filter", {}).get("min_vwap_deviation", 0.005)),
+        resonance_gate_enabled=bool(resonance_cfg.get("enabled", False)),
+        resonance_long_rsi_rhythm_min=float(resonance_cfg.get("long_rsi_rhythm_min", 0.35)),
+        resonance_short_rsi_rhythm_min=float(resonance_cfg.get("short_rsi_rhythm_min", 0.35)),
+        flip_bearish_resonance_rsi_rhythm_min=float(resonance_cfg.get("flip_bearish_rsi_rhythm_min", 0.40)),
+        flip_bullish_resonance_rsi_rhythm_min=float(resonance_cfg.get("flip_bullish_rsi_rhythm_min", 0.30)),
+        trial_resonance_rsi_rhythm_min=float(resonance_cfg.get("trial_rsi_rhythm_min", 0.30)),
+        resonance_require_ema_not_against=bool(resonance_cfg.get("require_ema_not_against", True)),
+        resonance_require_4h_align=bool(resonance_cfg.get("require_4h_align", True)),
+        resonance_volume_warn_ratio=float(resonance_cfg.get("volume_warn_ratio", 0.80)),
+        resonance_volume_warn_position_scale=float(resonance_cfg.get("volume_warn_position_scale", 0.50)),
+        structural_vwap_telemetry_position_scale_threshold=float(
+            resonance_cfg.get("structural_vwap_telemetry_position_scale_threshold", 0.05)
+        ),
+        structural_vwap_telemetry_position_scale=float(
+            resonance_cfg.get("structural_vwap_telemetry_position_scale", 0.70)
+        ),
     )
 
 
@@ -1212,6 +1233,13 @@ class BacktestEngine:
             "capacity_competition_dropped": 0,
             "execute_reject_reasons": {},
             "pending_cancel_reasons": {},
+            "neutral_veto_reasons": {},
+            "vwap_filter_breakdown": {},
+            "vwap_filter_examples": [],
+            "vwap_hard_block_examples": [],
+            "resonance_gate_block_by_reason": {},
+            "resonance_gate_block_by_signal": {},
+            "resonance_gate_block_by_side": {},
             "capacity_full_examples": [],
             "competition_drop_examples": [],
             "pending_cancel_examples": [],
@@ -1242,6 +1270,97 @@ class BacktestEngine:
             return
         items.append(copy.deepcopy(example))
 
+    @staticmethod
+    def _veto_type_name(veto_type: object) -> str:
+        if isinstance(veto_type, VetoType):
+            return str(veto_type.value)
+        return str(veto_type or "").strip()
+
+    @staticmethod
+    def _floor_source_for_vwap_filter(details: dict, signal: MACDSignalV2) -> str:
+        direction = str(details.get("trade_direction") or getattr(signal, "direction", "") or "").strip().lower()
+        signal_type = str(getattr(signal, "signal_type_1h", "") or "").strip().lower()
+        if bool(getattr(signal, "is_trial_entry", False) or details.get("is_trial_entry", False)):
+            return "preflip_trial_floor"
+        if direction == "short" and signal_type == "flip_bearish":
+            return "flip_bearish_short_floor"
+        if direction == "short":
+            return "short_floor"
+        if signal_type == "flip_bullish":
+            return "flip_bullish_floor"
+        if direction == "long":
+            return "global_long_floor"
+        return "global_floor"
+
+    def _record_neutral_veto_attribution(self, symbol: str, signal: MACDSignalV2) -> None:
+        veto_name = self._veto_type_name(getattr(signal, "veto_type", ""))
+        if not veto_name or veto_name == VetoType.NONE.value:
+            return
+
+        self._bump_execution_reason("neutral_veto_reasons", veto_name)
+        if veto_name == VetoType.RESONANCE_GATE.value:
+            details = getattr(signal, "details", {}) or {}
+            reason = str(
+                details.get("resonance_gate_reason")
+                or getattr(signal, "veto_reason", "")
+                or details.get("veto_reason", "")
+                or "resonance_gate_block"
+            )
+            signal_type = str(
+                getattr(signal, "signal_type_1h", "")
+                or details.get("signal_type_1h", "")
+                or "unknown_signal"
+            ).strip().lower()
+            trade_direction = str(
+                details.get("trade_direction")
+                or getattr(signal, "direction", "")
+                or "neutral"
+            ).strip().lower()
+            self._bump_execution_reason("resonance_gate_block_by_reason", reason)
+            self._bump_execution_reason("resonance_gate_block_by_signal", signal_type or "unknown_signal")
+            self._bump_execution_reason("resonance_gate_block_by_side", trade_direction or "neutral")
+            return
+        if veto_name not in {VetoType.VWAP_SCORE_FILTER.value, VetoType.VWAP_HARD_BLOCK.value}:
+            return
+
+        details = getattr(signal, "details", {}) or {}
+        signal_type = str(getattr(signal, "signal_type_1h", "") or details.get("signal_type_1h", "") or "").strip().lower()
+        entry_type = str(getattr(signal, "entry_type_15m", "") or details.get("entry_type_15m", "") or "").strip().lower()
+        trade_direction = str(details.get("trade_direction") or getattr(signal, "direction", "") or "").strip().lower()
+        is_trial = bool(getattr(signal, "is_trial_entry", False) or details.get("is_trial_entry", False))
+        is_short = trade_direction == "short"
+        min_vwap = float(details.get("min_vwap_score_for_entry", 0.0) or 0.0)
+        vwap_score = float(details.get("vwap_score", getattr(signal, "vwap_score", 0.0)) or 0.0)
+        floor_source = self._floor_source_for_vwap_filter(details, signal)
+        key = "|".join(
+            [
+                veto_name,
+                signal_type or "unknown_signal",
+                "trial" if is_trial else "standard",
+                trade_direction or "neutral",
+                floor_source,
+                f"{min_vwap:.4f}",
+            ]
+        )
+        self._bump_execution_reason("vwap_filter_breakdown", key)
+        example = {
+            "symbol": str(symbol),
+            "veto_type": veto_name,
+            "signal_type_1h": signal_type,
+            "entry_type_15m": entry_type,
+            "is_trial": is_trial,
+            "is_short": is_short,
+            "trade_direction": trade_direction,
+            "floor_source": floor_source,
+            "min_vwap_score_for_entry": min_vwap,
+            "vwap_score": vwap_score,
+            "vwap_state": str(details.get("vwap_state", getattr(signal, "vwap_state", "")) or ""),
+            "stage": str(details.get("stage", "") or ""),
+            "reason": str(details.get("reason", "") or ""),
+        }
+        bucket = "vwap_hard_block_examples" if veto_name == VetoType.VWAP_HARD_BLOCK.value else "vwap_filter_examples"
+        self._append_execution_example(bucket, example, limit=50)
+
     def _build_entry_candidates(
         self,
         analyses: Dict[str, dict],
@@ -1266,6 +1385,7 @@ class BacktestEngine:
             if signal_type == "flip_bullish":
                 self._bump_execution_audit("flip_bullish_seen")
             if signal.direction == 'neutral':
+                self._record_neutral_veto_attribution(symbol, signal)
                 if signal_type == "flip_bullish":
                     if bool(details.get("flip_bullish_sniper_applies", False)) and not bool(
                         details.get("flip_bullish_sniper_passed", True)
@@ -1821,6 +1941,7 @@ class BacktestEngine:
         entry_scale: float = 1.0,
         session_scale: float = 1.0,
         vol_vwap_warn: bool = False,
+        resonance_gate_position_scale: float = 1.0,
     ) -> Tuple[float, int]:
         """计算仓位大小和杠杆"""
         if self.config.fixed_leverage is not None:
@@ -1850,6 +1971,9 @@ class BacktestEngine:
         if vol_vwap_warn:
             scale = max(0.0, min(1.0, float(getattr(self.strategy_config, "vol_vwap_warn_position_scale", 0.50) or 0.50)))
             position_pct *= scale
+        details_scale = float(resonance_gate_position_scale or 1.0)
+        if details_scale < 1.0:
+            position_pct *= max(0.0, min(1.0, details_scale))
         if position_pct < self.config.min_open_portion:
             return 0.0, leverage
 
@@ -1988,6 +2112,7 @@ class BacktestEngine:
             entry_scale=float(signal.entry_scale or 1.0),
             session_scale=session_position_scale,
             vol_vwap_warn=bool(signal_details.get("vol_vwap_warn", False)),
+            resonance_gate_position_scale=float(signal_details.get("resonance_gate_position_scale", 1.0) or 1.0),
         )
         if position_value <= 0:
             self._bump_execution_reason("execute_reject_reasons", "position_value_zero")

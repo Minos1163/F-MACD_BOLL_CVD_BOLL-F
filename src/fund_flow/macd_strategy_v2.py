@@ -43,6 +43,7 @@ class VetoType(Enum):
     WEAK_SIGNAL_COMBO = "weak_combo_veto"  # 1H shrinking + 15m soft_* 弱组合
     SHORT_QUALITY_FILTER = "short_quality_filter"  # 空头质量过滤（V3专家组建议）
     CVD_CONTINUATION_RISK = "cvd_continuation_risk"  # session-reset CVD 显示短线买盘延续风险
+    RESONANCE_GATE = "resonance_gate"  # MACD+EMA+RSI 非VWAP谐振门
 
 
 @dataclass
@@ -345,6 +346,20 @@ class MACDStrategyV2Config:
     short_filter_max_oi_delta_ratio: float = 0.0  # oi_delta_ratio < 0 (多头减仓)
     short_filter_min_vwap_deviation: float = 0.005  # price > vwap * 1.005
 
+    # MACD+EMA+RSI 谐振门（VWAP移除候选C）
+    resonance_gate_enabled: bool = False
+    resonance_long_rsi_rhythm_min: float = 0.35
+    resonance_short_rsi_rhythm_min: float = 0.35
+    flip_bearish_resonance_rsi_rhythm_min: float = 0.40
+    flip_bullish_resonance_rsi_rhythm_min: float = 0.30
+    trial_resonance_rsi_rhythm_min: float = 0.30
+    resonance_require_ema_not_against: bool = True
+    resonance_require_4h_align: bool = True
+    resonance_volume_warn_ratio: float = 0.80
+    resonance_volume_warn_position_scale: float = 0.50
+    structural_vwap_telemetry_position_scale_threshold: float = 0.05
+    structural_vwap_telemetry_position_scale: float = 0.70
+
     def resolve_signal_score_threshold(
         self,
         signal_type_1h: Optional[str],
@@ -485,7 +500,7 @@ class MACDStrategyV2Engine:
         details["stage_path_text"] = " > ".join(details["stage_path"]) if details["stage_path"] else ""
         details["min_signal_score"] = self.config.min_signal_score
         details["min_entry_score"] = self.config.min_entry_score
-        details["min_vwap_score_for_entry"] = self.config.min_vwap_score_for_entry
+        details.setdefault("min_vwap_score_for_entry", self.config.min_vwap_score_for_entry)
         return details
 
     def _should_apply_short_quality_filter(
@@ -502,6 +517,141 @@ class MACDStrategyV2Engine:
             self.config.enable_short_quality_filter
             or self.config.flip_bearish_independent_short_quality_filter_enabled
         )
+
+    def _check_resonance_gate(
+        self,
+        *,
+        signal_type_1h: Optional[str],
+        trade_direction: Optional[str],
+        is_trial_entry: bool,
+        direction_4h: Optional[str],
+        signal_type_4h: Optional[str],
+        direction_1h: Optional[str],
+        entry_type_15m: Optional[str],
+        ema_status: Optional[str],
+        rsi_rhythm: Optional[Dict[str, Any]],
+        rsi_conflict_type: Optional[str],
+        adx_1h: float,
+        is_4h_enhanced: bool,
+        funding_rate: float,
+        oi_delta_ratio: float,
+        volume_ratio: float,
+        structural_vwap_deviation: float = 0.0,
+    ) -> Dict[str, Any]:
+        direction = str(trade_direction or "").strip().lower()
+        signal_type = str(signal_type_1h or "").strip().lower()
+        dir_4h = str(direction_4h or "").strip().lower()
+        dir_1h = str(direction_1h or "").strip().lower()
+        entry_15m = str(entry_type_15m or "").strip().lower()
+        ema = str(ema_status or "").strip().lower()
+        rhythm = rsi_rhythm or {}
+        raw_rsi = float(rhythm.get("raw_score", 0.0) or 0.0)
+        conflict = str(rsi_conflict_type or rhythm.get("veto_reason") or "").strip().lower()
+        scale = 1.0
+        volume_warn = False
+        vwap_telemetry_warn = False
+
+        structural_dev = float(structural_vwap_deviation or 0.0)
+        if (
+            float(self.config.structural_vwap_telemetry_position_scale_threshold) > 0
+            and abs(structural_dev) > float(self.config.structural_vwap_telemetry_position_scale_threshold)
+        ):
+            scale *= max(0.0, min(1.0, float(self.config.structural_vwap_telemetry_position_scale)))
+            vwap_telemetry_warn = True
+
+        if (
+            float(self.config.resonance_volume_warn_ratio) > 0
+            and float(volume_ratio or 0.0) < float(self.config.resonance_volume_warn_ratio)
+        ):
+            scale *= max(0.0, min(1.0, float(self.config.resonance_volume_warn_position_scale)))
+            volume_warn = True
+
+        def blocked(reason: str) -> Dict[str, Any]:
+            return {
+                "passed": False,
+                "reason": reason,
+                "position_scale": 0.0,
+                "volume_warn": volume_warn,
+                "vwap_telemetry_warn": vwap_telemetry_warn,
+            }
+
+        def passed(reason: str) -> Dict[str, Any]:
+            return {
+                "passed": True,
+                "reason": reason,
+                "position_scale": scale,
+                "volume_warn": volume_warn,
+                "vwap_telemetry_warn": vwap_telemetry_warn,
+            }
+
+        if self.config.resonance_require_ema_not_against and ema == "against":
+            if is_trial_entry:
+                return blocked("trial_resonance_ema_against")
+            if signal_type == "flip_bearish" and direction == "short":
+                return blocked("flip_bearish_resonance_ema_against")
+            if signal_type == "flip_bullish" and direction == "long":
+                return blocked("flip_bullish_resonance_ema_against")
+            return blocked(f"resonance_gate_{direction}_ema_against")
+
+        if is_trial_entry:
+            if raw_rsi < float(self.config.trial_resonance_rsi_rhythm_min):
+                return blocked("trial_resonance_rsi_fail")
+            return passed("trial_resonance_gate_pass")
+
+        if signal_type == "flip_bearish" and direction == "short":
+            min_flip_bearish_adx = max(30.0, float(self.config.flip_bearish_min_adx_1h))
+            if float(adx_1h or 0.0) < min_flip_bearish_adx:
+                return blocked("flip_bearish_resonance_adx_fail")
+            if self.config.resonance_require_4h_align and dir_4h != "short":
+                return blocked("flip_bearish_resonance_4h_fail")
+            if (
+                self.config.flip_bearish_require_enhancement_or_15m_confirmation
+                and not bool(is_4h_enhanced)
+                and entry_15m not in {"green_bar_growing", "flip_bearish", "rsi_spring", "rsi_neutral_resume"}
+            ):
+                return blocked("flip_bearish_resonance_confirmation_fail")
+            if raw_rsi < float(self.config.flip_bearish_resonance_rsi_rhythm_min):
+                return blocked("flip_bearish_resonance_rsi_fail")
+            if conflict in {"divergence", "extreme_oppose", "rebound_conflict", "spring_conflict"}:
+                return blocked("flip_bearish_resonance_rsi_conflict")
+            if float(funding_rate or 0.0) <= float(self.config.short_filter_min_funding_rate):
+                return blocked("flip_bearish_resonance_funding_fail")
+            if float(oi_delta_ratio or 0.0) >= float(self.config.short_filter_max_oi_delta_ratio):
+                return blocked("flip_bearish_resonance_oi_fail")
+            return passed("flip_bearish_resonance_pass")
+
+        if signal_type == "flip_bullish" and direction == "long":
+            if self.config.resonance_require_4h_align and dir_4h != "long":
+                return blocked("flip_bullish_resonance_4h_fail")
+            if raw_rsi < float(self.config.flip_bullish_resonance_rsi_rhythm_min):
+                return blocked("flip_bullish_resonance_rsi_fail")
+            if conflict in {"divergence", "extreme_oppose", "late_overheat"}:
+                return blocked("flip_bullish_resonance_rsi_conflict")
+            return passed("flip_bullish_resonance_pass")
+
+        if direction == "long":
+            if self.config.resonance_require_4h_align and dir_4h != "long":
+                return blocked("resonance_gate_long_4h_fail")
+            if dir_1h not in {"long", "neutral", ""}:
+                return blocked("resonance_gate_long_1h_fail")
+            if raw_rsi < float(self.config.resonance_long_rsi_rhythm_min):
+                return blocked("resonance_gate_long_rsi_fail")
+            if conflict in {"divergence", "extreme_oppose", "late_overheat"}:
+                return blocked("resonance_gate_long_rsi_conflict")
+            return passed("resonance_gate_long_pass")
+
+        if direction == "short":
+            if self.config.resonance_require_4h_align and dir_4h != "short":
+                return blocked("resonance_gate_short_4h_fail")
+            if dir_1h not in {"short", "neutral", ""}:
+                return blocked("resonance_gate_short_1h_fail")
+            if raw_rsi < float(self.config.resonance_short_rsi_rhythm_min):
+                return blocked("resonance_gate_short_rsi_fail")
+            if conflict in {"divergence", "extreme_oppose", "rebound_conflict", "spring_conflict"}:
+                return blocked("resonance_gate_short_rsi_conflict")
+            return passed("resonance_gate_short_pass")
+
+        return blocked("resonance_gate_unknown_direction")
 
     @staticmethod
     def _normalize_stage_path(stage_path: Any) -> List[str]:
@@ -4668,6 +4818,53 @@ class MACDStrategyV2Engine:
                 self.config.weight_4h_enhancement,
             )
 
+        if self.config.resonance_gate_enabled:
+            resonance_eval = self._check_resonance_gate(
+                signal_type_1h=signal_type_1h,
+                trade_direction=trade_direction,
+                is_trial_entry=is_trial_entry,
+                direction_4h=direction_4h,
+                signal_type_4h=signal_type_4h,
+                direction_1h=direction_1h,
+                entry_type_15m=entry_type_15m,
+                ema_status=ema_status,
+                rsi_rhythm=rsi_rhythm,
+                rsi_conflict_type=rsi_conflict_type,
+                adx_1h=adx_1h,
+                is_4h_enhanced=is_4h_enhanced,
+                funding_rate=funding_rate,
+                oi_delta_ratio=oi_delta_ratio,
+                volume_ratio=volume_ratio,
+                structural_vwap_deviation=structural_vwap_deviation,
+            )
+            debug_details.update(
+                resonance_gate_enabled=True,
+                resonance_gate_passed=bool(resonance_eval.get("passed", False)),
+                resonance_gate_reason=str(resonance_eval.get("reason", "")),
+                resonance_gate_position_scale=float(resonance_eval.get("position_scale", 0.0) or 0.0),
+                resonance_volume_warn=bool(resonance_eval.get("volume_warn", False)),
+                resonance_vwap_telemetry_warn=bool(resonance_eval.get("vwap_telemetry_warn", False)),
+            )
+            if not bool(resonance_eval.get("passed", False)):
+                return self._neutral_signal(
+                    reason=str(resonance_eval.get("reason") or "resonance_gate_block"),
+                    score=score,
+                    veto_type=VetoType.RESONANCE_GATE,
+                    veto_reason=str(resonance_eval.get("reason") or "resonance_gate_block"),
+                    signal_type_1h=signal_type_1h,
+                    entry_type_15m=entry_type_15m,
+                    entry_score_15m=entry_score_15m,
+                    vwap_score=vwap_score,
+                    vwap_deviation=vwap_deviation,
+                    ema_multiplier=ema_multiplier,
+                    ema_structure_status=ema_status,
+                    enhancement_score=enhancement_score,
+                    is_4h_enhanced=is_4h_enhanced,
+                    details=self._build_debug_details(
+                        **debug_details,
+                    ),
+                )
+
         if (
             strict_1h_filters_enabled
             and
@@ -4952,6 +5149,12 @@ class MACDStrategyV2Engine:
             'vol_vwap_warn': bool(vol_vwap_warn),
             'vol_vwap_warn_min_score_vol': float(self.config.vol_vwap_warn_min_score_vol),
             'vol_vwap_warn_min_vwap_score': float(self.config.vol_vwap_warn_min_vwap_score),
+            'resonance_gate_enabled': bool(debug_details.get("resonance_gate_enabled", False)),
+            'resonance_gate_passed': bool(debug_details.get("resonance_gate_passed", False)),
+            'resonance_gate_reason': str(debug_details.get("resonance_gate_reason", "")),
+            'resonance_gate_position_scale': float(debug_details.get("resonance_gate_position_scale", 1.0) or 1.0),
+            'resonance_volume_warn': bool(debug_details.get("resonance_volume_warn", False)),
+            'resonance_vwap_telemetry_warn': bool(debug_details.get("resonance_vwap_telemetry_warn", False)),
             'overheat_penalty': overheat_penalty,
             'legacy_4h_boost': legacy_4h_boost,
             'effective_4h_score': effective_4h_score,

@@ -520,6 +520,7 @@ class FundFlowDecisionEngine:
             common_stable_continuation_min_vwap_score = filter_cfg.get("stable_continuation_min_vwap_score")
             common_stable_continuation_min_adx_1h = filter_cfg.get("stable_continuation_min_adx_1h")
             common_stable_continuation_min_4h_bars = filter_cfg.get("stable_continuation_min_4h_bars")
+            resonance_cfg = v2_cfg.get("resonance_gate", {}) if isinstance(v2_cfg.get("resonance_gate"), dict) else {}
             default_signal_threshold = self._to_float(
                 thresholds_cfg.get("default", thresholds_cfg.get("min_signal_score")),
                 0.850,
@@ -1029,6 +1030,33 @@ class FundFlowDecisionEngine:
                 short_filter_min_funding_rate=self._to_float(v2_cfg.get("short_quality_filter", {}).get("min_funding_rate"), 0.0005),
                 short_filter_max_oi_delta_ratio=self._to_float(v2_cfg.get("short_quality_filter", {}).get("max_oi_delta_ratio"), 0.0),
                 short_filter_min_vwap_deviation=self._to_float(v2_cfg.get("short_quality_filter", {}).get("min_vwap_deviation"), 0.005),
+                resonance_gate_enabled=bool(resonance_cfg.get("enabled", False)),
+                resonance_long_rsi_rhythm_min=self._to_float(resonance_cfg.get("long_rsi_rhythm_min"), 0.35),
+                resonance_short_rsi_rhythm_min=self._to_float(resonance_cfg.get("short_rsi_rhythm_min"), 0.35),
+                flip_bearish_resonance_rsi_rhythm_min=self._to_float(
+                    resonance_cfg.get("flip_bearish_rsi_rhythm_min"),
+                    0.40,
+                ),
+                flip_bullish_resonance_rsi_rhythm_min=self._to_float(
+                    resonance_cfg.get("flip_bullish_rsi_rhythm_min"),
+                    0.30,
+                ),
+                trial_resonance_rsi_rhythm_min=self._to_float(resonance_cfg.get("trial_rsi_rhythm_min"), 0.30),
+                resonance_require_ema_not_against=bool(resonance_cfg.get("require_ema_not_against", True)),
+                resonance_require_4h_align=bool(resonance_cfg.get("require_4h_align", True)),
+                resonance_volume_warn_ratio=self._to_float(resonance_cfg.get("volume_warn_ratio"), 0.80),
+                resonance_volume_warn_position_scale=self._to_float(
+                    resonance_cfg.get("volume_warn_position_scale"),
+                    0.50,
+                ),
+                structural_vwap_telemetry_position_scale_threshold=self._to_float(
+                    resonance_cfg.get("structural_vwap_telemetry_position_scale_threshold"),
+                    0.05,
+                ),
+                structural_vwap_telemetry_position_scale=self._to_float(
+                    resonance_cfg.get("structural_vwap_telemetry_position_scale"),
+                    0.70,
+                ),
             )
             regime_entry_cfg = v2_cfg.get("regime_entry", {}) if isinstance(v2_cfg.get("regime_entry"), dict) else {}
             self.macd_v2_regime_entry_cfg = {
@@ -2060,7 +2088,18 @@ class FundFlowDecisionEngine:
         metadata["vwap_score"] = self._to_float(details.get("vwap_score"), metadata.get("vwap_score", signal.vwap_score))
         metadata["vol_vwap_warn_position_scaled"] = False
         if not warn:
-            return portion
+            resonance_scale = max(0.0, min(1.0, self._to_float(details.get("resonance_gate_position_scale"), 1.0)))
+            metadata["resonance_gate_position_scale"] = resonance_scale
+            metadata["resonance_volume_warn"] = bool(details.get("resonance_volume_warn", False))
+            metadata["resonance_vwap_telemetry_warn"] = bool(details.get("resonance_vwap_telemetry_warn", False))
+            if resonance_scale >= 1.0:
+                return portion
+            original_portion = max(0.0, float(portion or 0.0))
+            adjusted_portion = original_portion * resonance_scale
+            metadata["resonance_gate_position_scaled"] = True
+            metadata["resonance_gate_original_portion"] = original_portion
+            metadata["resonance_gate_adjusted_portion"] = adjusted_portion
+            return adjusted_portion
 
         original_portion = max(0.0, float(portion or 0.0))
         scale = max(0.0, min(1.0, self._to_float(getattr(self, "vol_vwap_warn_position_scale", 0.50), 0.50)))
