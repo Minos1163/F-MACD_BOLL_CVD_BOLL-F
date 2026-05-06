@@ -205,7 +205,7 @@
     "default_target_portion": 0.35,
     "add_position_portion": 0.6,
     "max_symbol_position_portion": 0.35,
-    "max_active_symbols": 3,
+    "max_active_symbols": 5,
     "min_open_portion": 0.06,
     "max_open_portion": 1.0,
     "liquidity_norm_factor_weight": 0.12,
@@ -247,7 +247,7 @@
     },
     "dynamic_max_active_symbols": {
       "enabled": false,
-      "max_active_symbols": 3,
+      "max_active_symbols": 5,
       "min_signal_score": 0.9,
       "min_vwap_score": 0.1,
       "min_regime_adx": 18.0,
@@ -317,7 +317,8 @@
       "APTUSDT",
       "ADAUSDT",
       "FETUSDT",
-      "XLMUSDT"
+      "XLMUSDT",
+      "JSTUSDT"
     ],
     "skip_unconfigured_positions": true,
     "take_profit_pct": 0.02,
@@ -378,8 +379,8 @@
         "vwap_deviation_hard_block": 999.0
       },
       "scoring_weights": {
-        "weight_1h_direction": 0.15,
-        "weight_4h_direction": 0.40,
+        "weight_1h_direction": 0.40,
+        "weight_4h_direction": 0.15,
         "weight_4h_enhancement": 0.10,
         "weight_rsi_rhythm": 0.35,
         "weight_vwap": 0.0,
@@ -394,6 +395,7 @@
         "stable_bear_continuation_min_signal_score": 0.64,
         "stable_bull_continuation_min_signal_score": 0.64,
         "red_bar_growing": 0.64,
+        "primary_4h_long_without_1h_growth": 0.66,
         "green_bar_growing": 0.65,
         "flip_bearish": 0.62,
         "flip_bullish": 0.60
@@ -813,7 +815,7 @@
     },
     "engine_params": {
       "TREND": {
-        "max_active_symbols": 3,
+        "max_active_symbols": 5,
         "default_target_portion": 0.6,
         "add_position_portion": 0.6,
         "max_symbol_position_portion": 0.6,
@@ -823,6 +825,7 @@
         "long_open_threshold": 0.095,
         "short_open_threshold": 0.08,
         "close_threshold": 0.3,
+        "trend_only_mode": true,
         "take_profit_pct": 0.02,
         "take_profit_pct_levels": [],
         "take_profit_reduce_pct_levels": [],
@@ -863,7 +866,7 @@
         }
       },
       "RANGE": {
-        "max_active_symbols": 3,
+        "max_active_symbols": 5,
         "default_target_portion": 0.6,
         "add_position_portion": 0.6,
         "max_symbol_position_portion": 0.6,

@@ -2832,8 +2832,12 @@ class TradingBot:
         ff_cfg = self.config.get("fund_flow", {}) if isinstance(self.config, dict) else {}
         engine_params = ff_cfg.get("engine_params", {}) if isinstance(ff_cfg, dict) else {}
         trend_params = engine_params.get("TREND", {}) if isinstance(engine_params, dict) else {}
+        trend_capture_cfg = ff_cfg.get("trend_capture", {}) if isinstance(ff_cfg.get("trend_capture"), dict) else {}
+        trend_only_mode = trend_params.get("trend_only_mode")
+        if trend_only_mode is None:
+            trend_only_mode = trend_capture_cfg.get("trend_only_mode", False)
         return {
-            "trend_only_mode": bool(trend_params.get("trend_only_mode", False)),
+            "trend_only_mode": bool(trend_only_mode),
             "break_even_trigger_pnl_ratio": max(
                 0.0,
                 self._normalize_percent_to_ratio(
@@ -6077,11 +6081,43 @@ class TradingBot:
             "stage": str(macd_v2_debug.get("stage") or "-"),
             "reject_code": str(macd_v2_debug.get("reject_reason_code") or "-"),
         }
-        extra_payload = self._normalize_entry_gate_log_value(extra)
+        scaling_extra = self._entry_gate_position_scaling_extra(md, macd_v2_debug)
+        merged_extra = dict(extra or {})
+        merged_extra.update(scaling_extra)
+        extra_payload = self._normalize_entry_gate_log_value(merged_extra)
         if extra_payload not in (None, {}, []):
             payload["extra"] = extra_payload
         compact_payload = {k: v for k, v in payload.items() if v not in (None, "", [], {})}
         print(f"🚧 ENTRY_GATE_BLOCK {compact_json_dumps(compact_payload)}")
+
+    @staticmethod
+    def _entry_gate_position_scaling_extra(md: Dict[str, Any], macd_v2_debug: Dict[str, Any]) -> Dict[str, Any]:
+        extra: Dict[str, Any] = {}
+        for key in (
+            "final_portion_after_rsi",
+            "rsi_probe_mode",
+        ):
+            if key in md:
+                extra[key] = md.get(key)
+        for key in (
+            "rsi_exposure_mult",
+            "green_bar_growing_probe_overlay_applied",
+            "resonance_gate_position_scale",
+            "resonance_gate_adjusted_portion",
+        ):
+            if key in md:
+                extra[key] = md.get(key)
+            elif key in macd_v2_debug:
+                extra[key] = macd_v2_debug.get(key)
+
+        session_risk = md.get("session_risk")
+        if isinstance(session_risk, dict) and "position_scale" in session_risk:
+            extra["session_risk_position_scale"] = session_risk.get("position_scale")
+
+        symbol_risk = md.get("symbol_risk")
+        if isinstance(symbol_risk, dict) and "effective_session_scale" in symbol_risk:
+            extra["symbol_risk_effective_session_scale"] = symbol_risk.get("effective_session_scale")
+        return extra
 
     def _is_ai_gate_enabled(self) -> bool:
         ff_cfg = self.config.get("fund_flow", {}) or {}

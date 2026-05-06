@@ -319,6 +319,72 @@ def test_candidate_ablation_configs_apply_expected_vwap_and_resonance_settings()
     assert c_v2["short_quality_filter"]["min_vwap_deviation"] == pytest.approx(0.0)
 
 
+def test_live_fund_flow_config_uses_three_four_five_leverage_levels() -> None:
+    cfg = json.loads(Path("config/trading_config_fund_flow.json").read_text(encoding="utf-8"))
+
+    fund_flow = cfg["fund_flow"]
+    assert fund_flow["min_leverage"] == 3
+    assert fund_flow["default_leverage"] == 4
+    assert fund_flow["max_leverage"] == 5
+    assert fund_flow["high_signal_leverage_cap"] == 5
+    assert fund_flow["account_risk"]["min_scaled_leverage"] == 3
+
+
+def test_live_fund_flow_config_prioritizes_1h_over_4h_and_blacklists_jst() -> None:
+    cfg = json.loads(Path("config/trading_config_fund_flow.json").read_text(encoding="utf-8"))
+
+    fund_flow = cfg["fund_flow"]
+    weights = fund_flow["macd_mtf_strategy_v2"]["scoring_weights"]
+    thresholds = fund_flow["macd_mtf_strategy_v2"]["entry_thresholds"]
+    assert weights["weight_1h_direction"] == pytest.approx(0.40)
+    assert weights["weight_4h_direction"] == pytest.approx(0.15)
+    assert thresholds["red_bar_growing"] == pytest.approx(0.64)
+    assert thresholds["primary_4h_long_without_1h_growth"] == pytest.approx(0.66)
+    assert "JSTUSDT" in fund_flow["symbol_blacklist"]
+
+
+def test_primary_4h_long_without_1h_growth_uses_higher_threshold() -> None:
+    cfg = MACDStrategyV2Config(
+        red_bar_growing_min_signal_score=0.64,
+        primary_4h_long_without_1h_growth_min_signal_score=0.66,
+    )
+
+    threshold, source = cfg.resolve_entry_threshold(
+        signal_type="red_bar_growing",
+        signal_type_1h="red_bar_shrinking",
+        trade_direction="long",
+        entry_type_15m="rsi_neutral_resume",
+        primary_mode="4h",
+        is_trial_entry=False,
+        stable_continuation_active=False,
+        stable_continuation_side=None,
+    )
+
+    assert threshold == pytest.approx(0.66)
+    assert source == "primary_4h_long_without_1h_growth(primary_4h_red_bar_growing)"
+
+
+def test_primary_4h_long_with_1h_growth_keeps_red_bar_threshold() -> None:
+    cfg = MACDStrategyV2Config(
+        red_bar_growing_min_signal_score=0.64,
+        primary_4h_long_without_1h_growth_min_signal_score=0.66,
+    )
+
+    threshold, source = cfg.resolve_entry_threshold(
+        signal_type="red_bar_growing",
+        signal_type_1h="red_bar_growing",
+        trade_direction="long",
+        entry_type_15m="rsi_neutral_resume",
+        primary_mode="4h",
+        is_trial_entry=False,
+        stable_continuation_active=False,
+        stable_continuation_side=None,
+    )
+
+    assert threshold == pytest.approx(0.64)
+    assert source == "primary_4h_red_bar_growing"
+
+
 def test_trial_entry_vwap_floor_cannot_bypass_global_entry_floor() -> None:
     engine = MACDStrategyV2Engine(
         MACDStrategyV2Config(
@@ -593,6 +659,44 @@ def test_macd_v2_weak_entry_leverage_is_not_lifted_by_min_leverage() -> None:
     assert metadata["leverage_min_bypass_applied"] is True
 
 
+def test_score_based_leverage_uses_configured_levels() -> None:
+    decision_engine = FundFlowDecisionEngine(
+        {"fund_flow": {"min_leverage": 6, "default_leverage": 8, "max_leverage": 10}}
+    )
+
+    assert decision_engine._calculate_leverage_from_score(0.80) == 10
+    assert decision_engine._calculate_leverage_from_score(0.65) == 8
+    assert decision_engine._calculate_leverage_from_score(0.50) == 6
+    assert decision_engine._calculate_leverage_from_score(0.20) == 6
+
+
+def test_strict_trend_strategy_config_falls_back_to_trend_capture_mode() -> None:
+    bot = object.__new__(TradingBot)
+    bot.config = {
+        "fund_flow": {
+            "trend_capture": {"trend_only_mode": True},
+            "engine_params": {
+                "TREND": {
+                    "tp_break_even_trigger_pnl_ratio": 0.0055,
+                    "tp_break_even_lock_ratio": 0.002,
+                    "tp_trailing_activate_mfe_ratio": 0.0075,
+                    "tp_trailing_distance_ratio": 0.003,
+                    "ev_lw_flip_exit_mfe_ratio": 0.0015,
+                }
+            },
+        }
+    }
+
+    cfg = bot._strict_trend_strategy_config()
+
+    assert cfg["trend_only_mode"] is True
+    assert cfg["break_even_trigger_pnl_ratio"] == pytest.approx(0.0055)
+    assert cfg["break_even_lock_ratio"] == pytest.approx(0.002)
+    assert cfg["trailing_activate_mfe_ratio"] == pytest.approx(0.0075)
+    assert cfg["trailing_distance_ratio"] == pytest.approx(0.003)
+    assert cfg["ev_lw_flip_exit_mfe_ratio"] == pytest.approx(0.0015)
+
+
 def test_macd_v2_stop_summary_resolves_exchange_stop_and_repairs_missing_stop() -> None:
     bot = object.__new__(TradingBot)
     bot.client = SimpleNamespace(
@@ -714,6 +818,58 @@ def test_current_repo_live_base_is_aligned_with_default_backtest_profile() -> No
     ])
 
     assert all(row["status"] == "PASS" for row in rows)
+
+
+def test_entry_gate_block_logs_position_scaling_breakdown(capsys: pytest.CaptureFixture[str]) -> None:
+    bot = object.__new__(TradingBot)
+    bot._decision_kline_context = lambda flow_context, md: ("15m", {"timestamp": "2026-05-06T14:15:00+00:00"})
+    decision = FundFlowDecision(
+        operation=Operation.SELL,
+        symbol="ONDOUSDT",
+        target_portion_of_balance=0.0007,
+        metadata={
+            "engine": "TREND",
+            "strategy_mode": "macd_mtf_strategy_v2",
+            "signal_score": 0.67075,
+            "final_portion_after_rsi": 0.0007,
+            "rsi_probe_mode": True,
+            "session_risk": {"position_scale": 0.65},
+            "symbol_risk": {"effective_session_scale": 0.65},
+            "macd_v2_debug": {
+                "signal_score_threshold": 0.65,
+                "threshold_source": "primary_4h_green_bar_growing",
+                "signal_type_1h": "green_bar_growing",
+                "signal_type_4h": "green_bar_growing",
+                "stage": "final",
+                "rsi_exposure_mult": 0.2,
+                "green_bar_growing_probe_overlay_applied": True,
+                "resonance_gate_position_scale": 0.1,
+                "resonance_gate_adjusted_portion": 0.0007,
+            },
+        },
+    )
+
+    bot._log_entry_gate_block(
+        symbol="ONDOUSDT",
+        gate="min_open_portion",
+        reason="target_below_min_open",
+        threshold=0.06,
+        value=0.0007,
+        decision=decision,
+        extra={"open_new_entry": True},
+    )
+
+    payload = json.loads(capsys.readouterr().out.split("ENTRY_GATE_BLOCK ", 1)[1])
+    extra = payload["extra"]
+    assert extra["open_new_entry"] is True
+    assert extra["final_portion_after_rsi"] == pytest.approx(0.0007)
+    assert extra["rsi_probe_mode"] is True
+    assert extra["rsi_exposure_mult"] == pytest.approx(0.2)
+    assert extra["green_bar_growing_probe_overlay_applied"] is True
+    assert extra["resonance_gate_position_scale"] == pytest.approx(0.1)
+    assert extra["resonance_gate_adjusted_portion"] == pytest.approx(0.0007)
+    assert extra["session_risk_position_scale"] == pytest.approx(0.65)
+    assert extra["symbol_risk_effective_session_scale"] == pytest.approx(0.65)
 
 
 def test_compare_live_backtest_alignment_marks_approved_diff_without_failing() -> None:
@@ -1180,6 +1336,41 @@ def test_simulated_live_close_layers_force_break_even_updates_stop_once() -> Non
 
     assert engine.positions["SOLUSDT"]["stop_price"] == pytest.approx(100.0, rel=1e-6)
     assert engine.live_close_audit["conflict_force_breakeven_applied"] == 1
+
+
+def test_simulated_live_close_layers_strict_trend_trailing_tightens_stop() -> None:
+    runtime_cfg = {
+        "fund_flow": {
+            "engine_params": {
+                "TREND": {
+                    "trend_only_mode": True,
+                    "tp_trailing_activate_mfe_ratio": 0.0075,
+                    "tp_trailing_distance_ratio": 0.003,
+                    "tp_break_even_trigger_pnl_ratio": 0.0055,
+                    "tp_break_even_lock_ratio": 0.002,
+                }
+            }
+        }
+    }
+    engine = BacktestEngine(
+        BacktestConfig(symbols=["SOLUSDT"], simulate_live_close_layers=True, breakeven_enabled=False),
+        MACDStrategyV2Config(enable_4h_shrink_exit=False),
+        runtime_config=runtime_cfg,
+    )
+    engine.live_risk_manager = SimpleNamespace(check_position_protection=lambda **kwargs: {"risk_state": "HOLD"})
+    _base_position(engine, stop_price=95.0)
+    signal = MACDSignalV2(
+        direction="long",
+        signal_score=0.90,
+        signal_type_1h="red_bar_growing",
+        details={"market_regime": "TREND"},
+    )
+
+    closed = engine.check_stops("SOLUSDT", _analysis(signal=signal, price=101.0, high=101.0, low=100.8, close=101.0))
+
+    assert closed is False
+    assert engine.positions["SOLUSDT"]["stop_price"] == pytest.approx(100.697, rel=1e-6)
+    assert engine.live_close_audit["strict_trend_trailing_applied"] == 1
 
 
 def test_holding_time_exit_closes_stale_low_profit_position() -> None:

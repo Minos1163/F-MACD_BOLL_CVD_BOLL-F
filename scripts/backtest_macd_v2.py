@@ -506,6 +506,9 @@ def build_strategy_config(runtime_cfg: dict) -> MACDStrategyV2Config:
         flip_bearish_min_signal_score=float(thresholds_cfg.get("flip_bearish", default_signal_threshold)),
         flip_bullish_min_signal_score=float(thresholds_cfg.get("flip_bullish", default_signal_threshold)),
         soft_long_min_signal_score=float(thresholds_cfg.get("soft_long_min_signal_score", 0.0)),
+        primary_4h_long_without_1h_growth_min_signal_score=float(
+            thresholds_cfg.get("primary_4h_long_without_1h_growth", 0.0)
+        ),
         enable_flip_bullish_strict_filter=bool(filter_cfg.get("enable_flip_bullish_strict_filter", True)),
         disable_flip_bullish_entries=bool(filter_cfg.get("disable_flip_bullish_entries", False)),
         flip_bullish_min_vwap_score=float(filter_cfg.get("flip_bullish_min_vwap_score", 0.12)),
@@ -1250,6 +1253,8 @@ class BacktestEngine:
             "enabled": bool(config.simulate_live_close_layers),
             "light_take_profit_triggered": 0,
             "light_take_profit_reduced_margin": 0.0,
+            "strict_trend_breakeven_applied": 0,
+            "strict_trend_trailing_applied": 0,
             "conflict_reduce_triggered": 0,
             "conflict_exit_triggered": 0,
             "conflict_force_breakeven_applied": 0,
@@ -1990,6 +1995,8 @@ class BacktestEngine:
         ) if primary_mode == '4h' else getattr(signal, 'signal_type_1h', None)
         threshold, _ = self.strategy_config.resolve_entry_threshold(
             signal_type=threshold_signal_type,
+            signal_type_1h=getattr(signal, 'signal_type_1h', None),
+            trade_direction=getattr(signal, 'direction', None),
             entry_type_15m=getattr(signal, 'entry_type_15m', None),
             primary_mode=primary_mode,
             is_trial_entry=bool(getattr(signal, 'is_trial_entry', False)),
@@ -2719,11 +2726,96 @@ class BacktestEngine:
             return True
         return False
 
+    @staticmethod
+    def _ratio_from_config(value: object, default: float) -> float:
+        try:
+            ratio = float(value)
+        except (TypeError, ValueError):
+            ratio = float(default)
+        if ratio > 1.0:
+            ratio /= 100.0
+        return max(0.0, ratio)
+
+    def _strict_trend_runtime_config(self) -> dict:
+        ff_cfg = self.runtime_config.get("fund_flow", {}) if isinstance(self.runtime_config.get("fund_flow"), dict) else {}
+        engine_params = ff_cfg.get("engine_params", {}) if isinstance(ff_cfg.get("engine_params"), dict) else {}
+        trend_params = engine_params.get("TREND", {}) if isinstance(engine_params.get("TREND"), dict) else {}
+        trend_capture_cfg = ff_cfg.get("trend_capture", {}) if isinstance(ff_cfg.get("trend_capture"), dict) else {}
+        trend_only_mode = trend_params.get("trend_only_mode")
+        if trend_only_mode is None:
+            trend_only_mode = trend_capture_cfg.get("trend_only_mode", False)
+        return {
+            "trend_only_mode": bool(trend_only_mode),
+            "break_even_trigger_pnl_ratio": self._ratio_from_config(
+                trend_params.get("tp_break_even_trigger_pnl_ratio", 0.0035),
+                0.0035,
+            ),
+            "break_even_lock_ratio": self._ratio_from_config(
+                trend_params.get("tp_break_even_lock_ratio", 0.0005),
+                0.0005,
+            ),
+            "trailing_activate_mfe_ratio": self._ratio_from_config(
+                trend_params.get("tp_trailing_activate_mfe_ratio", 0.0055),
+                0.0055,
+            ),
+            "trailing_distance_ratio": self._ratio_from_config(
+                trend_params.get("tp_trailing_distance_ratio", 0.0016),
+                0.0016,
+            ),
+        }
+
+    @staticmethod
+    def _tighten_position_stop(pos: dict, new_stop: float) -> bool:
+        old_stop = float(pos.get("stop_price", 0.0) or 0.0)
+        if new_stop <= 0:
+            return False
+        if str(pos.get("side", "")).lower() == "long":
+            if new_stop <= old_stop + 1e-12:
+                return False
+        elif old_stop > 0 and new_stop >= old_stop - 1e-12:
+            return False
+        pos["stop_price"] = float(new_stop)
+        return True
+
+    def _simulate_strict_trend_trailing(self, pos: dict, analysis: dict) -> None:
+        if not self.config.simulate_live_close_layers:
+            return
+        cfg = self._strict_trend_runtime_config()
+        if not bool(cfg.get("trend_only_mode", False)):
+            return
+
+        signal = analysis.get("signal")
+        signal_details = signal.details if isinstance(getattr(signal, "details", None), dict) else {}
+        regime = str(signal_details.get("market_regime", signal_details.get("engine", "")) or "").upper()
+        if regime != "TREND":
+            return
+
+        price = float(analysis.get("price", 0.0) or 0.0)
+        entry_price = float(pos.get("entry_price", 0.0) or 0.0)
+        if price <= 0 or entry_price <= 0:
+            return
+
+        side = str(pos.get("side", "")).lower()
+        current_pnl_ratio = self._position_pnl_ratio(pos, price)
+        if current_pnl_ratio >= float(cfg["break_even_trigger_pnl_ratio"]):
+            lock_ratio = float(cfg["break_even_lock_ratio"])
+            be_stop = entry_price * (1.0 + lock_ratio) if side == "long" else entry_price * (1.0 - lock_ratio)
+            if self._tighten_position_stop(pos, be_stop):
+                self.live_close_audit["strict_trend_breakeven_applied"] += 1
+
+        mfe_ratio = self._position_mfe_ratio(pos, analysis["row_15m"])
+        if mfe_ratio >= float(cfg["trailing_activate_mfe_ratio"]):
+            distance_ratio = float(cfg["trailing_distance_ratio"])
+            trail_stop = price * (1.0 - distance_ratio) if side == "long" else price * (1.0 + distance_ratio)
+            if self._tighten_position_stop(pos, trail_stop):
+                self.live_close_audit["strict_trend_trailing_applied"] += 1
+
     def _apply_simulated_live_close_layers(self, symbol: str, analysis: dict) -> bool:
         if not self.config.simulate_live_close_layers or symbol not in self.positions:
             return False
         pos = self.positions[symbol]
         light_tp_fired_before = bool(pos.get("light_take_profit_fired", False))
+        self._simulate_strict_trend_trailing(pos, analysis)
         if self._simulate_light_take_profit(symbol, pos, analysis):
             return symbol not in self.positions
         if symbol not in self.positions:

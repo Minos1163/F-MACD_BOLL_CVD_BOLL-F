@@ -584,6 +584,10 @@ class FundFlowDecisionEngine:
                 flip_bearish_min_signal_score=self._to_float(thresholds_cfg.get("flip_bearish"), 0.84),
                 flip_bullish_min_signal_score=self._to_float(thresholds_cfg.get("flip_bullish"), 0.82),
                 soft_long_min_signal_score=self._to_float(thresholds_cfg.get("soft_long_min_signal_score"), 0.0),
+                primary_4h_long_without_1h_growth_min_signal_score=self._to_float(
+                    thresholds_cfg.get("primary_4h_long_without_1h_growth"),
+                    0.0,
+                ),
                 enable_flip_bullish_strict_filter=bool(filter_cfg.get("enable_flip_bullish_strict_filter", True)),
                 disable_flip_bullish_entries=bool(filter_cfg.get("disable_flip_bullish_entries", False)),
                 flip_bullish_min_vwap_score=self._to_float(filter_cfg.get("flip_bullish_min_vwap_score"), 0.12),
@@ -5057,14 +5061,18 @@ class FundFlowDecisionEngine:
     
     def _calculate_leverage_from_score(self, score: float) -> int:
         """根据信号评分计算杠杆"""
+        levels = self.allowed_leverage_values or [self.min_leverage, self.default_leverage, self.max_leverage]
+        low_lev = levels[0]
+        mid_lev = levels[min(1, len(levels) - 1)]
+        high_lev = levels[-1]
         if score >= 0.75:
-            return min(self.max_leverage, 5)
+            return high_lev
         elif score >= 0.60:
-            return min(self.max_leverage, 4)
+            return mid_lev
         elif score >= 0.45:
-            return min(self.max_leverage, 3)
+            return low_lev
         else:
-            return self.min_leverage
+            return low_lev
     
     def _calculate_portion_from_score(self, score: float) -> float:
         """根据信号评分计算仓位比例"""

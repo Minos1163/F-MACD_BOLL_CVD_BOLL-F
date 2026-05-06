@@ -94,6 +94,7 @@ class MACDStrategyV2Config:
     flip_bearish_min_signal_score: float = 0.840
     flip_bullish_min_signal_score: float = 0.820
     soft_long_min_signal_score: float = 0.0
+    primary_4h_long_without_1h_growth_min_signal_score: float = 0.0
 
     # 1H flip_bullish 严格过滤
     enable_flip_bullish_strict_filter: bool = True
@@ -390,6 +391,8 @@ class MACDStrategyV2Config:
         self,
         *,
         signal_type: Optional[str],
+        signal_type_1h: Optional[str] = None,
+        trade_direction: Optional[str] = None,
         entry_type_15m: Optional[str],
         primary_mode: str,
         is_trial_entry: bool,
@@ -423,6 +426,21 @@ class MACDStrategyV2Config:
         ):
             threshold = soft_long_threshold
             threshold_source = f"soft_long_override({threshold_source})"
+
+        primary_4h_weak_1h_threshold = float(
+            self.primary_4h_long_without_1h_growth_min_signal_score or 0.0
+        )
+        if (
+            primary_mode == "4h"
+            and not stable_continuation_active
+            and not is_trial_entry
+            and str(trade_direction or "").strip().lower() == "long"
+            and signal_type == "red_bar_growing"
+            and str(signal_type_1h or "").strip().lower() != "red_bar_growing"
+            and primary_4h_weak_1h_threshold > threshold
+        ):
+            threshold = primary_4h_weak_1h_threshold
+            threshold_source = f"primary_4h_long_without_1h_growth({threshold_source})"
 
         return threshold, threshold_source
 
@@ -4949,6 +4967,8 @@ class MACDStrategyV2Engine:
         threshold_signal_type = (signal_type_4h or signal_type_1h) if primary_mode == "4h" else (signal_type_1h or signal_type_4h)
         threshold, threshold_source = self.config.resolve_entry_threshold(
             signal_type=threshold_signal_type,
+            signal_type_1h=signal_type_1h,
+            trade_direction=trade_direction,
             entry_type_15m=entry_type_15m,
             primary_mode=primary_mode,
             is_trial_entry=is_trial_entry,
