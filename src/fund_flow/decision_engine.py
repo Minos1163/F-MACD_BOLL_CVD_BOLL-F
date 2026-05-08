@@ -737,6 +737,7 @@ class FundFlowDecisionEngine:
                     filter_cfg.get("vol_vwap_warn_min_vwap_score", filter_cfg.get("volume_vwap_both_low_min_vwap_score")),
                     0.10,
                 ),
+                require_vwap_for_entry=bool(filter_cfg.get("require_vwap_for_entry", False)),
                 rsi_spring_recent_extreme_lookback=max(2, int(self._to_float(rsi_cfg.get("spring_recent_extreme_lookback"), 6))),
                 rsi_spring_recent_oversold=self._to_float(rsi_cfg.get("spring_recent_oversold"), 40.0),
                 rsi_spring_recent_overbought=self._to_float(rsi_cfg.get("spring_recent_overbought"), 60.0),
@@ -1983,6 +1984,7 @@ class FundFlowDecisionEngine:
         return (
             exposure_mult <= probe_threshold
             or red_bar_overlay
+            or green_bar_overlay
             or bool((signal.details or {}).get("rsi_probe_mode", False))
         )
 
@@ -2090,6 +2092,14 @@ class FundFlowDecisionEngine:
         metadata["vol_vwap_warn"] = warn
         metadata["score_volume"] = self._to_float(details.get("score_volume"), metadata.get("score_volume", 0.0))
         metadata["vwap_score"] = self._to_float(details.get("vwap_score"), metadata.get("vwap_score", signal.vwap_score))
+        metadata["vwap_quality_score"] = self._to_float(
+            details.get("vwap_quality_score"),
+            self._to_float(metadata.get("vwap_quality_score"), metadata["vwap_score"]),
+        )
+        metadata["vwap_alpha_score"] = self._to_float(
+            details.get("vwap_alpha_score", details.get("score_vwap")),
+            self._to_float(metadata.get("vwap_alpha_score"), 0.0),
+        )
         metadata["vol_vwap_warn_position_scaled"] = False
         if not warn:
             resonance_scale = max(0.0, min(1.0, self._to_float(details.get("resonance_gate_position_scale"), 1.0)))
@@ -4341,6 +4351,9 @@ class FundFlowDecisionEngine:
             "is_4h_enhanced": signal.is_4h_enhanced,
             "entry_type_15m": signal.entry_type_15m,
             "vwap_score": signal.vwap_score,
+            "vwap_quality_score": (signal.details or {}).get("vwap_quality_score", signal.vwap_score),
+            "vwap_alpha_score": (signal.details or {}).get("vwap_alpha_score", (signal.details or {}).get("score_vwap", 0.0)),
+            "vwap_missing": bool((signal.details or {}).get("vwap_missing", False)),
             "vwap_deviation": signal.vwap_deviation,
             "vwap_state": signal.vwap_state,
             "vwap_location_score": signal.vwap_location_score,

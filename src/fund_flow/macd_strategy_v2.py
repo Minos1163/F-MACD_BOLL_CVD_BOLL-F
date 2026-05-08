@@ -35,6 +35,7 @@ class VetoType(Enum):
     NONE = "none"
     VWAP_HARD_BLOCK = "vwap_hard_block"  # VWAP偏离超过3%
     VWAP_SCORE_FILTER = "vwap_score_filter"  # VWAP评分低于入场阈值
+    VWAP_MISSING_HARD_BLOCK = "vwap_missing_hard_block"  # 缺少VWAP数据时禁止入场
     VWAP_OPPOSITE_DAYS = "vwap_opposite_days"  # VWAP方向连续相反
     EMA_1H_BREAK = "ema_1h_break"  # 兼容旧枚举值：1H跌破/突破BOLL中轨
     EMA_4H_REVERSE = "ema_4h_reverse"  # 兼容旧枚举值：4H结构完全反向
@@ -305,6 +306,7 @@ class MACDStrategyV2Config:
     min_vwap_score_for_entry: float = 0.10  # VWAP全局过滤
     vol_vwap_warn_min_score_vol: float = 0.05
     vol_vwap_warn_min_vwap_score: float = 0.10
+    require_vwap_for_entry: bool = False
     
     # 止损配置
     use_dynamic_stop: bool = True
@@ -2938,6 +2940,21 @@ class MACDStrategyV2Engine:
         return can_enter, entry_score, details
     
     # ==================== VWAP 过滤层（新增） ====================
+
+    def _vwap_score_result(
+        self,
+        location_score: float,
+        veto_type: VetoType,
+        details: Dict[str, Any],
+    ) -> Tuple[float, VetoType, Dict[str, Any]]:
+        quality_score = round(max(0.0, min(1.0, float(location_score or 0.0))), 4)
+        alpha_score = round(float(self.config.weight_vwap) * quality_score, 4)
+        payload = dict(details)
+        payload.setdefault("location_score", quality_score)
+        payload["vwap_quality_score"] = quality_score
+        payload["vwap_alpha_score"] = alpha_score
+        payload["vwap_missing"] = bool(payload.get("vwap_missing", False))
+        return quality_score, veto_type, payload
     
     def calculate_vwap_score(
         self,
@@ -2954,7 +2971,7 @@ class MACDStrategyV2Engine:
         VWAP评分计算（位置状态 + 连续分数）
         
         返回：
-        - score: 0-weight_vwap
+        - score: raw location quality 0-1
         - veto_type: 是否触发否决
         - details: 位置状态与连续评分细节
         """
@@ -2963,20 +2980,22 @@ class MACDStrategyV2Engine:
             structural_vwap_value = self._series_value(structural_vwap_series, default=0.0)
 
         if vwap <= 0:
-            location_score = 0.5
-            return round(self.config.weight_vwap * location_score, 4), VetoType.NONE, {
+            location_score = 0.0
+            veto_type = VetoType.VWAP_MISSING_HARD_BLOCK if self.config.require_vwap_for_entry else VetoType.NONE
+            return self._vwap_score_result(location_score, veto_type, {
                 "state": "no_vwap",
                 "location_score": location_score,
                 "entry_edge": 0.0,
                 "directional_extension": 0.0,
-                "entry_edge_quality": 0.5,
-                "value_proximity_quality": 0.5,
-                "extension_quality": 0.5,
+                "entry_edge_quality": 0.0,
+                "value_proximity_quality": 0.0,
+                "extension_quality": 0.0,
                 "session_vwap": vwap,
                 "structural_vwap": structural_vwap_value,
                 "session_deviation": 0.0,
                 "structural_deviation": 0.0,
-            }
+                "vwap_missing": True,
+            })
 
         deviation = (price - vwap) / vwap
         if structural_vwap_value <= 0:
@@ -2984,7 +3003,7 @@ class MACDStrategyV2Engine:
                 directional_extension = deviation
                 entry_edge = -deviation
                 if directional_extension > self.config.vwap_deviation_hard_block:
-                    return 0.0, VetoType.VWAP_HARD_BLOCK, {
+                    return self._vwap_score_result(0.0, VetoType.VWAP_HARD_BLOCK, {
                         "state": "long_overextended_above_value",
                         "location_score": 0.0,
                         "entry_edge": entry_edge,
@@ -2993,7 +3012,7 @@ class MACDStrategyV2Engine:
                         "structural_vwap": structural_vwap_value,
                         "session_deviation": deviation,
                         "structural_deviation": deviation,
-                    }
+                    })
                 if deviation >= self.config.vwap_deviation_warning:
                     state = "long_above_value_extension"
                 elif deviation >= self.config.vwap_deviation_optimal:
@@ -3008,7 +3027,7 @@ class MACDStrategyV2Engine:
                 directional_extension = -deviation
                 entry_edge = deviation
                 if directional_extension > self.config.vwap_deviation_hard_block:
-                    return 0.0, VetoType.VWAP_HARD_BLOCK, {
+                    return self._vwap_score_result(0.0, VetoType.VWAP_HARD_BLOCK, {
                         "state": "short_overextended_below_value",
                         "location_score": 0.0,
                         "entry_edge": entry_edge,
@@ -3017,7 +3036,7 @@ class MACDStrategyV2Engine:
                         "structural_vwap": structural_vwap_value,
                         "session_deviation": deviation,
                         "structural_deviation": deviation,
-                    }
+                    })
                 if deviation <= -self.config.vwap_deviation_warning:
                     state = "short_below_value_extension"
                 elif deviation <= -self.config.vwap_deviation_optimal:
@@ -3030,7 +3049,7 @@ class MACDStrategyV2Engine:
                     state = "short_stretched_premium"
             else:
                 location_score = 0.5
-                return round(self.config.weight_vwap * location_score, 4), VetoType.NONE, {
+                return self._vwap_score_result(location_score, VetoType.NONE, {
                     "state": "neutral",
                     "location_score": location_score,
                     "entry_edge": 0.0,
@@ -3042,7 +3061,7 @@ class MACDStrategyV2Engine:
                     "structural_vwap": structural_vwap_value,
                     "session_deviation": deviation,
                     "structural_deviation": deviation,
-                }
+                })
 
             hard_block = max(self.config.vwap_deviation_hard_block, 1e-9)
             warning = max(self.config.vwap_deviation_warning, 1e-9)
@@ -3056,8 +3075,7 @@ class MACDStrategyV2Engine:
                 0.0,
                 1.0,
             )
-            score = round(self.config.weight_vwap * location_score, 4)
-            return score, VetoType.NONE, {
+            return self._vwap_score_result(location_score, VetoType.NONE, {
                 "state": state,
                 "location_score": location_score,
                 "entry_edge": entry_edge,
@@ -3069,7 +3087,7 @@ class MACDStrategyV2Engine:
                 "structural_vwap": structural_vwap_value,
                 "session_deviation": deviation,
                 "structural_deviation": deviation,
-            }
+            })
 
         structural_deviation = (price - structural_vwap_value) / structural_vwap_value
         tolerance = max(self.config.vwap_retest_tolerance, 1e-4)
@@ -3109,7 +3127,7 @@ class MACDStrategyV2Engine:
             directional_extension = -deviation
             entry_edge = deviation
             if directional_extension > self.config.vwap_deviation_hard_block:
-                return 0.0, VetoType.VWAP_HARD_BLOCK, {
+                return self._vwap_score_result(0.0, VetoType.VWAP_HARD_BLOCK, {
                     "state": "short_overextended_below_value",
                     "location_score": 0.0,
                     "entry_edge": entry_edge,
@@ -3118,7 +3136,7 @@ class MACDStrategyV2Engine:
                     "structural_vwap": structural_vwap_value,
                     "session_deviation": deviation,
                     "structural_deviation": structural_deviation,
-                }
+                })
             if short_retest_reject:
                 state = "short_retest_reject"
             elif session_below and structure_below:
@@ -3155,8 +3173,7 @@ class MACDStrategyV2Engine:
                 0.0,
                 1.0,
             )
-            score = round(self.config.weight_vwap * location_score, 4)
-            return score, VetoType.NONE, {
+            return self._vwap_score_result(location_score, VetoType.NONE, {
                 "state": state,
                 "location_score": location_score,
                 "entry_edge": entry_edge,
@@ -3171,13 +3188,13 @@ class MACDStrategyV2Engine:
                 "structural_vwap": structural_vwap_value,
                 "session_deviation": deviation,
                 "structural_deviation": structural_deviation,
-            }
+            })
 
         if direction == 'long':
             directional_extension = deviation
             entry_edge = -deviation
             if directional_extension > self.config.vwap_deviation_hard_block:
-                return 0.0, VetoType.VWAP_HARD_BLOCK, {
+                return self._vwap_score_result(0.0, VetoType.VWAP_HARD_BLOCK, {
                     "state": "long_overextended_above_value",
                     "location_score": 0.0,
                     "entry_edge": entry_edge,
@@ -3186,7 +3203,7 @@ class MACDStrategyV2Engine:
                     "structural_vwap": structural_vwap_value,
                     "session_deviation": deviation,
                     "structural_deviation": structural_deviation,
-                }
+                })
             if long_reclaim_confirmed:
                 state = "long_reclaim_confirmed"
             elif session_above and structure_above:
@@ -3223,8 +3240,7 @@ class MACDStrategyV2Engine:
                 0.0,
                 1.0,
             )
-            score = round(self.config.weight_vwap * location_score, 4)
-            return score, VetoType.NONE, {
+            return self._vwap_score_result(location_score, VetoType.NONE, {
                 "state": state,
                 "location_score": location_score,
                 "entry_edge": entry_edge,
@@ -3239,10 +3255,10 @@ class MACDStrategyV2Engine:
                 "structural_vwap": structural_vwap_value,
                 "session_deviation": deviation,
                 "structural_deviation": structural_deviation,
-            }
+            })
 
         location_score = 0.5
-        return round(self.config.weight_vwap * location_score, 4), VetoType.NONE, {
+        return self._vwap_score_result(location_score, VetoType.NONE, {
             "state": "neutral",
             "location_score": location_score,
             "entry_edge": 0.0,
@@ -3254,7 +3270,7 @@ class MACDStrategyV2Engine:
             "structural_vwap": structural_vwap_value,
             "session_deviation": deviation,
             "structural_deviation": structural_deviation,
-        }
+        })
 
     def check_flip_bearish_structure(
         self,
@@ -3920,6 +3936,9 @@ class MACDStrategyV2Engine:
             debug_details,
             "vwap",
             vwap_score=vwap_score,
+            vwap_quality_score=vwap_details.get("vwap_quality_score", vwap_score),
+            vwap_alpha_score=vwap_details.get("vwap_alpha_score", 0.0),
+            vwap_missing=bool(vwap_details.get("vwap_missing", False)),
             vwap_deviation=vwap_deviation,
             vwap_state=vwap_state,
             vwap_location_score=vwap_location_score,
@@ -3942,11 +3961,16 @@ class MACDStrategyV2Engine:
         )
         
         # VWAP硬性否决
-        if vwap_veto == VetoType.VWAP_HARD_BLOCK:
+        if vwap_veto in {VetoType.VWAP_HARD_BLOCK, VetoType.VWAP_MISSING_HARD_BLOCK}:
+            missing_vwap_block = vwap_veto == VetoType.VWAP_MISSING_HARD_BLOCK
             return self._neutral_signal(
-                reason='vwap_hard_block',
+                reason='vwap_missing_hard_block' if missing_vwap_block else 'vwap_hard_block',
                 veto_type=vwap_veto,
-                veto_reason=f"VWAP偏离超过{self.config.vwap_deviation_hard_block*100:.1f}%",
+                veto_reason=(
+                    "VWAP数据缺失"
+                    if missing_vwap_block
+                    else f"VWAP偏离超过{self.config.vwap_deviation_hard_block*100:.1f}%"
+                ),
                 signal_type_1h=details_1h.get('signal_type'),
                 vwap_score=0.0,
                 vwap_deviation=vwap_deviation,
@@ -4681,7 +4705,7 @@ class MACDStrategyV2Engine:
         score += float(flip_bullish_sniper_bonus)
 
         # VWAP评分
-        score_vwap = vwap_score
+        score_vwap = float(vwap_details.get("vwap_alpha_score", 0.0))
         score += score_vwap
 
         score_15m = 0.0
@@ -5099,6 +5123,9 @@ class MACDStrategyV2Engine:
             'shrink_exit_direction': shrink_4h_context["exit_direction"],
             'shrink_exit_ready': shrink_4h_context["shrink_exit_ready"],
             'vwap_score': vwap_score,
+            'vwap_quality_score': float(vwap_details.get("vwap_quality_score", vwap_score)),
+            'vwap_alpha_score': float(vwap_details.get("vwap_alpha_score", score_vwap)),
+            'vwap_missing': bool(vwap_details.get("vwap_missing", False)),
             'vwap_deviation': (close_price - vwap) / vwap if vwap > 0 else 0,
             'vwap_state': vwap_state,
             'vwap_location_score': vwap_location_score,

@@ -4,6 +4,7 @@ import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import pytest
@@ -27,6 +28,7 @@ from scripts.backtest_macd_v2 import (
 from src.app.fund_flow_bot import TradingBot
 from src.fund_flow.decision_engine import FundFlowDecisionEngine
 from src.fund_flow.models import FundFlowDecision, Operation
+from src.fund_flow.risk_engine import FundFlowRiskEngine
 from scripts.analyze_backtest_trades import build_cancel_quality_summary
 from scripts.diagnose_ioc_fallback import diagnose_ioc_fallback
 from scripts.diagnose_macd_v2_mdd_round1 import diagnose_mdd_round1
@@ -243,6 +245,7 @@ def test_build_strategy_config_loads_short_vwap_entry_floors() -> None:
                     "min_vwap_score_for_entry": 0.10,
                     "short_min_vwap_score_for_entry": 0.12,
                     "flip_bearish_short_min_vwap_score_for_entry": 0.25,
+                    "require_vwap_for_entry": True,
                 }
             }
         }
@@ -253,6 +256,7 @@ def test_build_strategy_config_loads_short_vwap_entry_floors() -> None:
     assert config.min_vwap_score_for_entry == pytest.approx(0.10)
     assert config.short_min_vwap_score_for_entry == pytest.approx(0.12)
     assert config.flip_bearish_short_min_vwap_score_for_entry == pytest.approx(0.25)
+    assert config.require_vwap_for_entry is True
 
 
 def test_build_strategy_config_loads_resonance_gate_settings() -> None:
@@ -286,17 +290,15 @@ def test_build_strategy_config_loads_resonance_gate_settings() -> None:
 
 
 def test_candidate_ablation_configs_apply_expected_vwap_and_resonance_settings() -> None:
-    live_cfg = json.loads(Path("config/trading_config_fund_flow.json").read_text(encoding="utf-8"))
     candidate_a = json.loads(Path("config/candidate_a_no_vwap_gate.json").read_text(encoding="utf-8"))
     candidate_b = json.loads(Path("config/candidate_b_no_vwap_score.json").read_text(encoding="utf-8"))
     candidate_c = json.loads(Path("config/candidate_c_resonance_gate.json").read_text(encoding="utf-8"))
 
-    live_v2 = live_cfg["fund_flow"]["macd_mtf_strategy_v2"]
     a_v2 = candidate_a["fund_flow"]["macd_mtf_strategy_v2"]
     b_v2 = candidate_b["fund_flow"]["macd_mtf_strategy_v2"]
     c_v2 = candidate_c["fund_flow"]["macd_mtf_strategy_v2"]
 
-    for v2 in (live_v2, a_v2, b_v2, c_v2):
+    for v2 in (a_v2, b_v2, c_v2):
         filters = v2["entry_filters"]
         assert filters["min_vwap_score_for_entry"] == pytest.approx(0.0)
         assert filters["short_min_vwap_score_for_entry"] == pytest.approx(0.0)
@@ -341,6 +343,62 @@ def test_live_fund_flow_config_prioritizes_1h_over_4h_and_blacklists_jst() -> No
     assert thresholds["red_bar_growing"] == pytest.approx(0.64)
     assert thresholds["primary_4h_long_without_1h_growth"] == pytest.approx(0.66)
     assert "JSTUSDT" in fund_flow["symbol_blacklist"]
+
+
+def test_live_config_blocks_zero_vwap_low_volume_entries() -> None:
+    cfg = json.loads(Path("config/trading_config_fund_flow.json").read_text(encoding="utf-8"))
+    v2 = cfg["fund_flow"]["macd_mtf_strategy_v2"]
+    filters = v2["entry_filters"]
+    position_mgmt = v2["position_management"]
+
+    assert filters["min_vwap_score_for_entry"] >= 0.10
+    assert filters["short_min_vwap_score_for_entry"] >= 0.14
+    assert filters["flip_bearish_short_min_vwap_score_for_entry"] >= 0.20
+    assert filters["vol_vwap_warn_min_vwap_score"] >= 0.10
+    assert filters["require_vwap_for_entry"] is True
+    assert position_mgmt["vol_vwap_warn_position_scale"] == pytest.approx(0.0)
+    assert cfg["fund_flow"]["dca_min_original_vwap_score"] == pytest.approx(0.12)
+    assert cfg["fund_flow"]["dca_min_original_composite_score"] == pytest.approx(0.70)
+    assert cfg["fund_flow"]["dca_block_on_original_vol_vwap_warn"] is True
+
+
+def test_vwap_quality_score_is_independent_from_weighted_alpha() -> None:
+    engine = MACDStrategyV2Engine(MACDStrategyV2Config(weight_vwap=0.0))
+
+    vwap_score, veto, details = engine.calculate_vwap_score(
+        price=100.1,
+        vwap=100.0,
+        direction="long",
+        structural_vwap=99.9,
+        price_series=pd.Series([99.8, 100.1]).to_numpy(),
+        session_vwap_series=pd.Series([100.0, 100.0]).to_numpy(),
+        structural_vwap_series=pd.Series([99.9, 99.9]).to_numpy(),
+    )
+
+    assert veto == VetoType.NONE
+    assert vwap_score > 0.0
+    assert details["vwap_quality_score"] == pytest.approx(vwap_score)
+    assert details["vwap_alpha_score"] == pytest.approx(0.0)
+    assert details["vwap_missing"] is False
+
+
+def test_missing_vwap_hard_blocks_when_required() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(weight_vwap=0.05, require_vwap_for_entry=True)
+    )
+
+    vwap_score, veto, details = engine.calculate_vwap_score(
+        price=100.0,
+        vwap=0.0,
+        direction="long",
+    )
+
+    assert vwap_score == pytest.approx(0.0)
+    assert veto == VetoType.VWAP_MISSING_HARD_BLOCK
+    assert details["state"] == "no_vwap"
+    assert details["vwap_quality_score"] == pytest.approx(0.0)
+    assert details["vwap_alpha_score"] == pytest.approx(0.0)
+    assert details["vwap_missing"] is True
 
 
 def test_primary_4h_long_without_1h_growth_uses_higher_threshold() -> None:
@@ -870,6 +928,304 @@ def test_entry_gate_block_logs_position_scaling_breakdown(capsys: pytest.Capture
     assert extra["resonance_gate_adjusted_portion"] == pytest.approx(0.0007)
     assert extra["session_risk_position_scale"] == pytest.approx(0.65)
     assert extra["symbol_risk_effective_session_scale"] == pytest.approx(0.65)
+
+
+def test_probe_min_open_portion_can_be_smaller_than_global_open_floor() -> None:
+    runtime_cfg = {
+        "fund_flow": {
+            "probe_min_open_portion": 0.0002,
+            "min_open_portion": 0.06,
+        }
+    }
+
+    merged, _ = resolve_runtime_config_for_backtest(runtime_cfg, strict_live_mode=True)
+
+    assert merged["fund_flow"]["probe_min_open_portion"] == pytest.approx(0.0002)
+    assert merged["fund_flow"]["min_open_portion"] == pytest.approx(0.06)
+
+
+def test_risk_engine_uses_probe_specific_min_open_portion_for_probe_entries() -> None:
+    engine = FundFlowRiskEngine({"fund_flow": {"min_open_portion": 0.06, "probe_min_open_portion": 0.0002}})
+    decision = FundFlowDecision(
+        operation=Operation.SELL,
+        symbol="ONDOUSDT",
+        target_portion_of_balance=0.0007,
+        metadata={"rsi_probe_mode": True},
+    )
+
+    validated = engine.validate_decision(decision)
+
+    assert validated.target_portion_of_balance == pytest.approx(0.0007)
+    assert engine.resolve_min_open_portion(decision) == pytest.approx(0.0002)
+
+
+def _build_dca_quality_test_bot(entry_quality=None):
+    bot = object.__new__(TradingBot)
+    bot.config = {
+        "fund_flow": {
+            "dca_min_original_vwap_score": 0.12,
+            "dca_min_original_composite_score": 0.70,
+            "dca_block_on_original_vol_vwap_warn": True,
+        }
+    }
+    bot._dca_stage_by_pos = {}
+    bot._entry_quality_by_pos = {}
+    if entry_quality is not None:
+        bot._entry_quality_by_pos["PUMPUSDT:LONG"] = dict(entry_quality)
+    bot._to_float = TradingBot._to_float
+    bot._to_bool = TradingBot._to_bool
+    bot._position_track_key = TradingBot._position_track_key
+    bot._position_drawdown_ratio = lambda position, current_price: 0.02
+    bot._save_risk_state = lambda: None
+    bot.fund_flow_decision_engine = SimpleNamespace(
+        entry_slippage=0.001,
+        take_profit_pct=0.03,
+        stop_loss_pct=0.01,
+        default_leverage=4,
+    )
+    return bot
+
+
+def _dca_test_args() -> dict:
+    return {
+        "symbol": "PUMPUSDT",
+        "position": {"side": "LONG", "leverage": 4},
+        "current_price": 1.0,
+        "base_decision": FundFlowDecision(
+            operation=Operation.BUY,
+            symbol="PUMPUSDT",
+            target_portion_of_balance=0.10,
+            metadata={"signal_score": 0.80},
+        ),
+        "trigger_context": {"source": "test"},
+        "dca_cfg": {
+            "enabled": True,
+            "max_additions": 1,
+            "drawdown_thresholds": [0.01],
+            "multipliers": [1.0],
+            "base_add_portion": 0.20,
+            "disable_above_leverage": 9,
+            "allow_high_leverage_opt_in": False,
+            "effective_leverage": 4,
+        },
+    }
+
+
+def test_dca_blocks_when_original_entry_had_vol_vwap_warn() -> None:
+    bot = _build_dca_quality_test_bot(
+        {"vwap_quality_score": 0.40, "vol_vwap_warn": True, "composite_score": 0.90}
+    )
+
+    assert bot._build_dca_decision(**_dca_test_args()) is None
+
+
+def test_dca_blocks_when_original_entry_vwap_quality_is_too_low() -> None:
+    bot = _build_dca_quality_test_bot(
+        {"vwap_quality_score": 0.08, "vol_vwap_warn": False, "composite_score": 0.90}
+    )
+
+    assert bot._build_dca_decision(**_dca_test_args()) is None
+
+
+def test_dca_blocks_when_original_entry_composite_is_too_low() -> None:
+    bot = _build_dca_quality_test_bot(
+        {"vwap_quality_score": 0.40, "vol_vwap_warn": False, "composite_score": 0.60}
+    )
+
+    assert bot._build_dca_decision(**_dca_test_args()) is None
+
+
+def test_dca_blocks_when_original_entry_quality_metadata_is_missing() -> None:
+    bot = _build_dca_quality_test_bot(entry_quality=None)
+
+    assert bot._build_dca_decision(**_dca_test_args()) is None
+
+
+def test_dca_allows_good_original_entry_when_drawdown_threshold_is_met() -> None:
+    bot = _build_dca_quality_test_bot(
+        {"vwap_quality_score": 0.40, "vol_vwap_warn": False, "composite_score": 0.90}
+    )
+
+    decision = bot._build_dca_decision(**_dca_test_args())
+
+    assert decision is not None
+    assert decision.metadata["dca_triggered"] is True
+    assert decision.metadata["dca_original_entry_quality_passed"] is True
+
+
+def _build_probe_gate_test_bot(decision_factory):
+    bot = object.__new__(TradingBot)
+    gate_logs = []
+    bot.config = {"fund_flow": {"probe_same_side_cooldown_seconds": 3600}}
+    bot._consecutive_losses = 0
+    bot._cooldown_reason = None
+    bot._cooldown_expires = None
+    bot._daily_open_equity = None
+    bot._daily_open_date = None
+    bot._peak_equity = None
+    bot._dca_stage_by_pos = {}
+    bot._winner_pyramid_stage_by_pos = {}
+    bot._protection_plan_by_pos = {}
+    bot._conflict_exit_streak_by_symbol = {}
+    bot._conflict_cooldown_until_by_symbol = {}
+    bot._conflict_cooldown_reason_by_symbol = {}
+    bot._probe_same_side_cooldown_until_by_symbol_side = {}
+    bot._probe_same_side_cooldown_reason_by_symbol_side = {}
+    bot._decision_kline_context = lambda flow_context, md: ("15m", {"timestamp": "2026-05-07T00:15:00+00:00"})
+    bot._materialize_flow_snapshot = lambda symbol, market_data: (
+        None,
+        SimpleNamespace(signal_strength=1.0, timestamp=datetime(2026, 5, 7, 0, 15, tzinfo=timezone.utc)),
+        {},
+    )
+    bot._update_extreme_volatility_state = lambda symbol, flow_context: {"blocked": False}
+    bot._conflict_symbol_cooldown_state = lambda symbol: {"blocked": False}
+    bot.fund_flow_trigger_engine = SimpleNamespace(
+        should_trigger=lambda **kwargs: True,
+        evaluate_signal_pool=lambda **kwargs: {"passed": True},
+    )
+    bot._entry_window_state = lambda: {"allowed": True, "reason": "test"}
+    bot._ma10_macd_confluence_config = lambda: {"enabled": False}
+    bot.fund_flow_decision_engine = SimpleNamespace(decide=lambda **kwargs: decision_factory())
+    bot._is_ai_gate_enabled = lambda: False
+    bot._resolve_runtime_signal_pool_config = lambda pool_id: {}
+    bot._apply_ma10_macd_entry_filter = lambda symbol, decision: decision
+    bot._apply_pretrade_risk_gate = lambda **kwargs: (kwargs["decision"], {"action": "BYPASS"})
+    bot._is_cooldown_active = lambda: False
+    bot._cooldown_remaining_seconds = lambda: 0
+    bot._cooldown_reason = None
+    bot._resolve_min_open_portion_for_decision = lambda decision: 0.01
+    bot._decision_signal_score = lambda decision, flow_context: 0.8
+    bot._resolve_dynamic_max_active_symbols = lambda **kwargs: (kwargs["base_max_active_symbols"], {})
+    bot._execute_and_log_decision = lambda **kwargs: None
+    bot._log_entry_gate_block = lambda **kwargs: gate_logs.append(kwargs)
+    return bot, gate_logs
+
+
+def test_no_trade_probe_short_against_dual_green_growth_is_blocked() -> None:
+    def decision_factory() -> FundFlowDecision:
+        return FundFlowDecision(
+            operation=Operation.SELL,
+            symbol="ONDOUSDT",
+            target_portion_of_balance=0.10,
+            leverage=3,
+            metadata={
+                "rsi_probe_mode": True,
+                "engine": "NO_TRADE",
+                "regime": "NO_TRADE",
+                "signal_type_1h": "green_bar_growing",
+                "macd_v2_debug": {
+                    "signal_type_4h": "green_bar_growing",
+                },
+            },
+        )
+
+    bot, gate_logs = _build_probe_gate_test_bot(decision_factory)
+    pending_new_entries = []
+
+    bot._execute_symbol_signal_decision(
+        symbol="ONDOUSDT",
+        market_data={},
+        position=None,
+        current_price=0.317,
+        account_summary={"available_balance": 100.0, "equity": 100.0},
+        pending_new_entries=pending_new_entries,
+        protection_gap_symbols=[],
+        block_new_entries_due_to_protection_gap=False,
+        allow_new_entries=True,
+        ff_cfg={},
+        max_active_symbols=5,
+        max_symbol_position_portion=0.35,
+        add_position_portion=0.60,
+        risk_guard_enabled=False,
+    )
+
+    assert pending_new_entries == []
+    assert len(gate_logs) == 1
+    assert gate_logs[0]["gate"] == "probe_no_trade_structure_guard"
+    assert "green_bar_growing" in gate_logs[0]["reason"]
+
+
+def test_probe_same_symbol_same_side_cooldown_blocks_repeated_entries_then_recovers() -> None:
+    def decision_factory() -> FundFlowDecision:
+        return FundFlowDecision(
+            operation=Operation.SELL,
+            symbol="JUPUSDT",
+            target_portion_of_balance=0.10,
+            leverage=3,
+            metadata={
+                "rsi_probe_mode": True,
+                "engine": "TREND",
+                "regime": "TREND",
+                "signal_type_1h": "green_bar_growing",
+                "macd_v2_debug": {
+                    "signal_type_4h": "red_bar_shrinking",
+                },
+            },
+        )
+
+    bot, gate_logs = _build_probe_gate_test_bot(decision_factory)
+
+    first_pending = []
+    bot._execute_symbol_signal_decision(
+        symbol="JUPUSDT",
+        market_data={},
+        position=None,
+        current_price=0.1985,
+        account_summary={"available_balance": 100.0, "equity": 100.0},
+        pending_new_entries=first_pending,
+        protection_gap_symbols=[],
+        block_new_entries_due_to_protection_gap=False,
+        allow_new_entries=True,
+        ff_cfg={},
+        max_active_symbols=5,
+        max_symbol_position_portion=0.35,
+        add_position_portion=0.60,
+        risk_guard_enabled=False,
+    )
+    assert len(first_pending) == 1
+    assert gate_logs == []
+
+    second_pending = []
+    bot._execute_symbol_signal_decision(
+        symbol="JUPUSDT",
+        market_data={},
+        position=None,
+        current_price=0.1985,
+        account_summary={"available_balance": 100.0, "equity": 100.0},
+        pending_new_entries=second_pending,
+        protection_gap_symbols=[],
+        block_new_entries_due_to_protection_gap=False,
+        allow_new_entries=True,
+        ff_cfg={},
+        max_active_symbols=5,
+        max_symbol_position_portion=0.35,
+        add_position_portion=0.60,
+        risk_guard_enabled=False,
+    )
+    assert second_pending == []
+    assert gate_logs[-1]["gate"] == "probe_same_side_cooldown"
+
+    bot._probe_same_side_cooldown_until_by_symbol_side["JUPUSDT:SHORT"] = (
+        datetime.now(timezone.utc) - timedelta(seconds=1)
+    )
+    third_pending = []
+    bot._execute_symbol_signal_decision(
+        symbol="JUPUSDT",
+        market_data={},
+        position=None,
+        current_price=0.1985,
+        account_summary={"available_balance": 100.0, "equity": 100.0},
+        pending_new_entries=third_pending,
+        protection_gap_symbols=[],
+        block_new_entries_due_to_protection_gap=False,
+        allow_new_entries=True,
+        ff_cfg={},
+        max_active_symbols=5,
+        max_symbol_position_portion=0.35,
+        add_position_portion=0.60,
+        risk_guard_enabled=False,
+    )
+    assert len(third_pending) == 1
 
 
 def test_compare_live_backtest_alignment_marks_approved_diff_without_failing() -> None:

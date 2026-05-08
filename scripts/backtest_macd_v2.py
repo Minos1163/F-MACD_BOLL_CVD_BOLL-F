@@ -65,6 +65,7 @@ class BacktestConfig:
     default_target_portion: float = 0.60
     max_symbol_position_portion: float = 0.60
     min_open_portion: float = 0.06
+    probe_min_open_portion: float = 0.06
     
     # 杠杆配置
     min_leverage: int = 2
@@ -396,6 +397,9 @@ def build_backtest_config(
         default_target_portion=float(fund_flow_cfg.get("default_target_portion", position_limits["max_percent"])),
         max_symbol_position_portion=float(fund_flow_cfg.get("max_symbol_position_portion", position_limits["max_percent"])),
         min_open_portion=float(fund_flow_cfg.get("min_open_portion", position_limits["min_percent"])),
+        probe_min_open_portion=float(
+            fund_flow_cfg.get("probe_min_open_portion", fund_flow_cfg.get("min_open_portion", position_limits["min_percent"]))
+        ),
         min_leverage=int(leverage_cfg["min_leverage"]),
         default_leverage=int(leverage_cfg["default_leverage"]),
         max_leverage=int(leverage_cfg["max_leverage"]),
@@ -612,6 +616,7 @@ def build_strategy_config(runtime_cfg: dict) -> MACDStrategyV2Config:
         vol_vwap_warn_min_vwap_score=float(
             filter_cfg.get("vol_vwap_warn_min_vwap_score", filter_cfg.get("volume_vwap_both_low_min_vwap_score", 0.10))
         ),
+        require_vwap_for_entry=bool(filter_cfg.get("require_vwap_for_entry", False)),
         rsi_spring_recent_extreme_lookback=int(float(rsi_cfg.get("spring_recent_extreme_lookback", 6))),
         rsi_spring_recent_oversold=float(rsi_cfg.get("spring_recent_oversold", 40.0)),
         rsi_spring_recent_overbought=float(rsi_cfg.get("spring_recent_overbought", 60.0)),
@@ -1643,6 +1648,17 @@ class BacktestEngine:
             return max(0.0, (best_price - entry_price) / entry_price)
         best_price = float(row_15m.get("low", entry_price) or entry_price)
         return max(0.0, (entry_price - best_price) / entry_price)
+
+    @staticmethod
+    def _position_mae_ratio(pos: dict, row_15m: pd.Series) -> float:
+        entry_price = float(pos.get("entry_price", 0.0) or 0.0)
+        if entry_price <= 0:
+            return 0.0
+        if str(pos.get("side", "")).lower() == "long":
+            worst_price = float(row_15m.get("low", entry_price) or entry_price)
+            return min(0.0, (worst_price - entry_price) / entry_price)
+        worst_price = float(row_15m.get("high", entry_price) or entry_price)
+        return min(0.0, (entry_price - worst_price) / entry_price)
 
     @staticmethod
     def _position_hold_seconds(pos: dict, time_value: object) -> float:
@@ -2696,6 +2712,11 @@ class BacktestEngine:
             "direction_lock": signal_details.get("direction_lock"),
             "decision_reason": signal_details.get("decision_reason", getattr(signal, "reason", "")),
             "close_decision_weights": signal_details.get("close_decision_weights"),
+            "signal_type_1h": getattr(signal, "signal_type_1h", None) or signal_details.get("signal_type_1h"),
+            "signal_score": getattr(signal, "signal_score", None),
+            "max_favorable_ratio": self._position_mfe_ratio(pos, row_15m) if isinstance(row_15m, pd.Series) else 0.0,
+            "max_adverse_ratio": self._position_mae_ratio(pos, row_15m) if isinstance(row_15m, pd.Series) else 0.0,
+            "current_pnl_ratio": self._position_pnl_ratio(pos, price),
         }
 
     def _simulate_conflict_close_layers(self, symbol: str, pos: dict, analysis: dict) -> bool:

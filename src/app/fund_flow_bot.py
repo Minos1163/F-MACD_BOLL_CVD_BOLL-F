@@ -276,6 +276,7 @@ class TradingBot:
         self._protection_last_alert_ts: Dict[str, float] = {}
         self._pre_risk_exit_streak_by_pos: Dict[str, int] = {}
         self._dca_stage_by_pos: Dict[str, int] = {}
+        self._entry_quality_by_pos: Dict[str, Dict[str, Any]] = {}
         self._winner_pyramid_stage_by_pos: Dict[str, int] = {}
         self._protection_plan_by_pos: Dict[str, Dict[str, Any]] = {}
         self._opened_symbols_this_cycle: set[str] = set()
@@ -286,6 +287,8 @@ class TradingBot:
         self._conflict_exit_streak_by_symbol: Dict[str, int] = {}
         self._conflict_cooldown_until_by_symbol: Dict[str, datetime] = {}
         self._conflict_cooldown_reason_by_symbol: Dict[str, str] = {}
+        self._probe_same_side_cooldown_until_by_symbol_side: Dict[str, datetime] = {}
+        self._probe_same_side_cooldown_reason_by_symbol_side: Dict[str, str] = {}
         self._prev_imbalance_for_phantom: Dict[str, float] = {}
         self._micro_feature_history: Dict[str, Dict[str, Deque[float]]] = {}
         self._signal_registry_version: str = ""
@@ -2903,6 +2906,60 @@ class TradingBot:
             "streak": int(self._conflict_exit_streak_by_symbol.get(symbol_up, 0) or 0),
         }
 
+    @staticmethod
+    def _probe_same_side_cooldown_key(symbol: str, side: str) -> str:
+        return f"{str(symbol).upper()}:{str(side).upper()}"
+
+    def _probe_same_side_cooldown_seconds(self) -> int:
+        ff_cfg = self.config.get("fund_flow", {}) or {}
+        return max(0, int(self._to_float(ff_cfg.get("probe_same_side_cooldown_seconds", 3600), 3600)))
+
+    def _probe_same_side_cooldown_state(self, symbol: str, side: str) -> Dict[str, Any]:
+        key = self._probe_same_side_cooldown_key(symbol, side)
+        now = datetime.now(timezone.utc)
+        expiry = self._probe_same_side_cooldown_until_by_symbol_side.get(key)
+        if isinstance(expiry, datetime) and expiry <= now:
+            self._probe_same_side_cooldown_until_by_symbol_side.pop(key, None)
+            self._probe_same_side_cooldown_reason_by_symbol_side.pop(key, None)
+            self._save_risk_state()
+            expiry = None
+        blocked = isinstance(expiry, datetime) and expiry > now
+        remaining = int((expiry - now).total_seconds()) if blocked else 0
+        return {
+            "enabled": self._probe_same_side_cooldown_seconds() > 0,
+            "blocked": bool(blocked),
+            "remaining_seconds": max(0, remaining),
+            "reason": self._probe_same_side_cooldown_reason_by_symbol_side.get(key),
+        }
+
+    def _activate_probe_same_side_cooldown(self, symbol: str, side: str, reason: str) -> None:
+        cooldown_seconds = self._probe_same_side_cooldown_seconds()
+        if cooldown_seconds <= 0:
+            return
+        key = self._probe_same_side_cooldown_key(symbol, side)
+        until = datetime.now(timezone.utc) + timedelta(seconds=cooldown_seconds)
+        prev_until = self._probe_same_side_cooldown_until_by_symbol_side.get(key)
+        if not isinstance(prev_until, datetime) or prev_until < until:
+            self._probe_same_side_cooldown_until_by_symbol_side[key] = until
+        self._probe_same_side_cooldown_reason_by_symbol_side[key] = str(reason or "probe_same_side_cooldown")
+        self._save_risk_state()
+
+    def _is_probe_no_trade_structure_blocked(self, decision: FundFlowDecision) -> Tuple[bool, str]:
+        md = decision.metadata if isinstance(getattr(decision, "metadata", None), dict) else {}
+        if not bool(md.get("rsi_probe_mode", False)):
+            return False, ""
+        regime = str(md.get("engine") or md.get("regime") or "").upper()
+        if regime != "NO_TRADE":
+            return False, ""
+        if decision.operation != FundFlowOperation.SELL:
+            return False, ""
+        signal_1h = str(md.get("signal_type_1h") or md.get("signal_1h") or "-")
+        macd_v2_debug = md.get("macd_v2_debug") if isinstance(md.get("macd_v2_debug"), dict) else {}
+        signal_4h = str(md.get("signal_type_4h") or macd_v2_debug.get("signal_type_4h") or "-")
+        if signal_1h == "green_bar_growing" and signal_4h == "green_bar_growing":
+            return True, "no_trade_probe_short_blocked_1h_4h_green_bar_growing"
+        return False, ""
+
     def _update_conflict_symbol_cooldown_after_close(
         self,
         *,
@@ -3562,6 +3619,15 @@ class TradingBot:
         if drawdown_ratio < threshold:
             return None
 
+        dca_quality_passed, dca_quality_details = self._evaluate_dca_original_entry_quality(pos_key)
+        if not dca_quality_passed:
+            print(
+                f"   DCA blocked: original entry quality insufficient "
+                f"symbol={symbol} side={side} "
+                f"reason={dca_quality_details.get('dca_original_entry_quality_reason', 'unknown')}"
+            )
+            return None
+
         base_add_portion = float(cfg.get("base_add_portion", 0.2) or 0.2)
         multiplier = float(multipliers[current_stage])
         target_portion = max(0.0, base_add_portion * multiplier)
@@ -3602,6 +3668,8 @@ class TradingBot:
             "dca_multiplier": multiplier,
             "dca_drawdown": drawdown_ratio,
             "dca_effective_leverage": effective_leverage,
+            "dca_original_entry_quality_passed": True,
+            **dca_quality_details,
         }
         reason = (
             f"DCA/马丁触发 stage={current_stage + 1}/{max_additions}, "
@@ -3746,6 +3814,13 @@ class TradingBot:
                     if isinstance(k, str) and stage >= 0:
                         dca_state[k] = stage
             self._dca_stage_by_pos = dca_state
+            raw_entry_quality = data.get("entry_quality_by_pos", {})
+            entry_quality: Dict[str, Dict[str, Any]] = {}
+            if isinstance(raw_entry_quality, dict):
+                for k, v in raw_entry_quality.items():
+                    if isinstance(k, str) and isinstance(v, dict):
+                        entry_quality[k.upper()] = dict(v)
+            self._entry_quality_by_pos = entry_quality
             raw_winner_state = data.get("winner_pyramid_stage_by_pos", {})
             winner_state: Dict[str, int] = {}
             if isinstance(raw_winner_state, dict):
@@ -3786,6 +3861,23 @@ class TradingBot:
                     if isinstance(k, str) and isinstance(v, str):
                         conflict_reason[k.upper()] = v
             self._conflict_cooldown_reason_by_symbol = conflict_reason
+            raw_probe_cooldown = data.get("probe_same_side_cooldown_until_by_symbol_side", {})
+            probe_cooldown: Dict[str, datetime] = {}
+            if isinstance(raw_probe_cooldown, dict):
+                for k, v in raw_probe_cooldown.items():
+                    if not isinstance(k, str):
+                        continue
+                    dt = self._parse_iso_datetime(v)
+                    if isinstance(dt, datetime):
+                        probe_cooldown[k.upper()] = dt
+            self._probe_same_side_cooldown_until_by_symbol_side = probe_cooldown
+            raw_probe_reason = data.get("probe_same_side_cooldown_reason_by_symbol_side", {})
+            probe_reason: Dict[str, str] = {}
+            if isinstance(raw_probe_reason, dict):
+                for k, v in raw_probe_reason.items():
+                    if isinstance(k, str) and isinstance(v, str):
+                        probe_reason[k.upper()] = v
+            self._probe_same_side_cooldown_reason_by_symbol_side = probe_reason
             raw_protection_plan = data.get("protection_plan_by_pos", {})
             protection_plan: Dict[str, Dict[str, Any]] = {}
             if isinstance(raw_protection_plan, dict):
@@ -3824,6 +3916,7 @@ class TradingBot:
             "daily_open_date": self._daily_open_date,
             "peak_equity": self._peak_equity,
             "dca_stage_by_pos": self._dca_stage_by_pos,
+            "entry_quality_by_pos": self._entry_quality_by_pos,
             "winner_pyramid_stage_by_pos": self._winner_pyramid_stage_by_pos,
             "protection_plan_by_pos": self._protection_plan_by_pos,
             "conflict_exit_streak_by_symbol": self._conflict_exit_streak_by_symbol,
@@ -3831,6 +3924,12 @@ class TradingBot:
                 k: v.isoformat() for k, v in self._conflict_cooldown_until_by_symbol.items() if isinstance(v, datetime)
             },
             "conflict_cooldown_reason_by_symbol": self._conflict_cooldown_reason_by_symbol,
+            "probe_same_side_cooldown_until_by_symbol_side": {
+                k: v.isoformat()
+                for k, v in self._probe_same_side_cooldown_until_by_symbol_side.items()
+                if isinstance(v, datetime)
+            },
+            "probe_same_side_cooldown_reason_by_symbol_side": self._probe_same_side_cooldown_reason_by_symbol_side,
             "updated_at": datetime.now().isoformat(),
         }
         try:
@@ -4972,6 +5071,68 @@ class TradingBot:
     def _position_track_key(symbol: str, side: str) -> str:
         return f"{str(symbol).upper()}:{str(side).upper()}"
 
+    def _dca_original_entry_quality_config(self) -> Dict[str, Any]:
+        ff_cfg = self.config.get("fund_flow", {}) if isinstance(self.config.get("fund_flow", {}), dict) else {}
+        return {
+            "min_vwap_score": max(0.0, min(1.0, self._to_float(ff_cfg.get("dca_min_original_vwap_score"), 0.12))),
+            "min_composite_score": max(
+                0.0,
+                min(1.0, self._to_float(ff_cfg.get("dca_min_original_composite_score"), 0.70)),
+            ),
+            "block_on_vol_vwap_warn": self._to_bool(ff_cfg.get("dca_block_on_original_vol_vwap_warn"), True),
+        }
+
+    def _evaluate_dca_original_entry_quality(self, pos_key: str) -> Tuple[bool, Dict[str, Any]]:
+        cfg = self._dca_original_entry_quality_config()
+        meta = self._entry_quality_by_pos.get(str(pos_key).upper())
+        details: Dict[str, Any] = {
+            "dca_original_entry_quality_checked": True,
+            "dca_min_original_vwap_score": cfg["min_vwap_score"],
+            "dca_min_original_composite_score": cfg["min_composite_score"],
+            "dca_block_on_original_vol_vwap_warn": cfg["block_on_vol_vwap_warn"],
+        }
+        if not isinstance(meta, dict):
+            details["dca_original_entry_quality_reason"] = "missing_original_entry_metadata"
+            return False, details
+
+        vwap_quality = self._to_float(meta.get("vwap_quality_score", meta.get("vwap_score")), 0.0)
+        composite_score = self._to_float(meta.get("composite_score", meta.get("signal_score")), 0.0)
+        vol_vwap_warn = bool(meta.get("vol_vwap_warn", True))
+        details.update(
+            dca_original_vwap_quality_score=vwap_quality,
+            dca_original_composite_score=composite_score,
+            dca_original_vol_vwap_warn=vol_vwap_warn,
+        )
+        if vwap_quality < float(cfg["min_vwap_score"]):
+            details["dca_original_entry_quality_reason"] = "vwap_quality_too_low"
+            return False, details
+        if bool(cfg["block_on_vol_vwap_warn"]) and vol_vwap_warn:
+            details["dca_original_entry_quality_reason"] = "vol_vwap_warn"
+            return False, details
+        if composite_score < float(cfg["min_composite_score"]):
+            details["dca_original_entry_quality_reason"] = "composite_score_too_low"
+            return False, details
+
+        details["dca_original_entry_quality_reason"] = "pass"
+        return True, details
+
+    def _entry_quality_snapshot_from_metadata(self, metadata: Dict[str, Any], decision: FundFlowDecision) -> Dict[str, Any]:
+        signal_score = self._to_float(metadata.get("signal_score", metadata.get("score")), 0.0)
+        vwap_quality = self._to_float(
+            metadata.get("vwap_quality_score", metadata.get("vwap_score")),
+            0.0,
+        )
+        return {
+            "vwap_quality_score": vwap_quality,
+            "vwap_score": self._to_float(metadata.get("vwap_score"), vwap_quality),
+            "vwap_alpha_score": self._to_float(metadata.get("vwap_alpha_score", metadata.get("score_vwap")), 0.0),
+            "vol_vwap_warn": bool(metadata.get("vol_vwap_warn", True)),
+            "signal_score": signal_score,
+            "composite_score": self._to_float(metadata.get("composite_score", metadata.get("total_score")), signal_score),
+            "reason": str(getattr(decision, "reason", "") or ""),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
     def _update_position_extrema(self, symbol: str, position: Dict[str, Any], current_price: float) -> None:
         side = str(position.get("side", "")).upper()
         if side not in ("LONG", "SHORT") or current_price <= 0:
@@ -5006,14 +5167,20 @@ class TradingBot:
             k for k in list(self._dca_stage_by_pos.keys())
             if k.startswith(prefix) and (keep_key is None or k != keep_key)
         ]
+        entry_quality_keys = [
+            k for k in list(self._entry_quality_by_pos.keys())
+            if k.startswith(prefix) and (keep_key is None or k != keep_key)
+        ]
         winner_keys = [
             k for k in list(self._winner_pyramid_stage_by_pos.keys())
             if k.startswith(prefix) and (keep_key is None or k != keep_key)
         ]
-        if not dca_keys and not winner_keys:
+        if not dca_keys and not entry_quality_keys and not winner_keys:
             return
         for key in dca_keys:
             self._dca_stage_by_pos.pop(key, None)
+        for key in entry_quality_keys:
+            self._entry_quality_by_pos.pop(key, None)
         for key in winner_keys:
             self._winner_pyramid_stage_by_pos.pop(key, None)
         self._save_risk_state()
@@ -6119,6 +6286,14 @@ class TradingBot:
             extra["symbol_risk_effective_session_scale"] = symbol_risk.get("effective_session_scale")
         return extra
 
+    def _resolve_min_open_portion_for_decision(self, decision: FundFlowDecision) -> float:
+        if hasattr(self.fund_flow_risk_engine, "resolve_min_open_portion"):
+            return float(self.fund_flow_risk_engine.resolve_min_open_portion(decision))
+        return max(
+            0.01,
+            float(getattr(self.fund_flow_risk_engine, "min_open_portion", 0.1) or 0.1),
+        )
+
     def _is_ai_gate_enabled(self) -> bool:
         ff_cfg = self.config.get("fund_flow", {}) or {}
         ds_router_cfg = ff_cfg.get("deepseek_weight_router", {}) if isinstance(ff_cfg.get("deepseek_weight_router"), dict) else {}
@@ -6141,6 +6316,7 @@ class TradingBot:
         if decision.operation == FundFlowOperation.CLOSE:
             for pos_side in ("LONG", "SHORT"):
                 self._protection_plan_by_pos.pop(self._position_track_key(symbol, pos_side), None)
+                self._entry_quality_by_pos.pop(self._position_track_key(symbol, pos_side), None)
             self._save_risk_state()
             self._clear_dca_tracking_for_symbol(symbol)
             return
@@ -6178,6 +6354,8 @@ class TradingBot:
         dca_triggered = bool(md.get("dca_triggered"))
         winner_triggered = bool(md.get("winner_pyramiding_triggered"))
         if not dca_triggered and not winner_triggered:
+            self._entry_quality_by_pos[pos_key] = self._entry_quality_snapshot_from_metadata(md, decision)
+            changed = True
             if changed:
                 self._save_risk_state()
             return
@@ -7760,7 +7938,7 @@ class TradingBot:
             if isinstance(position, dict):
                 current_side = str(position.get("side", "")).upper()
                 current_portion = self._estimate_position_portion(position, account_summary)
-                min_open_portion = max(0.01, float(getattr(self.fund_flow_risk_engine, "min_open_portion", 0.1) or 0.1))
+                min_open_portion = self._resolve_min_open_portion_for_decision(decision)
                 local_max_symbol_position_portion = self._normalize_percent_to_ratio(
                     engine_override.get("max_symbol_position_portion", max_symbol_position_portion),
                     max_symbol_position_portion,
@@ -7937,6 +8115,24 @@ class TradingBot:
                         "macd_weight": self._to_float(conflict_cfg_local.get("close_decision_macd_weight"), 0.30),
                         "kdj_weight": self._to_float(conflict_cfg_local.get("close_decision_kdj_weight"), 0.15),
                     }
+                    pos_key_runtime = self._position_track_key(symbol, current_side)
+                    first_seen_runtime = self._position_first_seen_ts.get(pos_key_runtime)
+                    hold_seconds_runtime = (
+                        max(0, int(time.time() - float(first_seen_runtime)))
+                        if first_seen_runtime is not None
+                        else 0
+                    )
+                    ext_runtime_raw = self._position_extrema_by_pos.get(pos_key_runtime)
+                    ext_runtime: Dict[str, float] = ext_runtime_raw if isinstance(ext_runtime_raw, dict) else {}
+                    mfe_runtime = max(0.0, float(ext_runtime.get("max_favorable_ratio", 0.0))) * 100.0
+                    mae_runtime = min(0.0, float(ext_runtime.get("max_adverse_ratio", 0.0))) * 100.0
+                    entry_price_runtime = self._to_float(position.get("entry_price"), 0.0)
+                    current_pnl_ratio_runtime = 0.0
+                    if entry_price_runtime > 0 and current_price > 0:
+                        if current_side == "LONG":
+                            current_pnl_ratio_runtime = (current_price - entry_price_runtime) / entry_price_runtime
+                        elif current_side == "SHORT":
+                            current_pnl_ratio_runtime = (entry_price_runtime - current_price) / entry_price_runtime
                     
                     protection = self.risk_manager.check_position_protection(
                         symbol=symbol,
@@ -7964,6 +8160,14 @@ class TradingBot:
                         trap_score=trap_now,
                         direction_lock=str(decision_md.get("direction_lock", "") or ""),
                         close_decision_weights=close_decision_weights,
+                        signal_type_1h=str(decision_md.get("signal_type_1h") or decision_md.get("signal_1h") or ""),
+                        signal_score=self._to_float(
+                            decision_md.get("signal_score", decision_md.get("score")),
+                            0.0,
+                        ),
+                        max_favorable_ratio=max(0.0, float(ext_runtime.get("max_favorable_ratio", 0.0))),
+                        max_adverse_ratio=min(0.0, float(ext_runtime.get("max_adverse_ratio", 0.0))),
+                        current_pnl_ratio=current_pnl_ratio_runtime,
                     )
                     protection_level = protection.get("level", "neutral")
                     risk_state = str(protection.get("risk_state", "HOLD")).upper()
@@ -7974,17 +8178,6 @@ class TradingBot:
                     elif protection_level == "conflict_light":
                         protection_action = "freeze_add+tighten" if bool(protection.get("tighten_trailing", False)) else "freeze_add_only"
                     gate_score_now = self._to_float(gate_meta.get("score"), 0.0)
-                    pos_key_runtime = self._position_track_key(symbol, current_side)
-                    first_seen_runtime = self._position_first_seen_ts.get(pos_key_runtime)
-                    hold_seconds_runtime = (
-                        max(0, int(time.time() - float(first_seen_runtime)))
-                        if first_seen_runtime is not None
-                        else 0
-                    )
-                    ext_runtime_raw = self._position_extrema_by_pos.get(pos_key_runtime)
-                    ext_runtime: Dict[str, float] = ext_runtime_raw if isinstance(ext_runtime_raw, dict) else {}
-                    mfe_runtime = max(0.0, float(ext_runtime.get("max_favorable_ratio", 0.0))) * 100.0
-                    mae_runtime = min(0.0, float(ext_runtime.get("max_adverse_ratio", 0.0))) * 100.0
                     print(
                         "🧪 风控摘要 "
                         f"symbol={symbol} engine={str(decision_md.get('engine') or decision_md.get('regime') or '-').upper()} "
@@ -8017,14 +8210,6 @@ class TradingBot:
                         decision_md["risk_breakeven_fee_buffer"] = float(protection.get("breakeven_fee_buffer", 0.0) or 0.0)
                     except Exception:
                         pass
-
-                    entry_price_runtime = self._to_float(position.get("entry_price"), 0.0)
-                    current_pnl_ratio_runtime = 0.0
-                    if entry_price_runtime > 0 and current_price > 0:
-                        if current_side == "LONG":
-                            current_pnl_ratio_runtime = (current_price - entry_price_runtime) / entry_price_runtime
-                        elif current_side == "SHORT":
-                            current_pnl_ratio_runtime = (entry_price_runtime - current_price) / entry_price_runtime
 
                     strict_trend_cfg = self._strict_trend_strategy_config()
                     trend_strategy_active = bool(strict_trend_cfg.get("trend_only_mode", False)) and (
@@ -8683,10 +8868,50 @@ class TradingBot:
                         extra={"open_new_entry": True},
                     )
                     continue
-                min_open_portion = max(
-                    0.01,
-                    float(getattr(self.fund_flow_risk_engine, "min_open_portion", 0.1) or 0.1),
-                )
+                probe_side = "LONG" if decision.operation == FundFlowOperation.BUY else "SHORT"
+                probe_metadata = decision.metadata if isinstance(getattr(decision, "metadata", None), dict) else {}
+                is_probe_entry = bool(probe_metadata.get("rsi_probe_mode", False))
+                if is_probe_entry:
+                    blocked, block_reason = self._is_probe_no_trade_structure_blocked(decision)
+                    if blocked:
+                        print(f"⏭️ {symbol} NO_TRADE probe 结构不满足，跳过开仓: reason={block_reason}")
+                        self._log_entry_gate_block(
+                            symbol=symbol,
+                            gate="probe_no_trade_structure_guard",
+                            reason=block_reason,
+                            threshold={"engine": "NO_TRADE", "signal_1h": "green_bar_growing", "signal_4h": "green_bar_growing"},
+                            value={"side": probe_side},
+                            decision=decision,
+                            flow_context=flow_context,
+                            trigger_context=trigger_context,
+                            market_data=market_data,
+                            flow_snapshot=flow_snapshot,
+                            side=probe_side,
+                            extra={"open_new_entry": True, "probe_entry": True},
+                        )
+                        continue
+                    probe_cd = self._probe_same_side_cooldown_state(symbol, probe_side)
+                    if bool(probe_cd.get("blocked")):
+                        print(
+                            f"⏭️ {symbol} 同向 probe 冷却中，跳过开仓: "
+                            f"side={probe_side}, remaining={int(probe_cd.get('remaining_seconds', 0) or 0)}s"
+                        )
+                        self._log_entry_gate_block(
+                            symbol=symbol,
+                            gate="probe_same_side_cooldown",
+                            reason=str(probe_cd.get("reason") or "probe_same_side_cooldown_active"),
+                            threshold=self._probe_same_side_cooldown_seconds(),
+                            value=int(probe_cd.get("remaining_seconds", 0) or 0),
+                            decision=decision,
+                            flow_context=flow_context,
+                            trigger_context=trigger_context,
+                            market_data=market_data,
+                            flow_snapshot=flow_snapshot,
+                            side=probe_side,
+                            extra={"open_new_entry": True, "probe_entry": True},
+                        )
+                        continue
+                min_open_portion = self._resolve_min_open_portion_for_decision(decision)
                 if float(decision.target_portion_of_balance) < min_open_portion:
                     print(
                         f"⏭️ {symbol} 目标开仓比例低于最小下单阈值，跳过开仓: "
@@ -8723,6 +8948,12 @@ class TradingBot:
                 )
                 if isinstance(decision_md, dict):
                     decision_md["dynamic_max_active_symbols"] = dynamic_cap_meta
+                if is_probe_entry:
+                    self._activate_probe_same_side_cooldown(
+                        symbol,
+                        probe_side,
+                        f"probe_entry_detected engine={decision_md.get('engine') or decision_md.get('regime') or '-'}",
+                    )
                 pending_new_entries.append(
                     {
                         "symbol": symbol,

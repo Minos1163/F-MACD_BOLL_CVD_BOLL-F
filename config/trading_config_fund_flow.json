@@ -207,6 +207,10 @@
     "max_symbol_position_portion": 0.35,
     "max_active_symbols": 5,
     "min_open_portion": 0.06,
+    "probe_min_open_portion": 0.0002,
+    "dca_min_original_vwap_score": 0.12,
+    "dca_min_original_composite_score": 0.70,
+    "dca_block_on_original_vol_vwap_warn": true,
     "max_open_portion": 1.0,
     "liquidity_norm_factor_weight": 0.12,
     "liquidity_norm_alpha": 0.2,
@@ -443,8 +447,8 @@
         "trial_short_below_structure_promotion_min_adx_1h": 30.0,
         "trial_short_below_structure_promotion_min_4h_shrink_pct": 0.80,
         "trial_short_below_structure_promotion_min_4h_shrink_bars": 6,
-        "short_min_vwap_score_for_entry": 0.0,
-        "flip_bearish_short_min_vwap_score_for_entry": 0.0,
+        "short_min_vwap_score_for_entry": 0.14,
+        "flip_bearish_short_min_vwap_score_for_entry": 0.25,
         "flip_bearish_require_enhancement_or_15m_confirmation": true,
         "enable_stable_bear_continuation": true,
         "stable_bear_continuation_min_vwap_score": 0.0,
@@ -497,9 +501,10 @@
         "disable_green_bar_shrinking_short_dual_pressure_entries": false,
         "disable_red_bar_shrinking_long_dual_support_entries": false,
         "vol_vwap_warn_min_score_vol": 0.05,
-        "vol_vwap_warn_min_vwap_score": 0.0,
+        "vol_vwap_warn_min_vwap_score": 0.12,
         "min_signal_score": 0.680,
-        "min_vwap_score_for_entry": 0.0,
+        "min_vwap_score_for_entry": 0.12,
+        "require_vwap_for_entry": true,
         "symbol_signal_overrides": []
       },
       "rsi_config": {
@@ -530,7 +535,7 @@
         "enable_green_bar_growing_probe_overlay": true,
         "green_bar_growing_probe_position_penalty": 0.10,
         "green_bar_growing_probe_max_leverage": 2,
-        "vol_vwap_warn_position_scale": 0.50
+        "vol_vwap_warn_position_scale": 0.0
       },
       "exit_management": {
         "enable_priority_signal_shrink_exit": true,
