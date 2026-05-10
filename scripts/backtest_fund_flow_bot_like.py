@@ -493,7 +493,14 @@ class BotLikeReplayEngine(BacktestEngine):
 
         target_portion = max(0.0, float(decision.target_portion_of_balance or 0.0))
         target_portion = min(target_portion, float(self.config.max_symbol_position_portion))
-        if target_portion < float(self.config.min_open_portion):
+        min_open_portion = float(self.config.min_open_portion)
+        if bool(md.get("rsi_probe_mode", False)):
+            min_open_portion = min(
+                min_open_portion,
+                float(getattr(self.config, "probe_min_open_portion", self.config.min_open_portion)),
+            )
+            min_open_portion = max(0.0001, min_open_portion)
+        if target_portion < min_open_portion:
             return False
 
         deployable_capital = self.capital * max(0.0, 1.0 - self.config.reserve_pct)

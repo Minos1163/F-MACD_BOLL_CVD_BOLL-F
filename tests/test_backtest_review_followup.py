@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -13,9 +14,11 @@ from scripts.backtest_macd_v2 import (
     MACDSignalV2,
     MACDStrategyV2Config,
     apply_backtest_profile,
+    build_strategy_config,
     main as backtest_main,
     resolve_runtime_config_for_backtest,
 )
+from src.fund_flow.macd_strategy_v2 import MACDStrategyV2Engine
 from scripts.analyze_backtest_trades import build_cancel_quality_summary
 from scripts.diagnose_ioc_fallback import diagnose_ioc_fallback
 from scripts.diagnose_macd_v2_mdd_round1 import diagnose_mdd_round1
@@ -25,6 +28,600 @@ from scripts.validate_live_backtest_alignment import (
     compare_live_backtest_alignment,
     main as alignment_main,
 )
+from scripts.analyze_live_strategy_chain_review import build_entries, match_entry_pnl, summarize_group
+from src.app.fund_flow_bot import format_macd_v2_score_line
+
+
+def test_macd_v2_score_line_prints_vwap_quality_and_alpha_separately() -> None:
+    line = format_macd_v2_score_line(
+        stage="threshold_check",
+        macd_dir="long",
+        primary_tf="4H",
+        score_4h=0.40,
+        sig4h="red_bar_growing",
+        score_1h=0.15,
+        sig1h="red_bar_growing",
+        score_4h_enh=0.0,
+        enhancement_score=0.80,
+        vwap_quality=0.85,
+        vwap_alpha=0.0425,
+        vwap_dev=1.23,
+        score_15m=0.01,
+        sig15m="-",
+        refine15m="-",
+        entry_score_15m=0.20,
+        score_vol=0.033,
+        volume_ratio_dbg=1.10,
+        ema_mult=1.20,
+        ema_status="strong",
+        score_total=0.72,
+        score_threshold=0.68,
+        threshold_source="primary_4h_red_bar_growing",
+        is_trial_entry_dbg=False,
+        stable_side_dbg="-",
+        stable_active_dbg=False,
+        veto_type_dbg="none",
+    )
+
+    assert "VWAPq=0.8500" in line
+    assert "VWAPa=0.0425" in line
+    assert "VWAP=0.0425" not in line
+
+
+def _rsi_direction_gate_engine() -> MACDStrategyV2Engine:
+    return MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            enable_rsi_1h_direction_gate=True,
+            rsi_1h_direction_flat_threshold=0.3,
+        )
+    )
+    _force_macd_direction(engine, direction_1h="long", signal_type_1h="red_bar_growing", direction_4h="long", signal_type_4h="red_bar_growing")
+
+
+def _evaluate_rsi_direction_gate(engine: MACDStrategyV2Engine, direction: str, rsi_1h: list[float]) -> dict:
+    return engine.evaluate_rsi_rhythm(
+        direction=direction,
+        rsi_15m_series=np.array([45.0, 48.0, 52.0], dtype=float),
+        rsi_1h_series=np.array(rsi_1h, dtype=float),
+        rsi_4h_series=np.array([52.0, 53.0, 54.0], dtype=float),
+        close_15m_series=np.array([100.0, 100.5, 101.0], dtype=float),
+        close_1h_series=np.array([100.0, 100.5, 101.0], dtype=float),
+        close_4h_series=np.array([100.0, 100.5, 101.0], dtype=float),
+        macd_hist_1h_current=0.01 if direction == "long" else -0.01,
+    )
+
+
+def _force_macd_direction(
+    engine: MACDStrategyV2Engine,
+    *,
+    direction_1h: str | None = "long",
+    signal_type_1h: str = "red_bar_growing",
+    direction_4h: str | None = "long",
+    signal_type_4h: str = "red_bar_growing",
+) -> None:
+    engine.detect_1h_macd_direction = lambda *_: (
+        direction_1h,
+        {"signal_type": signal_type_1h, "signal_strength": 1.0, "hist_current": 0.003, "hist_prev": 0.002},
+    )
+    engine.detect_macd_direction = lambda *_: (
+        direction_4h,
+        {"signal_type": signal_type_4h, "signal_strength": 1.0, "hist_current": 0.003, "hist_prev": 0.002},
+    )
+
+
+def test_rsi_1h_direction_gate_blocks_flat_long_signal() -> None:
+    rhythm = _evaluate_rsi_direction_gate(_rsi_direction_gate_engine(), "long", [49.8, 50.0, 50.2])
+
+    assert rhythm["hard_veto"] is True
+    assert rhythm["veto_reason"] == "rsi_1h_direction_flat_veto"
+    assert rhythm["rsi_1h_direction"] == "flat"
+    assert rhythm["rsi_1h_direction_gate_passed"] is False
+    assert rhythm["exposure_mult"] == 0.0
+
+
+def test_rsi_1h_direction_gate_blocks_against_short_signal() -> None:
+    rhythm = _evaluate_rsi_direction_gate(_rsi_direction_gate_engine(), "short", [55.0, 55.6])
+
+    assert rhythm["hard_veto"] is True
+    assert rhythm["veto_reason"] == "rsi_1h_direction_against_veto"
+    assert rhythm["rsi_1h_direction"] == "up"
+    assert rhythm["rsi_1h_direction_gate_passed"] is False
+    assert rhythm["exposure_mult"] == 0.0
+
+
+def test_rsi_1h_direction_gate_allows_aligned_long_signal() -> None:
+    rhythm = _evaluate_rsi_direction_gate(_rsi_direction_gate_engine(), "long", [48.0, 48.4])
+
+    assert rhythm["hard_veto"] is False
+    assert rhythm["rsi_1h_direction"] == "up"
+    assert rhythm["rsi_1h_direction_gate_passed"] is True
+
+
+def test_live_config_enables_rsi4_1h_direction_gate() -> None:
+    runtime_cfg = json.loads(Path("config/trading_config_fund_flow.json").read_text(encoding="utf-8"))
+
+    strategy_config = build_strategy_config(runtime_cfg)
+
+    assert strategy_config.rsi_period == 4
+    assert strategy_config.enable_rsi_1h_direction_gate is True
+    assert strategy_config.rsi_1h_direction_flat_threshold == 0.3
+
+
+def test_vwap_gate_uses_raw_quality_while_score_vwap_uses_weighted_alpha() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            weight_vwap=0.0,
+            min_signal_score=0.0,
+            red_bar_growing_min_signal_score=0.0,
+            min_vwap_score_for_entry=0.12,
+            require_1h_confirmation_when_4h_primary=False,
+            allow_neutral_1h_confirmation=True,
+            disable_red_bar_growing_long_entries=False,
+            enable_short_quality_filter=False,
+            enable_rsi_hard_veto=False,
+            enable_4h_shrink_exit=False,
+        )
+    )
+    _force_macd_direction(engine, direction_1h="long", signal_type_1h="red_bar_growing", direction_4h="long", signal_type_4h="red_bar_growing")
+
+    signal = engine.analyze(
+        macd_hist_15m=np.array([0.001, 0.002, 0.003]),
+        macd_hist_1h=np.array([0.001, 0.002, 0.003]),
+        macd_hist_4h=np.array([0.001, 0.002, 0.003]),
+        idx_15m=2,
+        idx_1h=2,
+        idx_4h=2,
+        volume_ratio=1.2,
+        vwap=100.0,
+        structural_vwap=100.0,
+        close_price=101.0,
+        bb_middle_1h=100.0,
+        bb_upper_1h=103.0,
+        bb_lower_1h=97.0,
+        bb_middle_4h=100.0,
+        bb_upper_4h=103.0,
+        bb_lower_4h=97.0,
+        close_15m_series=np.array([100.0, 100.5, 101.0]),
+        close_1h_series=np.array([100.0, 100.5, 101.0]),
+        close_4h_series=np.array([100.0, 100.5, 101.0]),
+        vwap_1h_series=np.array([100.0, 100.0, 100.0]),
+        structural_vwap_1h_series=np.array([100.0, 100.0, 100.0]),
+        adx_1h=20.0,
+    )
+
+    assert signal.direction == "long"
+    assert signal.vwap_score >= 0.12
+    assert signal.details["vwap_quality_score"] == pytest.approx(signal.vwap_score, abs=1e-4)
+    assert signal.details["vwap_alpha_score"] == pytest.approx(0.0, abs=1e-12)
+    assert signal.details["score_vwap"] == pytest.approx(0.0, abs=1e-12)
+
+
+def test_vwap_alpha_score_is_nonzero_when_weight_vwap_is_enabled() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            weight_vwap=0.05,
+            min_signal_score=0.0,
+            red_bar_growing_min_signal_score=0.0,
+            min_vwap_score_for_entry=0.12,
+            require_1h_confirmation_when_4h_primary=False,
+            allow_neutral_1h_confirmation=True,
+            disable_red_bar_growing_long_entries=False,
+            enable_short_quality_filter=False,
+            enable_rsi_hard_veto=False,
+            enable_4h_shrink_exit=False,
+        )
+    )
+    _force_macd_direction(engine, direction_1h="long", signal_type_1h="red_bar_growing", direction_4h="long", signal_type_4h="red_bar_growing")
+
+    signal = engine.analyze(
+        macd_hist_15m=np.array([0.001, 0.002, 0.003]),
+        macd_hist_1h=np.array([0.001, 0.002, 0.003]),
+        macd_hist_4h=np.array([0.001, 0.002, 0.003]),
+        idx_15m=2,
+        idx_1h=2,
+        idx_4h=2,
+        volume_ratio=1.2,
+        vwap=100.0,
+        structural_vwap=100.0,
+        close_price=101.0,
+        bb_middle_1h=100.0,
+        bb_upper_1h=103.0,
+        bb_lower_1h=97.0,
+        bb_middle_4h=100.0,
+        bb_upper_4h=103.0,
+        bb_lower_4h=97.0,
+        close_15m_series=np.array([100.0, 100.5, 101.0]),
+        close_1h_series=np.array([100.0, 100.5, 101.0]),
+        close_4h_series=np.array([100.0, 100.5, 101.0]),
+        vwap_1h_series=np.array([100.0, 100.0, 100.0]),
+        structural_vwap_1h_series=np.array([100.0, 100.0, 100.0]),
+        adx_1h=20.0,
+    )
+
+    assert signal.details["vwap_quality_score"] > 0.0
+    assert signal.details["vwap_alpha_score"] > 0.0
+    assert signal.details["score_vwap"] == pytest.approx(signal.details["vwap_alpha_score"], abs=1e-12)
+
+
+def test_effective_weight_diagnostics_excludes_folded_legacy_enhancement() -> None:
+    diagnostics = MACDStrategyV2Config(
+        weight_1h_direction=0.15,
+        weight_4h_direction=0.40,
+        weight_4h_enhancement=0.10,
+        weight_rsi_rhythm=0.30,
+        weight_vwap=0.05,
+        weight_15m_entry=0.05,
+        weight_volume=0.10,
+    ).effective_scoring_weight_diagnostics()
+
+    assert diagnostics["legacy_folded_weights"]["weight_4h_enhancement"] == pytest.approx(0.10)
+    assert diagnostics["independent_weight_sum"] == pytest.approx(1.05)
+    assert diagnostics["configured_weight_sum"] == pytest.approx(1.15)
+    assert "weight_4h_enhancement" not in diagnostics["independent_weights"]
+
+
+def test_dynamic_position_sizing_is_default_off() -> None:
+    engine = MACDStrategyV2Engine(MACDStrategyV2Config())
+
+    base = engine.calculate_position_portion(
+        score=0.70,
+        base_default_portion=0.35,
+        base_max_symbol_position_portion=0.50,
+        signal_type_1h="red_bar_growing",
+        signal_type_4h="red_bar_shrinking",
+        vwap_score=0.25,
+        volume_score=0.033,
+        adx_1h=45.0,
+        market_regime="TREND",
+    )
+    no_context = engine.calculate_position_portion(
+        score=0.70,
+        base_default_portion=0.35,
+        base_max_symbol_position_portion=0.50,
+        signal_type_1h="red_bar_growing",
+        vwap_score=0.25,
+    )
+
+    assert base == pytest.approx(no_context)
+
+
+def test_dynamic_position_sizing_can_reduce_low_quality_trend_entries() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            enable_dynamic_position_sizing=True,
+            dynamic_vwap_score_position_tiers=[
+                {"max": 0.25, "position_mult": 0.60},
+                {"max": 0.50, "position_mult": 0.80},
+            ],
+            dynamic_volume_score_position_tiers=[
+                {"max": 0.033, "position_mult": 0.75},
+            ],
+            dynamic_adx_trend_min=40.0,
+            dynamic_adx_trend_position_mult=0.70,
+            dynamic_signal_type_position_caps={
+                "red_bar_shrinking": {"max_target_portion": 0.12},
+            },
+        )
+    )
+
+    portion = engine.calculate_position_portion(
+        score=0.70,
+        base_default_portion=0.35,
+        base_max_symbol_position_portion=0.50,
+        signal_type_1h="red_bar_growing",
+        signal_type_4h="red_bar_shrinking",
+        vwap_score=0.25,
+        volume_score=0.033,
+        adx_1h=45.0,
+        market_regime="TREND",
+    )
+
+    assert portion == pytest.approx(0.0882)
+
+
+def test_no_trade_meaningful_cap_can_force_micro_ablation_portion() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            enable_no_trade_meaningful_entry_cap=True,
+            no_trade_micro_target_portion=0.009,
+        )
+    )
+
+    portion = engine.calculate_position_portion(
+        score=0.90,
+        base_default_portion=0.35,
+        base_max_symbol_position_portion=0.50,
+        signal_type_1h="red_bar_growing",
+        market_regime="NO_TRADE",
+    )
+
+    assert portion == pytest.approx(0.009)
+
+
+def test_meaningful_short_cap_only_affects_short_side_ablation() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            enable_meaningful_short_entry_cap=True,
+            meaningful_short_micro_target_portion=0.009,
+        )
+    )
+
+    short_portion = engine.calculate_position_portion(
+        score=0.90,
+        base_default_portion=0.35,
+        base_max_symbol_position_portion=0.50,
+        trade_direction="short",
+        signal_type_1h="flip_bearish",
+    )
+    long_portion = engine.calculate_position_portion(
+        score=0.90,
+        base_default_portion=0.35,
+        base_max_symbol_position_portion=0.50,
+        trade_direction="long",
+        signal_type_1h="red_bar_growing",
+    )
+
+    assert short_portion == pytest.approx(0.009)
+    assert long_portion > short_portion
+
+
+def test_short_regime_guard_blocks_flip_bearish_trend_short() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            min_signal_score=0.0,
+            flip_bearish_min_signal_score=0.0,
+            primary_direction_timeframe="4h",
+            require_1h_confirmation_when_4h_primary=False,
+            allow_neutral_1h_confirmation=True,
+            enable_short_regime_guard=True,
+            flip_bearish_block_trend_regime=True,
+            flip_bearish_trend_adx_min=25.0,
+            flip_bearish_min_adx_1h=0.0,
+            flip_bearish_max_ema21_slope_1h=1.0,
+            flip_bearish_max_ema21_slope_4h=1.0,
+            enable_short_quality_filter=False,
+            enable_rsi_hard_veto=False,
+            enable_4h_shrink_exit=False,
+        )
+    )
+    _force_macd_direction(engine, direction_1h="short", signal_type_1h="flip_bearish", direction_4h="short", signal_type_4h="flip_bearish")
+
+    signal = engine.analyze(
+        macd_hist_15m=np.array([-0.001, -0.002, -0.003]),
+        macd_hist_1h=np.array([0.002, 0.001, -0.001]),
+        macd_hist_4h=np.array([0.002, 0.001, -0.001]),
+        idx_15m=2,
+        idx_1h=2,
+        idx_4h=2,
+        volume_ratio=1.2,
+        vwap=100.0,
+        structural_vwap=100.0,
+        close_price=99.0,
+        bb_middle_1h=100.0,
+        bb_upper_1h=103.0,
+        bb_lower_1h=97.0,
+        bb_middle_4h=100.0,
+        bb_upper_4h=103.0,
+        bb_lower_4h=97.0,
+        close_15m_series=np.array([101.0, 100.5, 99.0]),
+        close_1h_series=np.array([101.0, 100.5, 99.0]),
+        close_4h_series=np.array([101.0, 100.5, 99.0]),
+        vwap_1h_series=np.array([100.0, 100.0, 100.0]),
+        structural_vwap_1h_series=np.array([100.0, 100.0, 100.0]),
+        adx_1h=30.0,
+        market_regime="TREND",
+    )
+
+    assert signal.direction == "neutral"
+    assert signal.veto_type.value == "short_quality_filter"
+    assert signal.details["reject_reason_code"] == "short_regime_guard"
+    assert signal.details["short_regime_guard_adx_1h"] == pytest.approx(30.0, rel=1e-6)
+
+
+def test_rsi_neutral_resume_short_can_be_disabled() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            min_signal_score=0.0,
+            green_bar_growing_min_signal_score=0.0,
+            primary_direction_timeframe="4h",
+            require_1h_confirmation_when_4h_primary=False,
+            allow_neutral_1h_confirmation=True,
+            enable_short_regime_guard=True,
+            disable_rsi_neutral_resume_short=True,
+            disable_green_bar_growing_entries=False,
+            enable_short_quality_filter=False,
+            enable_rsi_hard_veto=False,
+            enable_4h_shrink_exit=False,
+        )
+    )
+    _force_macd_direction(engine, direction_1h="short", signal_type_1h="green_bar_growing", direction_4h="short", signal_type_4h="green_bar_growing")
+    engine.evaluate_rsi_rhythm = lambda **_: {
+        "raw_score": 0.5,
+        "weighted_score": 0.15,
+        "hard_veto": False,
+        "entry_type": "rsi_neutral_resume",
+        "refine": "rsi_neutral_resume",
+        "ema_15m_refine": "rsi_neutral_resume",
+        "exposure_mult": 1.0,
+        "rsi_1h_direction_gate_passed": True,
+    }
+
+    signal = engine.analyze(
+        macd_hist_15m=np.array([-0.001, -0.002, -0.003]),
+        macd_hist_1h=np.array([-0.001, -0.002, -0.003]),
+        macd_hist_4h=np.array([-0.001, -0.002, -0.003]),
+        idx_15m=2,
+        idx_1h=2,
+        idx_4h=2,
+        volume_ratio=1.2,
+        vwap=100.0,
+        structural_vwap=100.0,
+        close_price=99.0,
+        bb_middle_1h=100.0,
+        bb_upper_1h=103.0,
+        bb_lower_1h=97.0,
+        bb_middle_4h=100.0,
+        bb_upper_4h=103.0,
+        bb_lower_4h=97.0,
+        close_15m_series=np.array([101.0, 100.5, 99.0]),
+        close_1h_series=np.array([101.0, 100.5, 99.0]),
+        close_4h_series=np.array([101.0, 100.5, 99.0]),
+        vwap_1h_series=np.array([100.0, 100.0, 100.0]),
+        structural_vwap_1h_series=np.array([100.0, 100.0, 100.0]),
+        adx_1h=20.0,
+    )
+
+    assert signal.direction == "neutral"
+    assert signal.details["reject_reason_code"] == "rsi_neutral_resume_short_disabled"
+
+
+def test_score_4h_hard_gate_blocks_low_4h_score_when_enabled() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            weight_4h_direction=0.10,
+            min_signal_score=0.0,
+            red_bar_growing_min_signal_score=0.0,
+            primary_direction_timeframe="4h",
+            require_1h_confirmation_when_4h_primary=False,
+            allow_neutral_1h_confirmation=True,
+            enable_score_4h_hard_gate=True,
+            min_score_4h_for_entry=0.12,
+            disable_red_bar_growing_long_entries=False,
+            enable_short_quality_filter=False,
+            enable_rsi_hard_veto=False,
+            enable_4h_shrink_exit=False,
+        )
+    )
+    _force_macd_direction(engine, direction_1h="long", signal_type_1h="red_bar_growing", direction_4h="long", signal_type_4h="red_bar_growing")
+
+    signal = engine.analyze(
+        macd_hist_15m=np.array([0.001, 0.002, 0.003]),
+        macd_hist_1h=np.array([0.001, 0.002, 0.003]),
+        macd_hist_4h=np.array([0.001, 0.002, 0.003]),
+        idx_15m=2,
+        idx_1h=2,
+        idx_4h=2,
+        volume_ratio=1.2,
+        vwap=100.0,
+        structural_vwap=100.0,
+        close_price=101.0,
+        bb_middle_1h=100.0,
+        bb_upper_1h=103.0,
+        bb_lower_1h=97.0,
+        bb_middle_4h=100.0,
+        bb_upper_4h=103.0,
+        bb_lower_4h=97.0,
+        close_15m_series=np.array([100.0, 100.5, 101.0]),
+        close_1h_series=np.array([100.0, 100.5, 101.0]),
+        close_4h_series=np.array([100.0, 100.5, 101.0]),
+        vwap_1h_series=np.array([100.0, 100.0, 100.0]),
+        structural_vwap_1h_series=np.array([100.0, 100.0, 100.0]),
+        adx_1h=20.0,
+    )
+
+    assert signal.direction == "neutral"
+    assert signal.details["reject_reason_code"] == "score_4h_hard_gate"
+    assert signal.details["score_4h"] < 0.12
+
+
+def test_folded_4h_enhancement_is_capped_inside_score_4h_not_added_twice() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            weight_4h_direction=0.40,
+            weight_4h_enhancement=0.10,
+            min_signal_score=0.0,
+            red_bar_growing_min_signal_score=0.0,
+            primary_direction_timeframe="4h",
+            require_1h_confirmation_when_4h_primary=False,
+            allow_neutral_1h_confirmation=True,
+            disable_red_bar_growing_long_entries=False,
+            enable_short_quality_filter=False,
+            enable_rsi_hard_veto=False,
+            enable_4h_shrink_exit=False,
+        )
+    )
+    _force_macd_direction(engine, direction_1h="long", signal_type_1h="red_bar_growing", direction_4h="long", signal_type_4h="red_bar_growing")
+
+    signal = engine.analyze(
+        macd_hist_15m=np.array([0.001, 0.002, 0.003]),
+        macd_hist_1h=np.array([0.001, 0.002, 0.003]),
+        macd_hist_4h=np.array([0.001, 0.002, 0.003]),
+        idx_15m=2,
+        idx_1h=2,
+        idx_4h=2,
+        volume_ratio=1.2,
+        vwap=100.0,
+        structural_vwap=100.0,
+        close_price=101.0,
+        bb_middle_1h=100.0,
+        bb_upper_1h=103.0,
+        bb_lower_1h=97.0,
+        bb_middle_4h=100.0,
+        bb_upper_4h=103.0,
+        bb_lower_4h=97.0,
+        close_15m_series=np.array([100.0, 100.5, 101.0]),
+        close_1h_series=np.array([100.0, 100.5, 101.0]),
+        close_4h_series=np.array([100.0, 100.5, 101.0]),
+        vwap_1h_series=np.array([100.0, 100.0, 100.0]),
+        structural_vwap_1h_series=np.array([100.0, 100.0, 100.0]),
+        adx_1h=20.0,
+    )
+
+    assert signal.details["score_4h_enhancement"] == pytest.approx(0.0, abs=1e-12)
+    assert signal.details["score_4h"] <= 0.40
+    assert signal.details["score_4h_enhancement_mode"] == "folded_into_score_4h"
+
+
+def test_live_chain_analysis_marks_micro_positions_and_excludes_from_meaningful_groups() -> None:
+    decisions = pd.DataFrame(
+        [
+            {
+                "ts": pd.Timestamp("2026-05-08 12:00:00", tz="UTC"),
+                "bj": pd.Timestamp("2026-05-08 20:00:00", tz="Asia/Shanghai"),
+                "symbol": "AAAUSDT",
+                "operation": "sell",
+                "side": "SHORT",
+                "target_portion": 0.002,
+                "reason": "macd_v2_short_1h_green_bar_growing_15m__vwap_1.00",
+            },
+            {
+                "ts": pd.Timestamp("2026-05-08 13:00:00", tz="UTC"),
+                "bj": pd.Timestamp("2026-05-08 21:00:00", tz="Asia/Shanghai"),
+                "symbol": "BBBUSDT",
+                "operation": "sell",
+                "side": "SHORT",
+                "target_portion": 0.02,
+                "reason": "macd_v2_short_1h_flip_bearish_15m__vwap_0.25",
+            },
+        ]
+    )
+    fills = pd.DataFrame(
+        [
+            {
+                "ts": pd.Timestamp("2026-05-08 14:00:00", tz="UTC"),
+                "symbol": "AAAUSDT",
+                "closes_side": "SHORT",
+                "realized_pnl": -0.1,
+            },
+            {
+                "ts": pd.Timestamp("2026-05-08 15:00:00", tz="UTC"),
+                "symbol": "BBBUSDT",
+                "closes_side": "SHORT",
+                "realized_pnl": 0.2,
+            },
+        ]
+    )
+
+    entries = match_entry_pnl(build_entries(decisions), fills, min_meaningful_target_portion=0.01)
+    raw = summarize_group(entries[entries["matched_closed"]], ["side"])
+    meaningful = summarize_group(entries[entries["matched_closed"] & entries["is_meaningful_position"]], ["side"])
+
+    assert entries.loc[0, "position_accounting"] == "micro_notional"
+    assert bool(entries.loc[0, "is_meaningful_position"]) is False
+    assert raw[0]["entries"] == 2
+    assert raw[0]["win_rate"] == 0.5
+    assert meaningful[0]["entries"] == 1
+    assert meaningful[0]["win_rate"] == 1.0
 
 
 def test_resolve_runtime_config_for_backtest_skips_profile_in_strict_live_mode() -> None:

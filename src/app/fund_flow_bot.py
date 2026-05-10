@@ -75,6 +75,50 @@ if _ImportedRiskConfig is None:
 else:
     RiskConfig = _ImportedRiskConfig
 
+
+def format_macd_v2_score_line(
+    *,
+    stage: str,
+    macd_dir: str,
+    primary_tf: str,
+    score_4h: float,
+    sig4h: str,
+    score_1h: float,
+    sig1h: str,
+    score_4h_enh: float,
+    enhancement_score: float,
+    vwap_quality: float,
+    vwap_alpha: float,
+    vwap_dev: float,
+    score_15m: float,
+    sig15m: str,
+    refine15m: str,
+    entry_score_15m: float,
+    score_vol: float,
+    volume_ratio_dbg: float,
+    ema_mult: float,
+    ema_status: str,
+    score_total: float,
+    score_threshold: float,
+    threshold_source: str,
+    is_trial_entry_dbg: bool,
+    stable_side_dbg: str,
+    stable_active_dbg: bool,
+    veto_type_dbg: str,
+) -> str:
+    return (
+        "   MACD_V2评分: "
+        f"stage={stage}, dir={macd_dir}, primary={primary_tf}:{score_4h:.4f}({sig4h}), "
+        f"1H={score_1h:.4f}({sig1h}), 4H_enh={score_4h_enh:.4f}(raw={enhancement_score:.2f}), "
+        f"VWAPq={vwap_quality:.4f}, VWAPa={vwap_alpha:.4f}(dev={vwap_dev:+.2f}%), "
+        f"15M={score_15m:.4f}({sig15m}/{refine15m}, raw={entry_score_15m:.2f}), "
+        f"VOL={score_vol:.4f}(r={volume_ratio_dbg:.2f}), "
+        f"EMA={ema_mult:.2f}x/{ema_status}, total={score_total:.4f}/{score_threshold:.4f}, "
+        f"th_src={threshold_source}, trial={is_trial_entry_dbg}, "
+        f"stable={stable_side_dbg if stable_active_dbg else '-'}, veto={veto_type_dbg}"
+    )
+
+
 try:
     from src.risk.integration_gate import gate_trade_decision as _gate_trade_decision_impl
 except ModuleNotFoundError:
@@ -6526,6 +6570,8 @@ class TradingBot:
             score_4h = self._to_float(macd_v2_debug.get("score_4h"), 0.0)
             score_4h_enh = self._to_float(macd_v2_debug.get("score_4h_enhancement"), 0.0)
             score_vwap = self._to_float(macd_v2_debug.get("score_vwap"), self._to_float(md.get("vwap_score"), 0.0))
+            vwap_quality = self._to_float(macd_v2_debug.get("vwap_quality_score"), self._to_float(md.get("vwap_score"), score_vwap))
+            vwap_alpha = self._to_float(macd_v2_debug.get("vwap_alpha_score"), score_vwap)
             score_15m = self._to_float(macd_v2_debug.get("score_15m"), 0.0)
             score_vol = self._to_float(macd_v2_debug.get("score_volume"), 0.0)
             vwap_dev = self._to_float(md.get("vwap_deviation"), self._to_float(macd_v2_debug.get("vwap_deviation"), 0.0)) * 100.0
@@ -6538,15 +6584,35 @@ class TradingBot:
             stable_side_dbg = str(macd_v2_debug.get("stable_continuation_side") or "-")
             stable_active_dbg = bool(macd_v2_debug.get("stable_continuation_active", False))
             print(
-                "   MACD_V2评分: "
-                f"stage={stage}, dir={macd_dir}, primary={primary_tf}:{score_4h:.4f}({sig4h}), "
-                f"1H={score_1h:.4f}({sig1h}), 4H_enh={score_4h_enh:.4f}(raw={enhancement_score:.2f}), "
-                f"VWAP={score_vwap:.4f}(dev={vwap_dev:+.2f}%), "
-                f"15M={score_15m:.4f}({sig15m}/{refine15m}, raw={entry_score_15m:.2f}), "
-                f"VOL={score_vol:.4f}(r={volume_ratio_dbg:.2f}), "
-                f"EMA={ema_mult:.2f}x/{ema_status}, total={score_total:.4f}/{score_threshold:.4f}, "
-                f"th_src={threshold_source}, trial={is_trial_entry_dbg}, "
-                f"stable={stable_side_dbg if stable_active_dbg else '-'}, veto={veto_type_dbg}"
+                format_macd_v2_score_line(
+                    stage=stage,
+                    macd_dir=macd_dir,
+                    primary_tf=primary_tf,
+                    score_4h=score_4h,
+                    sig4h=sig4h,
+                    score_1h=score_1h,
+                    sig1h=sig1h,
+                    score_4h_enh=score_4h_enh,
+                    enhancement_score=enhancement_score,
+                    vwap_quality=vwap_quality,
+                    vwap_alpha=vwap_alpha,
+                    vwap_dev=vwap_dev,
+                    score_15m=score_15m,
+                    sig15m=sig15m,
+                    refine15m=refine15m,
+                    entry_score_15m=entry_score_15m,
+                    score_vol=score_vol,
+                    volume_ratio_dbg=volume_ratio_dbg,
+                    ema_mult=ema_mult,
+                    ema_status=ema_status,
+                    score_total=score_total,
+                    score_threshold=score_threshold,
+                    threshold_source=threshold_source,
+                    is_trial_entry_dbg=is_trial_entry_dbg,
+                    stable_side_dbg=stable_side_dbg,
+                    stable_active_dbg=stable_active_dbg,
+                    veto_type_dbg=veto_type_dbg,
+                )
             )
             stop_price_dbg = self._to_float(md.get("suggested_stop_price"), self._to_float(macd_v2_debug.get("stop_price"), 0.0))
             stop_pct_dbg = self._to_float(md.get("stop_loss_pct"), self._to_float(macd_v2_debug.get("stop_loss_pct"), 0.0))

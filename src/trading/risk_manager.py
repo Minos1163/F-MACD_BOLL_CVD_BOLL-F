@@ -437,11 +437,24 @@ class RiskManager:
             "state_lw_min": float(conflict_cfg.get("state_lw_min", 0.55)),
             "state_macd_flip": float(conflict_cfg.get("state_macd_flip", 0.05)),
             "state_cvd_flip": float(conflict_cfg.get("state_cvd_flip", 0.05)),
+            # === 持仓后方向失效保护 ===
+            "direction_invalid_enabled": bool(conflict_cfg.get("direction_invalid_enabled", True)),
+            "direction_invalid_no_trade_confirm_bars": int(
+                conflict_cfg.get("direction_invalid_no_trade_confirm_bars", 2)
+            ),
+            "direction_invalid_reduce_pct": float(conflict_cfg.get("direction_invalid_reduce_pct", 1.0)),
+            "direction_invalid_low_score": float(conflict_cfg.get("direction_invalid_low_score", 0.11)),
+            "direction_invalid_mfe_trigger": float(conflict_cfg.get("direction_invalid_mfe_trigger", 0.008)),
+            "direction_invalid_mae_trigger": float(conflict_cfg.get("direction_invalid_mae_trigger", -0.008)),
+            "direction_invalid_breakeven_buffer": float(
+                conflict_cfg.get("direction_invalid_breakeven_buffer", 0.0005)
+            ),
         }
         # 状态机缓存: 连续反向确认 / 连续陷阱 / 能量序列
         self._state_reverse_counters: Dict[Tuple[str, str], int] = {}
         self._state_trap_counters: Dict[Tuple[str, str], int] = {}
         self._state_energy_hist: Dict[Tuple[str, str], Deque[float]] = {}
+        self._direction_invalid_counters: Dict[Tuple[str, str], int] = {}
 
         # ========== 冲突保护行为统计器 ==========
         # 全局累计
@@ -1135,6 +1148,11 @@ class RiskManager:
         direction_lock: Optional[str] = None,
         decision_reason: Optional[str] = None,
         close_decision_weights: Optional[Dict[str, float]] = None,
+        signal_type_1h: Optional[str] = None,
+        signal_score: Optional[float] = None,
+        max_favorable_ratio: Optional[float] = None,
+        max_adverse_ratio: Optional[float] = None,
+        current_pnl_ratio: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         检查持仓保护状态（基于 MACD/CVD 冲突）
@@ -1210,6 +1228,16 @@ class RiskManager:
         }
         result["trap_score"] = float(trap_score or 0.0)
         result["close_price"] = float(close_price or last_close or 0.0)
+        signal_1h = str(signal_type_1h or "").strip().lower()
+        signal_score_val = float(signal_score or 0.0)
+        max_favorable = float(max_favorable_ratio or 0.0)
+        max_adverse = float(max_adverse_ratio or 0.0)
+        pnl_now = float(current_pnl_ratio or 0.0)
+        result["signal_type_1h"] = signal_1h
+        result["signal_score"] = signal_score_val
+        result["max_favorable_ratio"] = max_favorable
+        result["max_adverse_ratio"] = max_adverse
+        result["current_pnl_ratio"] = pnl_now
         
         # 平仓决断权重 (MACD/KDJ/资金流)
         # 默认: 资金流0.55, MACD0.3, KDJ0.15
@@ -1377,6 +1405,85 @@ class RiskManager:
         # cooldown check (applies only when we'd take a protection action)
         last_ts = float(self._last_protect_ts.get(key, 0.0))
         cooldown_active = (ts_now - last_ts) < cooldown_sec
+
+        if bool(cfg.get("direction_invalid_enabled", True)):
+            long_invalid_1h = str(position_side).upper() == "LONG" and signal_1h in {
+                "red_bar_shrinking",
+                "flip_bearish",
+            }
+            short_invalid_1h = str(position_side).upper() == "SHORT" and signal_1h in {
+                "green_bar_shrinking",
+                "flip_bullish",
+            }
+            invalid_1h = bool(long_invalid_1h or short_invalid_1h)
+            no_trade_invalid = bool(regime == "NO_TRADE" and invalid_1h)
+            if no_trade_invalid:
+                self._direction_invalid_counters[key] = int(self._direction_invalid_counters.get(key, 0) or 0) + 1
+            else:
+                self._direction_invalid_counters[key] = 0
+            invalid_bars = int(self._direction_invalid_counters.get(key, 0) or 0)
+            confirm_bars = max(1, int(cfg.get("direction_invalid_no_trade_confirm_bars", 2)))
+            low_score_invalid = bool(invalid_1h and signal_score_val > 0 and signal_score_val < float(cfg.get("direction_invalid_low_score", 0.11)))
+            giveback_invalid = bool(
+                max_favorable >= float(cfg.get("direction_invalid_mfe_trigger", 0.008))
+                and (
+                    max_adverse <= float(cfg.get("direction_invalid_mae_trigger", -0.008))
+                    or pnl_now <= 0.0
+                )
+            )
+            confirmed_invalid = bool(no_trade_invalid and invalid_bars >= confirm_bars)
+            if low_score_invalid or giveback_invalid or confirmed_invalid:
+                reasons: List[str] = []
+                if low_score_invalid:
+                    reasons.append(f"direction_invalid_low_score score={signal_score_val:.3f}")
+                if giveback_invalid:
+                    reasons.append(
+                        f"direction_invalid_giveback mfe={max_favorable:.4f} mae={max_adverse:.4f} pnl={pnl_now:.4f}"
+                    )
+                if confirmed_invalid:
+                    reasons.append(
+                        f"direction_invalid_no_trade signal_1h={signal_1h} bars={invalid_bars}/{confirm_bars}"
+                    )
+                reduce_pct = (
+                    min(1.0, max(0.05, float(cfg.get("direction_invalid_reduce_pct", 1.0))))
+                    if low_score_invalid or confirmed_invalid
+                    else 0.0
+                )
+                result.update({
+                    "level": "conflict_hard",
+                    "allow_add": False,
+                    "tighten_trailing": True,
+                    "reduce_position_pct": reduce_pct,
+                    "force_break_even": bool(giveback_invalid),
+                    "breakeven_mode": "emergency_tighten" if giveback_invalid else "",
+                    "breakeven_fee_buffer": (
+                        max(0.0, float(cfg.get("direction_invalid_breakeven_buffer", 0.0005)))
+                        if giveback_invalid
+                        else 0.0
+                    ),
+                    "risk_penalty": 1.0 if low_score_invalid else 0.8,
+                    "conflict_bars": invalid_bars,
+                    "cooldown_active": bool(cooldown_active),
+                    "risk_state": "REDUCE",
+                    "reason": " | ".join(reasons),
+                })
+                if not cooldown_active:
+                    self._last_protect_ts[key] = ts_now
+                self.record_protection_level(
+                    symbol,
+                    position_side,
+                    "conflict_hard",
+                    reason=result["reason"],
+                    extra={
+                        "source": "direction_invalid",
+                        "signal_type_1h": signal_1h,
+                        "signal_score": signal_score_val,
+                        "mfe": max_favorable,
+                        "mae": max_adverse,
+                        "pnl": pnl_now,
+                    },
+                )
+                return _finalize(result)
 
         # ========== EV 主导持仓保护 ==========
         # 经验结论：持仓后以 EV 为主，LW 只做辅助确认/降噪，MACD/CVD 作为回退。

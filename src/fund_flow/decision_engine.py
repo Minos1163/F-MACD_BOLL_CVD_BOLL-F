@@ -491,6 +491,12 @@ class FundFlowDecisionEngine:
             )
             session_risk_cfg = v2_cfg.get("session_risk_control", {}) if isinstance(v2_cfg.get("session_risk_control"), dict) else {}
             vwap_score_tier_cfg = v2_cfg.get("vwap_score_position_tiers", {}) if isinstance(v2_cfg.get("vwap_score_position_tiers"), dict) else {}
+            dynamic_position_cfg = v2_cfg.get("dynamic_position_sizing", {}) if isinstance(v2_cfg.get("dynamic_position_sizing"), dict) else {}
+            side_enable_cfg = v2_cfg.get("side_enable", {}) if isinstance(v2_cfg.get("side_enable"), dict) else {}
+            short_side_enable_cfg = side_enable_cfg.get("SHORT", side_enable_cfg.get("short", {})) if isinstance(side_enable_cfg, dict) else {}
+            short_side_enable_cfg = short_side_enable_cfg if isinstance(short_side_enable_cfg, dict) else {}
+            regime_entry_policy_cfg = v2_cfg.get("regime_entry_policy", {}) if isinstance(v2_cfg.get("regime_entry_policy"), dict) else {}
+            no_trade_policy_cfg = regime_entry_policy_cfg.get("NO_TRADE", {}) if isinstance(regime_entry_policy_cfg.get("NO_TRADE"), dict) else {}
             symbol_risk_cfg = v2_cfg.get("symbol_risk_tiers", {}) if isinstance(v2_cfg.get("symbol_risk_tiers"), dict) else {}
             legacy_rsi_15m_keys = []
             for legacy_key in (
@@ -679,6 +685,11 @@ class FundFlowDecisionEngine:
                 neutral_upgrade_penalty_mult=self._to_float(filter_cfg.get("neutral_upgrade_penalty_mult"), 0.90),
                 enable_rsi_rhythm_scoring=bool(rsi_rhythm_cfg.get("enabled", True)),
                 enable_rsi_hard_veto=bool(rsi_rhythm_cfg.get("enable_hard_veto", True)),
+                enable_rsi_1h_direction_gate=bool(rsi_rhythm_cfg.get("enable_1h_direction_gate", False)),
+                rsi_1h_direction_flat_threshold=self._to_float(
+                    rsi_rhythm_cfg.get("direction_flat_threshold"),
+                    0.3,
+                ),
                 enable_leading_rsi_conflict_pass=bool(rsi_rhythm_cfg.get("enable_leading_conflict_pass", True)),
                 leading_rsi_slope_threshold=self._to_float(rsi_rhythm_cfg.get("leading_slope_threshold"), 2.0),
                 rsi_conflict_penalty_mult=self._to_float(rsi_rhythm_cfg.get("conflict_penalty_mult"), 0.95),
@@ -706,6 +717,12 @@ class FundFlowDecisionEngine:
                 flip_bearish_require_enhancement_or_15m_confirmation=bool(
                     filter_cfg.get("flip_bearish_require_enhancement_or_15m_confirmation", True)
                 ),
+                enable_short_regime_guard=bool(filter_cfg.get("enable_short_regime_guard", False)),
+                flip_bearish_block_trend_regime=bool(filter_cfg.get("flip_bearish_block_trend_regime", True)),
+                flip_bearish_trend_adx_min=self._to_float(filter_cfg.get("flip_bearish_trend_adx_min"), 25.0),
+                disable_rsi_neutral_resume_short=bool(filter_cfg.get("disable_rsi_neutral_resume_short", False)),
+                enable_score_4h_hard_gate=bool(filter_cfg.get("enable_score_4h_hard_gate", False)),
+                min_score_4h_for_entry=self._to_float(filter_cfg.get("min_score_4h_for_entry"), 0.12),
                 enable_red_bar_growing_probe_overlay=bool(position_mgmt_cfg.get("enable_red_bar_growing_probe_overlay", False)),
                 red_bar_growing_probe_position_penalty=self._to_float(
                     position_mgmt_cfg.get("red_bar_growing_probe_position_penalty"),
@@ -990,6 +1007,24 @@ class FundFlowDecisionEngine:
                     str(x).strip() for x in (vwap_score_tier_cfg.get("apply_to_states", []) or []) if str(x).strip()
                 ] if isinstance(vwap_score_tier_cfg.get("apply_to_states"), list) else [],
                 vwap_score_position_tiers=copy.deepcopy(vwap_score_tier_cfg.get("tiers", [])) if isinstance(vwap_score_tier_cfg.get("tiers"), list) else [],
+                enable_dynamic_position_sizing=bool(dynamic_position_cfg.get("enabled", False)),
+                dynamic_vwap_score_position_tiers=copy.deepcopy(dynamic_position_cfg.get("vwap_score_tiers", [])) if isinstance(dynamic_position_cfg.get("vwap_score_tiers"), list) else [],
+                dynamic_volume_score_position_tiers=copy.deepcopy(dynamic_position_cfg.get("volume_score_tiers", [])) if isinstance(dynamic_position_cfg.get("volume_score_tiers"), list) else [],
+                dynamic_adx_trend_min=self._to_float((dynamic_position_cfg.get("adx_trend_penalty", {}) or {}).get("min_adx"), 0.0) if isinstance(dynamic_position_cfg.get("adx_trend_penalty"), dict) else 0.0,
+                dynamic_adx_trend_position_mult=self._to_float((dynamic_position_cfg.get("adx_trend_penalty", {}) or {}).get("position_mult"), 1.0) if isinstance(dynamic_position_cfg.get("adx_trend_penalty"), dict) else 1.0,
+                dynamic_signal_type_position_caps=copy.deepcopy(dynamic_position_cfg.get("signal_type_caps", {})) if isinstance(dynamic_position_cfg.get("signal_type_caps"), dict) else {},
+                enable_meaningful_short_entry_cap=(
+                    bool(short_side_enable_cfg)
+                    and not bool(short_side_enable_cfg.get("meaningful", True))
+                    and bool(short_side_enable_cfg.get("micro", True))
+                ),
+                meaningful_short_micro_target_portion=self._to_float(short_side_enable_cfg.get("micro_target_portion"), 0.009) if short_side_enable_cfg else 0.009,
+                enable_no_trade_meaningful_entry_cap=(
+                    bool(no_trade_policy_cfg)
+                    and not bool(no_trade_policy_cfg.get("allow_meaningful_entry", True))
+                    and bool(no_trade_policy_cfg.get("allow_micro_notional", True))
+                ),
+                no_trade_micro_target_portion=self._to_float(no_trade_policy_cfg.get("micro_target_portion"), 0.009) if no_trade_policy_cfg else 0.009,
                 symbol_risk_watchlist_symbols=[
                     str(x).strip().upper() for x in (symbol_risk_cfg.get("watchlist_symbols", []) or []) if str(x).strip()
                 ] if isinstance(symbol_risk_cfg.get("watchlist_symbols"), list) else [],
@@ -1705,9 +1740,14 @@ class FundFlowDecisionEngine:
             base_default_portion=self.default_portion,
             base_max_symbol_position_portion=self.max_symbol_position_portion,
             symbol=symbol,
+            trade_direction=side,
             signal_type_1h=signal.signal_type_1h,
+            signal_type_4h=str((signal.details or {}).get("signal_type_4h", "") or ""),
             vwap_score=max(signal.vwap_score, self._to_float(regime_state.get("min_vwap_score"), 0.0)),
             vwap_state=signal.vwap_state,
+            volume_score=self._to_float((signal.details or {}).get("score_volume"), 0.0),
+            adx_1h=self._to_float((signal.details or {}).get("adx_1h"), 0.0),
+            market_regime=str((signal.details or {}).get("market_regime") or regime_state.get("market_regime") or ""),
             is_trial_entry=is_trial_entry,
             entry_scale=entry_scale,
             session_scale=session_position_scale,
@@ -4173,6 +4213,7 @@ class FundFlowDecisionEngine:
             structural_vwap_1h_series=structural_vwap_1h_series,
             adx_1h=adx_1h,
             adx_4h=adx_4h,
+            market_regime=str(regime_info.get("regime") or regime_info.get("name") or ""),
             cvd_upper_wick_ratio=self._to_float(tf_15m.get("upper_wick_ratio"), None),
             cvd_1h_delta_ratio=self._to_float(tf_1h.get("cvd_delta_ratio"), None),
             atr_1h=atr_1h,
@@ -4481,9 +4522,14 @@ class FundFlowDecisionEngine:
                 base_default_portion=self.default_portion,
                 base_max_symbol_position_portion=self.max_symbol_position_portion,
                 symbol=symbol,
+                trade_direction=str(signal.direction or ""),
                 signal_type_1h=signal.signal_type_1h,
+                signal_type_4h=str((signal.details or {}).get("signal_type_4h", "") or ""),
                 vwap_score=signal.vwap_score,
                 vwap_state=signal.vwap_state,
+                volume_score=self._to_float((signal.details or {}).get("score_volume"), 0.0),
+                adx_1h=self._to_float((signal.details or {}).get("adx_1h"), 0.0),
+                market_regime=str((signal.details or {}).get("market_regime") or regime_state.get("regime") or ""),
                 is_trial_entry=bool(signal.is_trial_entry),
                 entry_scale=float(signal.entry_scale or 1.0),
                 session_scale=session_position_scale,
@@ -4607,9 +4653,14 @@ class FundFlowDecisionEngine:
                 base_default_portion=self.default_portion,
                 base_max_symbol_position_portion=self.max_symbol_position_portion,
                 symbol=symbol,
+                trade_direction=str(signal.direction or ""),
                 signal_type_1h=signal.signal_type_1h,
+                signal_type_4h=str((signal.details or {}).get("signal_type_4h", "") or ""),
                 vwap_score=signal.vwap_score,
                 vwap_state=signal.vwap_state,
+                volume_score=self._to_float((signal.details or {}).get("score_volume"), 0.0),
+                adx_1h=self._to_float((signal.details or {}).get("adx_1h"), 0.0),
+                market_regime=str((signal.details or {}).get("market_regime") or regime_state.get("regime") or ""),
                 is_trial_entry=bool(signal.is_trial_entry),
                 entry_scale=float(signal.entry_scale or 1.0),
                 session_scale=session_position_scale,

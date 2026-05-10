@@ -205,7 +205,7 @@
     "default_target_portion": 0.35,
     "add_position_portion": 0.6,
     "max_symbol_position_portion": 0.35,
-    "max_active_symbols": 3,
+    "max_active_symbols": 5,
     "min_open_portion": 0.06,
     "max_open_portion": 1.0,
     "liquidity_norm_factor_weight": 0.12,
@@ -247,7 +247,7 @@
     },
     "dynamic_max_active_symbols": {
       "enabled": false,
-      "max_active_symbols": 3,
+      "max_active_symbols": 5,
       "min_signal_score": 0.9,
       "min_vwap_score": 0.1,
       "min_regime_adx": 18.0,
@@ -441,6 +441,12 @@
         "short_min_vwap_score_for_entry": 0.06,
         "flip_bearish_short_min_vwap_score_for_entry": 0.08,
         "flip_bearish_require_enhancement_or_15m_confirmation": true,
+        "enable_short_regime_guard": true,
+        "flip_bearish_block_trend_regime": true,
+        "flip_bearish_trend_adx_min": 25.0,
+        "disable_rsi_neutral_resume_short": true,
+        "enable_score_4h_hard_gate": false,
+        "min_score_4h_for_entry": 0.12,
         "enable_stable_bear_continuation": true,
         "stable_bear_continuation_min_vwap_score": 0.0,
         "stable_bear_continuation_min_adx_1h": 30.0,
@@ -498,12 +504,14 @@
         "symbol_signal_overrides": []
       },
       "rsi_config": {
-        "period": 14,
+        "period": 4,
         "enable_entry_refinement": false,
         "short_rsi_probe_only_below": 40.0,
         "rhythm": {
           "enabled": true,
           "enable_hard_veto": true,
+          "enable_1h_direction_gate": true,
+          "direction_flat_threshold": 0.3,
           "enable_leading_conflict_pass": true,
           "leading_slope_threshold": 2.0,
           "conflict_penalty_mult": 0.95,
@@ -803,7 +811,7 @@
     },
     "engine_params": {
       "TREND": {
-        "max_active_symbols": 3,
+        "max_active_symbols": 5,
         "default_target_portion": 0.6,
         "add_position_portion": 0.6,
         "max_symbol_position_portion": 0.6,
@@ -853,7 +861,7 @@
         }
       },
       "RANGE": {
-        "max_active_symbols": 3,
+        "max_active_symbols": 5,
         "default_target_portion": 0.6,
         "add_position_portion": 0.6,
         "max_symbol_position_portion": 0.6,
@@ -1842,6 +1850,116 @@
           },
           "notes": "Ablation profile: disable 4H pre-flip trial entries and short-below-structure promotion only, keeping the rest of the V2 live funnel unchanged."
         },
+        "macd_v2_ablation_short_guard_only": {
+          "config_overrides": {
+            "fund_flow": {
+              "macd_mtf_strategy_v2": {
+                "entry_filters": {
+                  "enable_short_regime_guard": true,
+                  "flip_bearish_block_trend_regime": true,
+                  "flip_bearish_trend_adx_min": 25.0,
+                  "disable_rsi_neutral_resume_short": true
+                }
+              }
+            }
+          },
+          "notes": "Live Strategy v2 ablation: keep meaningful SHORT enabled and test only the flip_bearish TREND guard plus rsi_neutral_resume SHORT disable."
+        },
+        "macd_v2_ablation_meaningful_short_disabled": {
+          "config_overrides": {
+            "fund_flow": {
+              "macd_mtf_strategy_v2": {
+                "side_enable": {
+                  "SHORT": {
+                    "meaningful": false,
+                    "micro": true,
+                    "micro_target_portion": 0.009
+                  }
+                }
+              }
+            }
+          },
+          "notes": "Live Strategy v2 ablation: cap all SHORT entries to micro-notional sizing while preserving LONG behavior; compare against short-guard-only before changing live side_enable."
+        },
+        "macd_v2_ablation_short_guard_meaningful_short_disabled": {
+          "config_overrides": {
+            "fund_flow": {
+              "macd_mtf_strategy_v2": {
+                "entry_filters": {
+                  "enable_short_regime_guard": true,
+                  "flip_bearish_block_trend_regime": true,
+                  "flip_bearish_trend_adx_min": 25.0,
+                  "disable_rsi_neutral_resume_short": true
+                },
+                "side_enable": {
+                  "SHORT": {
+                    "meaningful": false,
+                    "micro": true,
+                    "micro_target_portion": 0.009
+                  }
+                }
+              }
+            }
+          },
+          "notes": "Live Strategy v2 ablation: combine short guard with micro-only short-prone 4H signal families to test the temporary meaningful SHORT shutdown hypothesis."
+        },
+        "macd_v2_ablation_dynamic_position_sizing": {
+          "config_overrides": {
+            "fund_flow": {
+              "macd_mtf_strategy_v2": {
+                "dynamic_position_sizing": {
+                  "enabled": true,
+                  "vwap_score_tiers": [
+                    {
+                      "max": 0.25,
+                      "position_mult": 0.60
+                    },
+                    {
+                      "min": 0.25,
+                      "max": 0.50,
+                      "position_mult": 0.80
+                    }
+                  ],
+                  "volume_score_tiers": [
+                    {
+                      "max": 0.033,
+                      "position_mult": 0.75
+                    }
+                  ],
+                  "adx_trend_penalty": {
+                    "min_adx": 40.0,
+                    "position_mult": 0.70
+                  },
+                  "signal_type_caps": {
+                    "green_bar_shrinking": {
+                      "max_target_portion": 0.10
+                    },
+                    "red_bar_shrinking": {
+                      "max_target_portion": 0.12
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "notes": "Live Strategy v2 ablation: test low-VWAP, low-volume, high-ADX TREND, and 4H shrink position compression without changing entry eligibility."
+        },
+        "macd_v2_ablation_no_trade_meaningful_block": {
+          "config_overrides": {
+            "fund_flow": {
+              "macd_mtf_strategy_v2": {
+                "regime_entry_policy": {
+                  "NO_TRADE": {
+                    "allow_meaningful_entry": false,
+                    "allow_micro_notional": true,
+                    "micro_target_portion": 0.009
+                  }
+                }
+              }
+            }
+          },
+          "notes": "Live Strategy v2 ablation: keep NO_TRADE micro-notional probes but cap meaningful NO_TRADE entries to micro size for PnL and turnover comparison."
+        },
         "macd_v2_ablation_soft_long_threshold_080": {
           "config_overrides": {
             "fund_flow": {
@@ -1976,7 +2094,7 @@
             "JSTUSDT",
             "FETUSDT"
           ],
-          "max_active_symbols": 3,
+          "max_active_symbols": 5,
           "config_overrides": {
             "fund_flow": {
               "macd_mtf_strategy_v2": {

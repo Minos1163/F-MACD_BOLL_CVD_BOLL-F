@@ -449,6 +449,12 @@ def build_strategy_config(runtime_cfg: dict) -> MACDStrategyV2Config:
     exit_mgmt_cfg = v2_cfg.get("exit_management", {}) if isinstance(v2_cfg.get("exit_management"), dict) else {}
     session_risk_cfg = v2_cfg.get("session_risk_control", {}) if isinstance(v2_cfg.get("session_risk_control"), dict) else {}
     vwap_score_tier_cfg = v2_cfg.get("vwap_score_position_tiers", {}) if isinstance(v2_cfg.get("vwap_score_position_tiers"), dict) else {}
+    dynamic_position_cfg = v2_cfg.get("dynamic_position_sizing", {}) if isinstance(v2_cfg.get("dynamic_position_sizing"), dict) else {}
+    side_enable_cfg = v2_cfg.get("side_enable", {}) if isinstance(v2_cfg.get("side_enable"), dict) else {}
+    short_side_enable_cfg = side_enable_cfg.get("SHORT", side_enable_cfg.get("short", {})) if isinstance(side_enable_cfg, dict) else {}
+    short_side_enable_cfg = short_side_enable_cfg if isinstance(short_side_enable_cfg, dict) else {}
+    regime_entry_policy_cfg = v2_cfg.get("regime_entry_policy", {}) if isinstance(v2_cfg.get("regime_entry_policy"), dict) else {}
+    no_trade_policy_cfg = regime_entry_policy_cfg.get("NO_TRADE", {}) if isinstance(regime_entry_policy_cfg.get("NO_TRADE"), dict) else {}
     symbol_risk_cfg = v2_cfg.get("symbol_risk_tiers", {}) if isinstance(v2_cfg.get("symbol_risk_tiers"), dict) else {}
     macd_cfg = v2_cfg.get("macd_config", {}) if isinstance(v2_cfg.get("macd_config"), dict) else {}
     filter_cfg = v2_cfg.get("entry_filters", {}) if isinstance(v2_cfg.get("entry_filters"), dict) else {}
@@ -576,6 +582,8 @@ def build_strategy_config(runtime_cfg: dict) -> MACDStrategyV2Config:
         neutral_upgrade_penalty_mult=float(filter_cfg.get("neutral_upgrade_penalty_mult", 0.90)),
         enable_rsi_rhythm_scoring=bool(rsi_rhythm_cfg.get("enabled", True)),
         enable_rsi_hard_veto=bool(rsi_rhythm_cfg.get("enable_hard_veto", True)),
+        enable_rsi_1h_direction_gate=bool(rsi_rhythm_cfg.get("enable_1h_direction_gate", False)),
+        rsi_1h_direction_flat_threshold=float(rsi_rhythm_cfg.get("direction_flat_threshold", 0.3)),
         enable_leading_rsi_conflict_pass=bool(rsi_rhythm_cfg.get("enable_leading_conflict_pass", True)),
         leading_rsi_slope_threshold=float(rsi_rhythm_cfg.get("leading_slope_threshold", 2.0)),
         rsi_conflict_penalty_mult=float(rsi_rhythm_cfg.get("conflict_penalty_mult", 0.95)),
@@ -640,6 +648,19 @@ def build_strategy_config(runtime_cfg: dict) -> MACDStrategyV2Config:
             float(filter_cfg.get("rsi_launch_sovereign_priority_expire_seconds", 30))
         ),
         rsi_launch_sovereign_allow_retry=bool(filter_cfg.get("rsi_launch_sovereign_allow_retry", True)),
+        short_min_vwap_score_for_entry=float(filter_cfg.get("short_min_vwap_score_for_entry", 0.06)),
+        flip_bearish_short_min_vwap_score_for_entry=float(
+            filter_cfg.get("flip_bearish_short_min_vwap_score_for_entry", 0.08)
+        ),
+        flip_bearish_require_enhancement_or_15m_confirmation=bool(
+            filter_cfg.get("flip_bearish_require_enhancement_or_15m_confirmation", True)
+        ),
+        enable_short_regime_guard=bool(filter_cfg.get("enable_short_regime_guard", False)),
+        flip_bearish_block_trend_regime=bool(filter_cfg.get("flip_bearish_block_trend_regime", True)),
+        flip_bearish_trend_adx_min=float(filter_cfg.get("flip_bearish_trend_adx_min", 25.0)),
+        disable_rsi_neutral_resume_short=bool(filter_cfg.get("disable_rsi_neutral_resume_short", False)),
+        enable_score_4h_hard_gate=bool(filter_cfg.get("enable_score_4h_hard_gate", False)),
+        min_score_4h_for_entry=float(filter_cfg.get("min_score_4h_for_entry", 0.12)),
         enable_green_bar_growing_short_adx_1h_range_filter=bool(filter_cfg.get("enable_green_bar_growing_short_adx_1h_range_filter", False)),
         green_bar_growing_short_min_adx_1h=float(filter_cfg.get("green_bar_growing_short_min_adx_1h", 0.0)),
         green_bar_growing_short_max_adx_1h=float(filter_cfg.get("green_bar_growing_short_max_adx_1h", 0.0)),
@@ -778,6 +799,24 @@ def build_strategy_config(runtime_cfg: dict) -> MACDStrategyV2Config:
             str(x).strip() for x in (vwap_score_tier_cfg.get("apply_to_states", []) or []) if str(x).strip()
         ] if isinstance(vwap_score_tier_cfg.get("apply_to_states"), list) else [],
         vwap_score_position_tiers=copy.deepcopy(vwap_score_tier_cfg.get("tiers", [])) if isinstance(vwap_score_tier_cfg.get("tiers"), list) else [],
+        enable_dynamic_position_sizing=bool(dynamic_position_cfg.get("enabled", False)),
+        dynamic_vwap_score_position_tiers=copy.deepcopy(dynamic_position_cfg.get("vwap_score_tiers", [])) if isinstance(dynamic_position_cfg.get("vwap_score_tiers"), list) else [],
+        dynamic_volume_score_position_tiers=copy.deepcopy(dynamic_position_cfg.get("volume_score_tiers", [])) if isinstance(dynamic_position_cfg.get("volume_score_tiers"), list) else [],
+        dynamic_adx_trend_min=float((dynamic_position_cfg.get("adx_trend_penalty", {}) or {}).get("min_adx", 0.0)) if isinstance(dynamic_position_cfg.get("adx_trend_penalty"), dict) else 0.0,
+        dynamic_adx_trend_position_mult=float((dynamic_position_cfg.get("adx_trend_penalty", {}) or {}).get("position_mult", 1.0)) if isinstance(dynamic_position_cfg.get("adx_trend_penalty"), dict) else 1.0,
+        dynamic_signal_type_position_caps=copy.deepcopy(dynamic_position_cfg.get("signal_type_caps", {})) if isinstance(dynamic_position_cfg.get("signal_type_caps"), dict) else {},
+        enable_meaningful_short_entry_cap=(
+            bool(short_side_enable_cfg)
+            and not bool(short_side_enable_cfg.get("meaningful", True))
+            and bool(short_side_enable_cfg.get("micro", True))
+        ),
+        meaningful_short_micro_target_portion=float(short_side_enable_cfg.get("micro_target_portion", 0.009)) if short_side_enable_cfg else 0.009,
+        enable_no_trade_meaningful_entry_cap=(
+            bool(no_trade_policy_cfg)
+            and not bool(no_trade_policy_cfg.get("allow_meaningful_entry", True))
+            and bool(no_trade_policy_cfg.get("allow_micro_notional", True))
+        ),
+        no_trade_micro_target_portion=float(no_trade_policy_cfg.get("micro_target_portion", 0.009)) if no_trade_policy_cfg else 0.009,
         symbol_risk_watchlist_symbols=[
             str(x).strip().upper() for x in (symbol_risk_cfg.get("watchlist_symbols", []) or []) if str(x).strip()
         ] if isinstance(symbol_risk_cfg.get("watchlist_symbols"), list) else [],
@@ -1752,6 +1791,7 @@ class BacktestEngine:
             if 'structural_vwap' in tf_1h.columns else None,
             adx_1h=float(row_1h['adx']) if 'adx' in row_1h.index else 0.0,
             adx_4h=float(row_4h['adx']) if 'adx' in row_4h.index else 0.0,
+            market_regime=str(row_1h.get('regime', '')) if hasattr(row_1h, 'get') else '',
             cvd_upper_wick_ratio=float(row_15m['upper_wick_ratio']) if 'upper_wick_ratio' in row_15m.index else None,
             cvd_1h_delta_ratio=float(row_1h['cvd_delta_ratio']) if 'cvd_delta_ratio' in row_1h.index else None,
             atr_1h=row_1h['atr'],
@@ -1805,6 +1845,7 @@ class BacktestEngine:
         price: float,
         ema_multiplier: float,
         signal_type_1h: str | None = None,
+        trade_direction: str | None = None,
         vwap_score: float = 0.0,
         vwap_state: str | None = None,
         bonus_multiplier: float = 1.0,
@@ -1812,6 +1853,10 @@ class BacktestEngine:
         entry_scale: float = 1.0,
         session_scale: float = 1.0,
         vol_vwap_warn: bool = False,
+        signal_type_4h: str | None = None,
+        volume_score: float = 0.0,
+        adx_1h: float = 0.0,
+        market_regime: str | None = None,
     ) -> Tuple[float, int]:
         """计算仓位大小和杠杆"""
         if self.config.fixed_leverage is not None:
@@ -1830,9 +1875,14 @@ class BacktestEngine:
             base_default_portion=self.config.default_target_portion,
             base_max_symbol_position_portion=self.config.max_symbol_position_portion,
             symbol=symbol,
+            trade_direction=trade_direction,
             signal_type_1h=signal_type_1h,
+            signal_type_4h=signal_type_4h,
             vwap_score=vwap_score,
             vwap_state=vwap_state,
+            volume_score=volume_score,
+            adx_1h=adx_1h,
+            market_regime=market_regime,
             bonus_multiplier=bonus_multiplier,
             is_trial_entry=is_trial_entry,
             entry_scale=entry_scale,
@@ -1972,6 +2022,7 @@ class BacktestEngine:
             price=price,
             ema_multiplier=signal.ema_multiplier,
             signal_type_1h=signal.signal_type_1h,
+            trade_direction=str(signal.direction or ""),
             vwap_score=signal.vwap_score,
             vwap_state=signal.vwap_state,
             bonus_multiplier=float(cvd_context.get('cvd_bonus_multiplier', 1.0)),
@@ -1979,6 +2030,10 @@ class BacktestEngine:
             entry_scale=float(signal.entry_scale or 1.0),
             session_scale=session_position_scale,
             vol_vwap_warn=bool(signal_details.get("vol_vwap_warn", False)),
+            signal_type_4h=str(signal_details.get("signal_type_4h", "") or ""),
+            volume_score=float(signal_details.get("score_volume", 0.0) or 0.0),
+            adx_1h=float(signal_details.get("adx_1h", 0.0) or 0.0),
+            market_regime=str(signal_details.get("market_regime", "") or ""),
         )
         if position_value <= 0:
             self._bump_execution_reason("execute_reject_reasons", "position_value_zero")

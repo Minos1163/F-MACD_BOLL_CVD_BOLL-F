@@ -28,6 +28,9 @@ class FundFlowRiskEngine:
         self.max_leverage = int(leverage_cfg["max_leverage"])
         self.default_leverage = int(leverage_cfg["default_leverage"])
         self.min_open_portion = float(fund_flow_cfg.get("min_open_portion", 0.08))
+        self.probe_min_open_portion = float(
+            fund_flow_cfg.get("probe_min_open_portion", fund_flow_cfg.get("min_open_portion", 0.08))
+        )
         self.max_open_portion = float(fund_flow_cfg.get("max_open_portion", 1.0))
         self.price_deviation_limit_percent = float(
             fund_flow_cfg.get("price_deviation_limit_percent", 1.0)
@@ -93,6 +96,12 @@ class FundFlowRiskEngine:
                 f"target_portion_of_balance 越界: {val:.4f}, 要求 [{self.min_open_portion}, {self.max_open_portion}]"
             )
         return val
+
+    def resolve_min_open_portion(self, decision: Optional[FundFlowDecision] = None) -> float:
+        base_min = float(self.min_open_portion)
+        if isinstance(getattr(decision, "metadata", None), dict) and bool(decision.metadata.get("rsi_probe_mode", False)):
+            return max(0.0001, min(base_min, float(self.probe_min_open_portion)))
+        return base_min
 
     @staticmethod
     def _cfg_bool(cfg: Dict[str, Any], key: str, default: bool = False) -> bool:
@@ -223,9 +232,20 @@ class FundFlowRiskEngine:
         self.validate_operation(decision.operation)
         self.validate_symbol(decision.symbol, decision.operation, position)
         decision.leverage = self.clamp_leverage(decision.leverage)
-        decision.target_portion_of_balance = self.validate_target_portion(
-            decision.target_portion_of_balance,
-            decision.operation,
-        )
+        if decision.operation in (Operation.BUY, Operation.SELL):
+            min_open_backup = self.min_open_portion
+            try:
+                self.min_open_portion = self.resolve_min_open_portion(decision)
+                decision.target_portion_of_balance = self.validate_target_portion(
+                    decision.target_portion_of_balance,
+                    decision.operation,
+                )
+            finally:
+                self.min_open_portion = min_open_backup
+        else:
+            decision.target_portion_of_balance = self.validate_target_portion(
+                decision.target_portion_of_balance,
+                decision.operation,
+            )
         decision = self._apply_account_risk_scaler(decision)
         return decision

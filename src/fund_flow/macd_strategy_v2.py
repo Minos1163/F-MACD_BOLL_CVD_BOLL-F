@@ -164,6 +164,8 @@ class MACDStrategyV2Config:
     neutral_upgrade_penalty_mult: float = 0.90
     enable_rsi_rhythm_scoring: bool = True
     enable_rsi_hard_veto: bool = True
+    enable_rsi_1h_direction_gate: bool = False
+    rsi_1h_direction_flat_threshold: float = 0.3
     enable_leading_rsi_conflict_pass: bool = True
     leading_rsi_slope_threshold: float = 2.0
     rsi_conflict_penalty_mult: float = 0.95
@@ -245,6 +247,12 @@ class MACDStrategyV2Config:
     short_min_vwap_score_for_entry: float = 0.06
     flip_bearish_short_min_vwap_score_for_entry: float = 0.08
     flip_bearish_require_enhancement_or_15m_confirmation: bool = True
+    enable_short_regime_guard: bool = False
+    flip_bearish_block_trend_regime: bool = True
+    flip_bearish_trend_adx_min: float = 25.0
+    disable_rsi_neutral_resume_short: bool = False
+    enable_score_4h_hard_gate: bool = False
+    min_score_4h_for_entry: float = 0.12
     enable_trial_short_below_structure_continuation_promotion: bool = False
     trial_short_below_structure_promotion_min_signal_score: float = 0.82
     trial_short_below_structure_promotion_min_vwap_score: float = 0.075
@@ -288,6 +296,16 @@ class MACDStrategyV2Config:
     session_risk_apply_to_states: List[str] = field(default_factory=list)
     vwap_score_tier_apply_to_states: List[str] = field(default_factory=list)
     vwap_score_position_tiers: List[Dict[str, Any]] = field(default_factory=list)
+    enable_dynamic_position_sizing: bool = False
+    dynamic_vwap_score_position_tiers: List[Dict[str, Any]] = field(default_factory=list)
+    dynamic_volume_score_position_tiers: List[Dict[str, Any]] = field(default_factory=list)
+    dynamic_adx_trend_min: float = 0.0
+    dynamic_adx_trend_position_mult: float = 1.0
+    dynamic_signal_type_position_caps: Dict[str, Any] = field(default_factory=dict)
+    enable_meaningful_short_entry_cap: bool = False
+    meaningful_short_micro_target_portion: float = 0.009
+    enable_no_trade_meaningful_entry_cap: bool = False
+    no_trade_micro_target_portion: float = 0.009
     symbol_risk_watchlist_symbols: List[str] = field(default_factory=list)
     symbol_risk_watchlist_max_position_portion: float = 0.0
     symbol_risk_watchlist_max_leverage: int = 0
@@ -342,6 +360,29 @@ class MACDStrategyV2Config:
     short_filter_min_funding_rate: float = 0.0005  # funding_rate > 0.05%
     short_filter_max_oi_delta_ratio: float = 0.0  # oi_delta_ratio < 0 (多头减仓)
     short_filter_min_vwap_deviation: float = 0.005  # price > vwap * 1.005
+
+    def effective_scoring_weight_diagnostics(self) -> Dict[str, Any]:
+        independent_weights = {
+            "weight_1h_direction": float(self.weight_1h_direction),
+            "weight_4h_direction": float(self.weight_4h_direction),
+            "weight_rsi_rhythm": float(self.weight_rsi_rhythm),
+            "weight_vwap": float(self.weight_vwap),
+            "weight_15m_entry": float(self.weight_15m_entry),
+            "weight_volume": float(self.weight_volume),
+        }
+        legacy_folded_weights = {
+            "weight_4h_enhancement": float(self.weight_4h_enhancement),
+        }
+        independent_sum = sum(independent_weights.values())
+        legacy_sum = sum(legacy_folded_weights.values())
+        return {
+            "independent_weights": independent_weights,
+            "legacy_folded_weights": legacy_folded_weights,
+            "independent_weight_sum": independent_sum,
+            "configured_weight_sum": independent_sum + legacy_sum,
+            "expected_independent_weight_sum": 1.0,
+            "weight_4h_enhancement_mode": "folded_into_score_4h",
+        }
 
     def resolve_signal_score_threshold(
         self,
@@ -849,6 +890,68 @@ class MACDStrategyV2Engine:
                 continue
             return self._clamp(float(raw_tier.get("position_mult", 1.0) or 1.0), 0.05, 1.5)
         return 1.0
+
+    @classmethod
+    def _resolve_score_tier_multiplier(
+        cls,
+        score: float,
+        tiers: Optional[List[Dict[str, Any]]],
+    ) -> float:
+        value = float(score or 0.0)
+        for raw_tier in tiers or []:
+            if not isinstance(raw_tier, dict):
+                continue
+            tier_min = float(raw_tier.get("min", 0.0) or 0.0)
+            tier_max = float(raw_tier.get("max", 1.0) or 1.0)
+            if tier_max < tier_min:
+                continue
+            if not (tier_min <= value <= tier_max):
+                continue
+            return cls._clamp(float(raw_tier.get("position_mult", 1.0) or 1.0), 0.05, 1.5)
+        return 1.0
+
+    def resolve_dynamic_position_multiplier(
+        self,
+        *,
+        vwap_score: float,
+        volume_score: float,
+        adx_1h: float,
+        market_regime: Optional[str],
+    ) -> float:
+        if not bool(self.config.enable_dynamic_position_sizing):
+            return 1.0
+
+        multiplier = 1.0
+        multiplier *= self._resolve_score_tier_multiplier(
+            vwap_score,
+            self.config.dynamic_vwap_score_position_tiers,
+        )
+        multiplier *= self._resolve_score_tier_multiplier(
+            volume_score,
+            self.config.dynamic_volume_score_position_tiers,
+        )
+
+        regime = str(market_regime or "").strip().upper()
+        if (
+            regime == "TREND"
+            and float(self.config.dynamic_adx_trend_min or 0.0) > 0.0
+            and float(adx_1h or 0.0) >= float(self.config.dynamic_adx_trend_min)
+        ):
+            multiplier *= self._clamp(float(self.config.dynamic_adx_trend_position_mult or 1.0), 0.05, 1.0)
+
+        return self._clamp(multiplier, 0.05, 1.5)
+
+    def resolve_signal_type_position_cap(
+        self,
+        signal_type_4h: Optional[str],
+    ) -> float:
+        if not bool(self.config.enable_dynamic_position_sizing):
+            return 0.0
+        signal_type = str(signal_type_4h or "").strip().lower()
+        raw_cap = (self.config.dynamic_signal_type_position_caps or {}).get(signal_type)
+        if not isinstance(raw_cap, dict):
+            return 0.0
+        return self._clamp(float(raw_cap.get("max_target_portion", 0.0) or 0.0), 0.0, 1.0)
 
     @classmethod
     def _normalized_change(cls, current: float, previous: float) -> float:
@@ -1510,6 +1613,9 @@ class MACDStrategyV2Engine:
             "rsi_1h_current": np.nan,
             "rsi_1h_prev": np.nan,
             "rsi_1h_slope": 0.0,
+            "rsi_1h_direction": "unknown",
+            "rsi_1h_direction_gate_passed": True,
+            "rsi_1h_direction_gate_threshold": float(self.config.rsi_1h_direction_flat_threshold),
             "rsi_1h_recent_low": np.nan,
             "rsi_1h_recent_high": np.nan,
         }
@@ -1557,6 +1663,33 @@ class MACDStrategyV2Engine:
         result["rsi_1h_current"] = current_rsi_1h
         result["rsi_1h_prev"] = prev_rsi_1h
         result["rsi_1h_slope"] = slope_1h
+        direction_threshold = max(0.0, float(self.config.rsi_1h_direction_flat_threshold))
+        if slope_1h > direction_threshold:
+            rsi_1h_direction = "up"
+        elif slope_1h < -direction_threshold:
+            rsi_1h_direction = "down"
+        else:
+            rsi_1h_direction = "flat"
+        result["rsi_1h_direction"] = rsi_1h_direction
+        result["rsi_1h_direction_gate_threshold"] = direction_threshold
+        if self.config.enable_rsi_1h_direction_gate and self.config.enable_rsi_hard_veto:
+            gate_passed = (
+                (direction == "long" and rsi_1h_direction == "up")
+                or (direction == "short" and rsi_1h_direction == "down")
+            )
+            result["rsi_1h_direction_gate_passed"] = gate_passed
+            if not gate_passed:
+                result.update(
+                    hard_veto=True,
+                    veto_reason=(
+                        "rsi_1h_direction_flat_veto"
+                        if rsi_1h_direction == "flat"
+                        else "rsi_1h_direction_against_veto"
+                    ),
+                    entry_type="rsi_1h_direction_block",
+                    exposure_mult=0.0,
+                )
+                return result
         if recent_1h.size:
             result["rsi_1h_recent_low"] = float(np.min(recent_1h))
             result["rsi_1h_recent_high"] = float(np.max(recent_1h))
@@ -2731,7 +2864,7 @@ class MACDStrategyV2Engine:
         VWAP评分计算（位置状态 + 连续分数）
         
         返回：
-        - score: 0-weight_vwap
+        - score: 0-1 raw VWAP location quality
         - veto_type: 是否触发否决
         - details: 位置状态与连续评分细节
         """
@@ -2741,9 +2874,11 @@ class MACDStrategyV2Engine:
 
         if vwap <= 0:
             location_score = 0.5
-            return round(self.config.weight_vwap * location_score, 4), VetoType.NONE, {
+            return round(location_score, 4), VetoType.NONE, {
                 "state": "no_vwap",
                 "location_score": location_score,
+                "vwap_quality_score": location_score,
+                "vwap_alpha_score": round(self.config.weight_vwap * location_score, 4),
                 "entry_edge": 0.0,
                 "directional_extension": 0.0,
                 "entry_edge_quality": 0.5,
@@ -2764,6 +2899,8 @@ class MACDStrategyV2Engine:
                     return 0.0, VetoType.VWAP_HARD_BLOCK, {
                         "state": "long_overextended_above_value",
                         "location_score": 0.0,
+                        "vwap_quality_score": 0.0,
+                        "vwap_alpha_score": 0.0,
                         "entry_edge": entry_edge,
                         "directional_extension": directional_extension,
                         "session_vwap": vwap,
@@ -2788,6 +2925,8 @@ class MACDStrategyV2Engine:
                     return 0.0, VetoType.VWAP_HARD_BLOCK, {
                         "state": "short_overextended_below_value",
                         "location_score": 0.0,
+                        "vwap_quality_score": 0.0,
+                        "vwap_alpha_score": 0.0,
                         "entry_edge": entry_edge,
                         "directional_extension": directional_extension,
                         "session_vwap": vwap,
@@ -2807,9 +2946,11 @@ class MACDStrategyV2Engine:
                     state = "short_stretched_premium"
             else:
                 location_score = 0.5
-                return round(self.config.weight_vwap * location_score, 4), VetoType.NONE, {
+                return round(location_score, 4), VetoType.NONE, {
                     "state": "neutral",
                     "location_score": location_score,
+                    "vwap_quality_score": location_score,
+                    "vwap_alpha_score": round(self.config.weight_vwap * location_score, 4),
                     "entry_edge": 0.0,
                     "directional_extension": 0.0,
                     "entry_edge_quality": 0.5,
@@ -2833,10 +2974,12 @@ class MACDStrategyV2Engine:
                 0.0,
                 1.0,
             )
-            score = round(self.config.weight_vwap * location_score, 4)
-            return score, VetoType.NONE, {
+            alpha_score = round(self.config.weight_vwap * location_score, 4)
+            return round(location_score, 4), VetoType.NONE, {
                 "state": state,
                 "location_score": location_score,
+                "vwap_quality_score": location_score,
+                "vwap_alpha_score": alpha_score,
                 "entry_edge": entry_edge,
                 "directional_extension": directional_extension,
                 "entry_edge_quality": entry_edge_quality,
@@ -2889,6 +3032,8 @@ class MACDStrategyV2Engine:
                 return 0.0, VetoType.VWAP_HARD_BLOCK, {
                     "state": "short_overextended_below_value",
                     "location_score": 0.0,
+                    "vwap_quality_score": 0.0,
+                    "vwap_alpha_score": 0.0,
                     "entry_edge": entry_edge,
                     "directional_extension": directional_extension,
                     "session_vwap": vwap,
@@ -2932,10 +3077,12 @@ class MACDStrategyV2Engine:
                 0.0,
                 1.0,
             )
-            score = round(self.config.weight_vwap * location_score, 4)
-            return score, VetoType.NONE, {
+            alpha_score = round(self.config.weight_vwap * location_score, 4)
+            return round(location_score, 4), VetoType.NONE, {
                 "state": state,
                 "location_score": location_score,
+                "vwap_quality_score": location_score,
+                "vwap_alpha_score": alpha_score,
                 "entry_edge": entry_edge,
                 "directional_extension": directional_extension,
                 "entry_edge_quality": session_pressure_quality,
@@ -2957,6 +3104,8 @@ class MACDStrategyV2Engine:
                 return 0.0, VetoType.VWAP_HARD_BLOCK, {
                     "state": "long_overextended_above_value",
                     "location_score": 0.0,
+                    "vwap_quality_score": 0.0,
+                    "vwap_alpha_score": 0.0,
                     "entry_edge": entry_edge,
                     "directional_extension": directional_extension,
                     "session_vwap": vwap,
@@ -3000,10 +3149,12 @@ class MACDStrategyV2Engine:
                 0.0,
                 1.0,
             )
-            score = round(self.config.weight_vwap * location_score, 4)
-            return score, VetoType.NONE, {
+            alpha_score = round(self.config.weight_vwap * location_score, 4)
+            return round(location_score, 4), VetoType.NONE, {
                 "state": state,
                 "location_score": location_score,
+                "vwap_quality_score": location_score,
+                "vwap_alpha_score": alpha_score,
                 "entry_edge": entry_edge,
                 "directional_extension": directional_extension,
                 "entry_edge_quality": session_support_quality,
@@ -3019,9 +3170,11 @@ class MACDStrategyV2Engine:
             }
 
         location_score = 0.5
-        return round(self.config.weight_vwap * location_score, 4), VetoType.NONE, {
+        return round(location_score, 4), VetoType.NONE, {
             "state": "neutral",
             "location_score": location_score,
+            "vwap_quality_score": location_score,
+            "vwap_alpha_score": round(self.config.weight_vwap * location_score, 4),
             "entry_edge": 0.0,
             "directional_extension": 0.0,
             "entry_edge_quality": 0.5,
@@ -3283,6 +3436,7 @@ class MACDStrategyV2Engine:
         structural_vwap_1h_series: Optional[np.ndarray] = None,
         adx_1h: float = 0.0,
         adx_4h: float = 0.0,
+        market_regime: str = "",
         bb_middle_slope_1h: Optional[float] = None,
         bb_middle_slope_4h: Optional[float] = None,
         cvd_upper_wick_ratio: Optional[float] = None,
@@ -3308,6 +3462,7 @@ class MACDStrategyV2Engine:
             volume_ratio=volume_ratio,
             adx_1h=adx_1h,
             adx_4h=adx_4h,
+            market_regime=str(market_regime or ""),
         )
         if cvd_upper_wick_ratio is not None:
             debug_details["cvd_upper_wick_ratio"] = float(cvd_upper_wick_ratio)
@@ -3686,12 +3841,16 @@ class MACDStrategyV2Engine:
         )
         vwap_deviation = (close_price - vwap) / vwap if vwap > 0 else 0.0
         vwap_state = str(vwap_details.get("state", "unknown"))
-        vwap_location_score = float(vwap_details.get("location_score", 0.0))
+        vwap_location_score = float(vwap_details.get("location_score", vwap_score))
+        vwap_quality_score = float(vwap_details.get("vwap_quality_score", vwap_location_score))
+        vwap_alpha_score = float(vwap_details.get("vwap_alpha_score", self.config.weight_vwap * vwap_quality_score))
         structural_vwap_deviation = float(vwap_details.get("structural_deviation", 0.0))
         debug_details = self._set_stage(
             debug_details,
             "vwap",
             vwap_score=vwap_score,
+            vwap_quality_score=vwap_quality_score,
+            vwap_alpha_score=vwap_alpha_score,
             vwap_deviation=vwap_deviation,
             vwap_state=vwap_state,
             vwap_location_score=vwap_location_score,
@@ -3893,6 +4052,9 @@ class MACDStrategyV2Engine:
             "hard_veto": bool(rsi_rhythm.get("hard_veto", False)),
             "veto_reason": str(rsi_rhythm.get("veto_reason") or ""),
             "exposure_mult": float(rsi_rhythm.get("exposure_mult", 0.8)),
+            "rsi_1h_direction": str(rsi_rhythm.get("rsi_1h_direction") or "unknown"),
+            "rsi_1h_direction_gate_passed": bool(rsi_rhythm.get("rsi_1h_direction_gate_passed", True)),
+            "rsi_1h_direction_gate_threshold": float(rsi_rhythm.get("rsi_1h_direction_gate_threshold", 0.0)),
             "rsi_15m_recent_min": float(rsi_rhythm.get("rsi_15m_recent_min", np.nan)),
             "rsi_15m_recent_max": float(rsi_rhythm.get("rsi_15m_recent_max", np.nan)),
             "rsi_1h_recent_reset_min": float(rsi_rhythm.get("rsi_1h_recent_reset_min", np.nan)),
@@ -3913,6 +4075,9 @@ class MACDStrategyV2Engine:
             rsi_exposure_mult=rsi_rhythm.get("exposure_mult", 0.8),
             rsi_hard_veto=bool(rsi_rhythm.get("hard_veto", False)),
             rsi_hard_veto_reason=rsi_rhythm.get("veto_reason"),
+            rsi_1h_direction=rsi_rhythm.get("rsi_1h_direction"),
+            rsi_1h_direction_gate_passed=bool(rsi_rhythm.get("rsi_1h_direction_gate_passed", True)),
+            rsi_1h_direction_gate_threshold=rsi_rhythm.get("rsi_1h_direction_gate_threshold"),
             bb_middle_15m=bb_middle_15m,
             bb_upper_15m=bb_upper_15m,
             bb_lower_15m=bb_lower_15m,
@@ -4452,8 +4617,8 @@ class MACDStrategyV2Engine:
         score += score_rsi_rhythm
         score += float(flip_bullish_sniper_bonus)
 
-        # VWAP评分
-        score_vwap = vwap_score
+        # VWAP评分：quality 用于 gate，alpha 才进入综合分。
+        score_vwap = vwap_alpha_score
         score += score_vwap
 
         score_15m = 0.0
@@ -4535,6 +4700,8 @@ class MACDStrategyV2Engine:
             score_4h_trend=score_4h_trend,
             score_4h_enhancement_base=score_4h_enhancement_base,
             score_4h_enhancement=score_4h_enhancement,
+            folded_4h_bonus=folded_4h_bonus,
+            score_4h_enhancement_mode="folded_into_score_4h",
             score_rsi_rhythm_raw=score_rsi_rhythm_raw,
             score_rsi_rhythm_weighted=score_rsi_rhythm,
             rsi_spring_weighted_floor_applied=bool(rsi_spring_weight_floor["rsi_spring_weighted_floor_applied"]),
@@ -4641,6 +4808,102 @@ class MACDStrategyV2Engine:
                 ),
             )
         
+        if (
+            self.config.enable_score_4h_hard_gate
+            and not stable_continuation_active
+            and float(score_4h) < float(self.config.min_score_4h_for_entry)
+        ):
+            debug_details = self._set_stage(
+                debug_details,
+                "score_4h_hard_gate",
+                score_4h_hard_gate_enabled=True,
+                min_score_4h_for_entry=float(self.config.min_score_4h_for_entry),
+                score_4h=score_4h,
+            )
+            return self._neutral_signal(
+                reason=f"score_4h_hard_gate({score_4h:.4f}<{self.config.min_score_4h_for_entry:.4f})",
+                score=score,
+                signal_type_1h=signal_type_1h,
+                entry_type_15m=entry_type_15m,
+                entry_score_15m=entry_score_15m,
+                vwap_score=vwap_score,
+                vwap_deviation=vwap_deviation,
+                vwap_state=vwap_state,
+                vwap_location_score=vwap_location_score,
+                ema_multiplier=ema_multiplier,
+                ema_structure_status=ema_status,
+                enhancement_score=enhancement_score,
+                is_4h_enhanced=is_4h_enhanced,
+                details=self._build_debug_details(**debug_details),
+            )
+
+        if self.config.enable_short_regime_guard and trade_direction == "short":
+            normalized_entry = str(entry_type_15m or "").strip().lower()
+            if self.config.disable_rsi_neutral_resume_short and normalized_entry == "rsi_neutral_resume":
+                debug_details = self._set_stage(
+                    debug_details,
+                    "rsi_neutral_resume_short_disabled",
+                    short_regime_guard_enabled=True,
+                    entry_type_15m=entry_type_15m,
+                )
+                return self._neutral_signal(
+                    reason="rsi_neutral_resume_short_disabled",
+                    score=score,
+                    veto_type=VetoType.SHORT_QUALITY_FILTER,
+                    veto_reason="rsi_neutral_resume_short_disabled",
+                    signal_type_1h=signal_type_1h,
+                    entry_type_15m=entry_type_15m,
+                    entry_score_15m=entry_score_15m,
+                    vwap_score=vwap_score,
+                    vwap_deviation=vwap_deviation,
+                    vwap_state=vwap_state,
+                    vwap_location_score=vwap_location_score,
+                    ema_multiplier=ema_multiplier,
+                    ema_structure_status=ema_status,
+                    enhancement_score=enhancement_score,
+                    is_4h_enhanced=is_4h_enhanced,
+                    details=self._build_debug_details(**debug_details),
+                )
+
+            regime_text = str(market_regime or "").strip().upper()
+            trend_like = regime_text == "TREND" or (not regime_text and float(adx_1h) >= float(self.config.flip_bearish_trend_adx_min))
+            if (
+                self.config.flip_bearish_block_trend_regime
+                and signal_type_1h == "flip_bearish"
+                and trend_like
+                and float(adx_1h) >= float(self.config.flip_bearish_trend_adx_min)
+            ):
+                debug_details = self._set_stage(
+                    debug_details,
+                    "short_regime_guard",
+                    short_regime_guard_enabled=True,
+                    market_regime=regime_text,
+                    short_regime_guard_adx_1h=float(adx_1h),
+                    flip_bearish_trend_adx_min=float(self.config.flip_bearish_trend_adx_min),
+                )
+                return self._neutral_signal(
+                    reason=(
+                        f"short_regime_guard("
+                        f"signal_type_1h={signal_type_1h};regime={regime_text or 'ADX_TREND'};"
+                        f"adx_1h={float(adx_1h):.2f})"
+                    ),
+                    score=score,
+                    veto_type=VetoType.SHORT_QUALITY_FILTER,
+                    veto_reason="short_regime_guard",
+                    signal_type_1h=signal_type_1h,
+                    entry_type_15m=entry_type_15m,
+                    entry_score_15m=entry_score_15m,
+                    vwap_score=vwap_score,
+                    vwap_deviation=vwap_deviation,
+                    vwap_state=vwap_state,
+                    vwap_location_score=vwap_location_score,
+                    ema_multiplier=ema_multiplier,
+                    ema_structure_status=ema_status,
+                    enhancement_score=enhancement_score,
+                    is_4h_enhanced=is_4h_enhanced,
+                    details=self._build_debug_details(**debug_details),
+                )
+
         # ========== Step 7.5: 空头质量过滤（V3专家组建议）==========
         if (
             strict_1h_filters_enabled
@@ -4822,6 +5085,8 @@ class MACDStrategyV2Engine:
             'shrink_exit_direction': shrink_4h_context["exit_direction"],
             'shrink_exit_ready': shrink_4h_context["shrink_exit_ready"],
             'vwap_score': vwap_score,
+            'vwap_quality_score': vwap_quality_score,
+            'vwap_alpha_score': vwap_alpha_score,
             'vwap_deviation': (close_price - vwap) / vwap if vwap > 0 else 0,
             'vwap_state': vwap_state,
             'vwap_location_score': vwap_location_score,
@@ -4851,6 +5116,8 @@ class MACDStrategyV2Engine:
             ),
             'score_4h_enhancement_base': score_4h_enhancement_base,
             'score_4h_enhancement': score_4h_enhancement,
+            'folded_4h_bonus': folded_4h_bonus,
+            'score_4h_enhancement_mode': "folded_into_score_4h",
             'score_rsi_rhythm_raw': score_rsi_rhythm_raw,
             'score_rsi_rhythm_weighted': score_rsi_rhythm,
             'rsi_spring_weighted_floor_applied': bool(rsi_spring_weight_floor["rsi_spring_weighted_floor_applied"]),
@@ -4858,6 +5125,9 @@ class MACDStrategyV2Engine:
             'flip_bullish_sniper_bonus': float(flip_bullish_sniper_bonus),
             'rsi_4h_regime': rsi_rhythm.get("rsi_4h_regime"),
             'rsi_1h_phase': rsi_rhythm.get("rsi_1h_phase"),
+            'rsi_1h_direction': rsi_rhythm.get("rsi_1h_direction"),
+            'rsi_1h_direction_gate_passed': bool(rsi_rhythm.get("rsi_1h_direction_gate_passed", True)),
+            'rsi_1h_direction_gate_threshold': float(rsi_rhythm.get("rsi_1h_direction_gate_threshold", 0.0)),
             'rsi_15m_entry_type': rsi_rhythm.get("entry_type"),
             'rsi_macd_conflict': rsi_macd_conflict,
             'rsi_conflict_type': rsi_conflict_type,
@@ -5042,9 +5312,14 @@ class MACDStrategyV2Engine:
         base_default_portion: float,
         base_max_symbol_position_portion: float,
         symbol: Optional[str] = None,
+        trade_direction: Optional[str] = None,
         signal_type_1h: Optional[str] = None,
+        signal_type_4h: Optional[str] = None,
         vwap_score: float = 0.0,
         vwap_state: Optional[str] = None,
+        volume_score: float = 0.0,
+        adx_1h: float = 0.0,
+        market_regime: Optional[str] = None,
         bonus_multiplier: float = 1.0,
         is_trial_entry: bool = False,
         entry_scale: float = 1.0,
@@ -5095,6 +5370,25 @@ class MACDStrategyV2Engine:
             signal_type_1h=signal_type_1h,
             vwap_state=vwap_state,
         )
+        portion *= self.resolve_dynamic_position_multiplier(
+            vwap_score=vwap_score,
+            volume_score=volume_score,
+            adx_1h=adx_1h,
+            market_regime=market_regime,
+        )
+        signal_cap = self.resolve_signal_type_position_cap(signal_type_4h)
+        if signal_cap > 0:
+            portion = min(portion, signal_cap)
+        if (
+            bool(self.config.enable_meaningful_short_entry_cap)
+            and str(trade_direction or "").strip().lower() == "short"
+        ):
+            portion = min(portion, self._clamp(float(self.config.meaningful_short_micro_target_portion or 0.0), 0.0, 1.0))
+        if (
+            bool(self.config.enable_no_trade_meaningful_entry_cap)
+            and str(market_regime or "").strip().upper() == "NO_TRADE"
+        ):
+            portion = min(portion, self._clamp(float(self.config.no_trade_micro_target_portion or 0.0), 0.0, 1.0))
         portion = min(max_symbol_position_portion, portion)
         if is_trial_entry:
             portion *= self._clamp(entry_scale, 0.05, 1.0)

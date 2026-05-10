@@ -23,7 +23,7 @@ Weight Router - 本地权重校验与调度模块
 - depth_ratio -> depth_ratio
 - imbalance -> imbalance
 - liquidity_delta_norm -> liquidity_delta
-- micro_delta_last/micro_delta_norm -> micro_delta
+- micro_delta_last/micro_delta_norm -> micro_delta  
 """
 from __future__ import annotations
 
