@@ -5658,12 +5658,20 @@ class TradingBot:
                     "be_trigger_price": be_trigger_price,
                 }
 
-            for order in existing_orders:
-                order_type = str(order.get("type") or order.get("orderType") or order.get("strategyType") or "").upper()
-                if "STOP" in order_type:
-                    oid = order.get("orderId")
-                    if oid:
-                        self.client.cancel_order(symbol, oid)
+            if hasattr(self.client, "_cancel_existing_protection_orders"):
+                self.client._cancel_existing_protection_orders(
+                    symbol=symbol,
+                    side=side_enum,
+                    cancel_tp=False,
+                    cancel_sl=True,
+                )
+            else:
+                for order in existing_orders:
+                    order_type = str(order.get("type") or order.get("orderType") or order.get("strategyType") or "").upper()
+                    if "STOP" in order_type:
+                        oid = order.get("orderId")
+                        if oid:
+                            self.client.cancel_order(symbol, oid)
         except Exception as e:
             print(f"⚠️ {symbol} 取消旧止损单失败: {e}")
             old_sl = 0.0

@@ -887,6 +887,31 @@ class FundFlowExecutionRouter:
         executed_qty = self._to_float(result.get("executedQty"), 0.0)
         return executed_qty > 0
 
+    def _cleanup_symbol_orders_after_flat(self, symbol: str) -> Dict[str, str]:
+        """
+        Best-effort cleanup for a symbol that is confirmed flat.
+
+        PAPI conditional TP/SL orders are not reliably covered by allOpenOrders,
+        so close/no-position paths must clear both conditional and regular open orders.
+        """
+        result: Dict[str, str] = {}
+        try:
+            if hasattr(self.client, "cancel_all_conditional_orders"):
+                self.client.cancel_all_conditional_orders(symbol)
+                result["cancel_conditional_orders"] = "ok"
+            else:
+                result["cancel_conditional_orders"] = "unavailable"
+        except Exception as e:
+            result["cancel_conditional_orders"] = f"error:{e}"
+
+        try:
+            self.client.cancel_all_open_orders(symbol)
+            result["cancel_open_orders"] = "ok"
+        except Exception as e:
+            result["cancel_open_orders"] = f"error:{e}"
+
+        return result
+
     def _is_fully_filled(self, result: Dict[str, Any]) -> bool:
         if not self._is_success(result):
             return False
@@ -1105,6 +1130,7 @@ class FundFlowExecutionRouter:
                                 "source": live_position.get("source"),
                             },
                         }
+                        result.update(self._cleanup_symbol_orders_after_flat(decision.symbol))
                         self.attribution.log_execution(decision, result)
                         return result
                     position_size = live_size
@@ -1121,6 +1147,7 @@ class FundFlowExecutionRouter:
                             "live_error": live_position.get("error"),
                         },
                     }
+                    result.update(self._cleanup_symbol_orders_after_flat(decision.symbol))
                     self.attribution.log_execution(decision, result)
                     return result
 
@@ -1424,11 +1451,7 @@ class FundFlowExecutionRouter:
                     final_result["full_close_completed"] = target_close_completed
                 if target_close_completed:
                     if is_full_close_target:
-                        try:
-                            self.client.cancel_all_open_orders(decision.symbol)
-                            final_result["cancel_open_orders"] = "ok"
-                        except Exception as e:
-                            final_result["cancel_open_orders"] = f"error:{e}"
+                        final_result.update(self._cleanup_symbol_orders_after_flat(decision.symbol))
                 elif close_filled:
                     if final_result.get("status") == "success":
                         final_result["status"] = "pending"
