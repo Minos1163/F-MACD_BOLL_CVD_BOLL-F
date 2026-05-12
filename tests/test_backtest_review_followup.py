@@ -319,6 +319,130 @@ def test_dynamic_position_sizing_can_reduce_low_quality_trend_entries() -> None:
     assert portion == pytest.approx(0.0882)
 
 
+def test_signal_type_position_cap_can_apply_to_1h_shrink_signal() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            enable_dynamic_position_sizing=True,
+            dynamic_signal_type_position_caps={
+                "green_bar_shrinking": {
+                    "max_target_portion": 0.10,
+                    "apply_to": ["signal_1h", "signal_4h"],
+                },
+            },
+        )
+    )
+
+    portion = engine.calculate_position_portion(
+        score=0.85,
+        base_default_portion=0.35,
+        base_max_symbol_position_portion=0.50,
+        signal_type_1h="green_bar_shrinking",
+        signal_type_4h="green_bar_growing",
+        vwap_score=0.50,
+        volume_score=0.20,
+        adx_1h=22.0,
+        market_regime="TREND",
+    )
+
+    assert portion == pytest.approx(0.10)
+
+
+def test_signal_type_position_cap_defaults_to_legacy_4h_only() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            enable_dynamic_position_sizing=True,
+            dynamic_signal_type_position_caps={
+                "green_bar_shrinking": {"max_target_portion": 0.10},
+            },
+        )
+    )
+
+    portion = engine.calculate_position_portion(
+        score=0.85,
+        base_default_portion=0.35,
+        base_max_symbol_position_portion=0.50,
+        signal_type_1h="green_bar_shrinking",
+        signal_type_4h="green_bar_growing",
+        vwap_score=0.50,
+        volume_score=0.20,
+        adx_1h=22.0,
+        market_regime="TREND",
+    )
+
+    assert portion > 0.10
+
+
+def test_live_config_enables_shrink_caps_and_low_vwap_floor() -> None:
+    runtime_cfg = json.loads(Path("config/trading_config_fund_flow.json").read_text(encoding="utf-8"))
+
+    strategy_config = build_strategy_config(runtime_cfg)
+
+    assert strategy_config.enable_dynamic_position_sizing is True
+    assert strategy_config.dynamic_signal_type_position_caps["red_bar_shrinking"]["max_target_portion"] == pytest.approx(0.10)
+    assert strategy_config.dynamic_signal_type_position_caps["green_bar_shrinking"]["max_target_portion"] == pytest.approx(0.10)
+    assert strategy_config.dynamic_signal_type_position_caps["red_bar_shrinking"]["apply_to"] == ["signal_1h", "signal_4h"]
+    assert strategy_config.dynamic_signal_type_position_caps["green_bar_shrinking"]["apply_to"] == ["signal_1h", "signal_4h"]
+    assert strategy_config.min_vwap_score_for_entry == pytest.approx(0.12)
+
+
+def test_live_config_marks_btc_eth_bnb_context_only_not_tradable() -> None:
+    runtime_cfg = json.loads(Path("config/trading_config_fund_flow.json").read_text(encoding="utf-8"))
+
+    trading_symbols = set(runtime_cfg["trading"]["symbols"])
+    context_symbols = runtime_cfg["fund_flow"]["market_context_symbols"]
+
+    assert {"BTCUSDT", "ETHUSDT", "BNBUSDT"}.isdisjoint(trading_symbols)
+    assert trading_symbols.issuperset({"HYPEUSDT", "XRPUSDT"})
+    assert context_symbols["BTCUSDT"]["tradable"] is False
+    assert context_symbols["ETHUSDT"]["tradable"] is False
+    assert context_symbols["BNBUSDT"]["tradable"] is False
+
+
+def test_low_vwap_long_entry_is_blocked_by_live_floor() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            min_signal_score=0.0,
+            red_bar_growing_min_signal_score=0.0,
+            min_vwap_score_for_entry=0.12,
+            require_1h_confirmation_when_4h_primary=False,
+            allow_neutral_1h_confirmation=True,
+            disable_red_bar_growing_long_entries=False,
+            enable_short_quality_filter=False,
+            enable_rsi_hard_veto=False,
+            enable_4h_shrink_exit=False,
+        )
+    )
+    _force_macd_direction(engine, direction_1h="long", signal_type_1h="red_bar_growing", direction_4h="long", signal_type_4h="red_bar_growing")
+
+    signal = engine.analyze(
+        macd_hist_15m=np.array([0.001, 0.002, 0.003]),
+        macd_hist_1h=np.array([0.001, 0.002, 0.003]),
+        macd_hist_4h=np.array([0.001, 0.002, 0.003]),
+        idx_15m=2,
+        idx_1h=2,
+        idx_4h=2,
+        volume_ratio=1.2,
+        vwap=100.0,
+        structural_vwap=0.0,
+        close_price=102.8,
+        bb_middle_1h=100.0,
+        bb_upper_1h=106.0,
+        bb_lower_1h=94.0,
+        bb_middle_4h=100.0,
+        bb_upper_4h=106.0,
+        bb_lower_4h=94.0,
+        close_15m_series=np.array([100.0, 101.5, 102.8]),
+        close_1h_series=np.array([100.0, 101.5, 102.8]),
+        close_4h_series=np.array([100.0, 101.5, 102.8]),
+        vwap_1h_series=np.array([100.0, 100.0, 100.0]),
+        structural_vwap_1h_series=np.array([0.0, 0.0, 0.0]),
+        adx_1h=20.0,
+    )
+
+    assert signal.direction == "neutral"
+    assert signal.details["reject_reason_code"] == "vwap_score_filter"
+
+
 def test_no_trade_meaningful_cap_can_force_micro_ablation_portion() -> None:
     engine = MACDStrategyV2Engine(
         MACDStrategyV2Config(

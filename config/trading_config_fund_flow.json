@@ -12,11 +12,11 @@
   },
   "trading": {
     "symbols": [
-      "XRPUSDT",  
+      "HYPEUSDT",
+      "XRPUSDT",
       "SOLUSDT",
       "DOGEUSDT",
       "ADAUSDT",
-      "HYPEUSDT",
       "BCHUSDT",
       "LINKUSDT",
       "XLMUSDT",
@@ -265,8 +265,39 @@
       "cluster_bonus_map": {
         "flip_bearish": 0.05,
         "red_bar_growing": 0.02,
-        "flip_bullish": -0.10
+        "flip_bullish": -0.1
       }
+    },
+    "market_context_symbols": {
+      "BTCUSDT": {
+        "role": "shock_detector",
+        "tradable": false,
+        "data_fields": [
+          "price",
+          "volume",
+          "return_5m",
+          "return_15m"
+        ]
+      },
+      "ETHUSDT": {
+        "role": "secondary_context",
+        "tradable": false,
+        "data_fields": [
+          "price",
+          "return_15m"
+        ]
+      },
+      "BNBUSDT": {
+        "role": "context_only",
+        "tradable": false
+      }
+    },
+    "probe_floor_rescue": {
+      "enabled": true,
+      "shadow_mode": true,
+      "min_score_threshold": 0.8,
+      "probe_portion": 0.06,
+      "probe_leverage_cap": 2
     },
     "min_leverage": 3,
     "default_leverage": 4,
@@ -309,11 +340,9 @@
       "LINKUSDT",
       "ARBUSDT",
       "LTCUSDT",
-      "HYPEUSDT",
       "KASUSDT",
       "DOTUSDT",
       "FILUSDT",
-      "XRPUSDT",
       "APTUSDT"
     ],
     "skip_unconfigured_positions": true,
@@ -376,24 +405,24 @@
       },
       "scoring_weights": {
         "weight_1h_direction": 0.15,
-        "weight_4h_direction": 0.40,
-        "weight_4h_enhancement": 0.10,
-        "weight_rsi_rhythm": 0.30,
+        "weight_4h_direction": 0.4,
+        "weight_4h_enhancement": 0.1,
+        "weight_rsi_rhythm": 0.3,
         "weight_vwap": 0.05,
         "weight_15m_entry": 0.05,
-        "weight_volume": 0.10
+        "weight_volume": 0.1
       },
       "entry_thresholds": {
-        "default": 0.680,
+        "default": 0.68,
         "min_entry_score": 0.25,
-        "min_signal_score": 0.680,
-        "soft_long_min_signal_score": 0.660,
-        "stable_bear_continuation_min_signal_score": 0.680,
-        "stable_bull_continuation_min_signal_score": 0.680,
-        "red_bar_growing": 0.680,
-        "green_bar_growing": 0.690,
-        "flip_bearish": 0.660,
-        "flip_bullish": 0.640
+        "min_signal_score": 0.68,
+        "soft_long_min_signal_score": 0.66,
+        "stable_bear_continuation_min_signal_score": 0.68,
+        "stable_bull_continuation_min_signal_score": 0.68,
+        "red_bar_growing": 0.68,
+        "green_bar_growing": 0.69,
+        "flip_bearish": 0.66,
+        "flip_bullish": 0.64
       },
       "entry_filters": {
         "primary_direction_timeframe": "4h",
@@ -403,7 +432,7 @@
         "enable_soft_15m_confirmation_when_4h_primary": true,
         "enable_weak_combo_veto": false,
         "enable_priority_execution": true,
-        "priority_exec_min_score": 0.90,
+        "priority_exec_min_score": 0.9,
         "priority_exec_expire_seconds": 25,
         "priority_exec_vip_min_score": 0.92,
         "priority_exec_vip_expire_seconds": 45,
@@ -411,12 +440,12 @@
         "enable_vwap_flip_exemption": true,
         "enable_neutral_upgrade": true,
         "neutral_upgrade_min_rsi_score": 0.35,
-        "neutral_upgrade_probe_rsi_score": 0.20,
+        "neutral_upgrade_probe_rsi_score": 0.2,
         "neutral_upgrade_probe_threshold_score": 0.82,
-        "neutral_upgrade_penalty_mult": 0.90,
+        "neutral_upgrade_penalty_mult": 0.9,
         "enable_15m_spring_threshold_override": true,
         "spring_override_min_signal_score": 0.82,
-        "spring_override_score_bonus": 0.10,
+        "spring_override_score_bonus": 0.1,
         "enable_priority_allocation": true,
         "priority_allocation_overdraft_pct": 0.08,
         "soft_15m_entry_score": 0.28,
@@ -426,17 +455,17 @@
         "green_bar_growing_short_min_adx_1h": 35.0,
         "green_bar_growing_short_max_adx_1h": 45.0,
         "enable_4h_preflip_trial_entries": true,
-        "preflip_trial_min_shrink_pct_long": 0.60,
-        "preflip_trial_min_shrink_pct_short": 0.30,
-        "preflip_trial_min_signal_score": 0.660,
+        "preflip_trial_min_shrink_pct_long": 0.6,
+        "preflip_trial_min_shrink_pct_short": 0.3,
+        "preflip_trial_min_signal_score": 0.66,
         "preflip_trial_min_vwap_score": 0.0,
         "preflip_trial_entry_scale": 0.35,
         "preflip_trial_max_leverage": 2,
         "enable_trial_short_below_structure_continuation_promotion": true,
-        "trial_short_below_structure_promotion_min_signal_score": 0.680,
+        "trial_short_below_structure_promotion_min_signal_score": 0.68,
         "trial_short_below_structure_promotion_min_vwap_score": 0.0,
         "trial_short_below_structure_promotion_min_adx_1h": 30.0,
-        "trial_short_below_structure_promotion_min_4h_shrink_pct": 0.80,
+        "trial_short_below_structure_promotion_min_4h_shrink_pct": 0.8,
         "trial_short_below_structure_promotion_min_4h_shrink_bars": 6,
         "short_min_vwap_score_for_entry": 0.06,
         "flip_bearish_short_min_vwap_score_for_entry": 0.08,
@@ -477,12 +506,12 @@
           "enabled": true,
           "reject_if_1h_rsi_above": 75.0,
           "soft_rsi_above": 72,
-          "soft_discount": 0.90,
+          "soft_discount": 0.9,
           "reject_if_15m_no_spring_and_rsi_high": false,
           "reject_if_15m_rsi_above": 65
         },
         "enable_flip_bullish_cvd_context_filter": false,
-        "flip_bullish_max_cvd_upper_wick_ratio": 0.20,
+        "flip_bullish_max_cvd_upper_wick_ratio": 0.2,
         "flip_bullish_min_cvd_1h_delta_ratio": 0.03,
         "flip_bearish_min_boll_multiplier": 0.0,
         "flip_bearish_normal_boll_min_signal_score": 0.0,
@@ -498,9 +527,9 @@
         "disable_green_bar_shrinking_short_dual_pressure_entries": false,
         "disable_red_bar_shrinking_long_dual_support_entries": false,
         "vol_vwap_warn_min_score_vol": 0.05,
-        "vol_vwap_warn_min_vwap_score": 0.10,
-        "min_signal_score": 0.680,
-        "min_vwap_score_for_entry": 0.0,
+        "vol_vwap_warn_min_vwap_score": 0.1,
+        "min_signal_score": 0.68,
+        "min_vwap_score_for_entry": 0.12,
         "symbol_signal_overrides": []
       },
       "rsi_config": {
@@ -515,12 +544,12 @@
           "enable_leading_conflict_pass": true,
           "leading_slope_threshold": 2.0,
           "conflict_penalty_mult": 0.95,
-          "conflict_threshold": 0.20,
-          "leading_portion_mult": 0.80,
+          "conflict_threshold": 0.2,
+          "leading_portion_mult": 0.8,
           "divergence_portion_mult": 0.85,
-          "high_score_min": 0.30,
-          "block_score": -0.30,
-          "probe_exposure_mult": 0.20,
+          "high_score_min": 0.3,
+          "block_score": -0.3,
+          "probe_exposure_mult": 0.2,
           "probe_portion_scale": 0.25,
           "probe_forced_leverage": 2
         }
@@ -528,17 +557,17 @@
       "position_management": {
         "priority_allocation_overdraft_pct": 0.08,
         "enable_red_bar_growing_probe_overlay": false,
-        "red_bar_growing_probe_position_penalty": 0.50,
+        "red_bar_growing_probe_position_penalty": 0.5,
         "red_bar_growing_probe_max_leverage": 2,
         "enable_green_bar_growing_probe_overlay": true,
-        "green_bar_growing_probe_position_penalty": 0.10,
+        "green_bar_growing_probe_position_penalty": 0.1,
         "green_bar_growing_probe_max_leverage": 2,
-        "vol_vwap_warn_position_scale": 0.50
+        "vol_vwap_warn_position_scale": 0.5
       },
       "exit_management": {
         "enable_priority_signal_shrink_exit": true,
         "priority_signal_shrink_exit_required_bars": 3,
-        "priority_signal_shrink_exit_required_pct": 0.40,
+        "priority_signal_shrink_exit_required_pct": 0.4,
         "holding_time_exit": {
           "enabled": true,
           "max_holding_hours": 96,
@@ -549,7 +578,47 @@
         "overheat_growing_penalty": 0.12,
         "overheat_boll_multiplier_threshold": 1.2,
         "overheat_vwap_score_threshold": 0.1,
-        "min_vwap_score_for_entry": 0.10
+        "min_vwap_score_for_entry": 0.1
+      },
+      "dynamic_position_sizing": {
+        "enabled": true,
+        "vwap_score_tiers": [
+          {
+            "max": 0.25,
+            "position_mult": 0.6
+          },
+          {
+            "min": 0.25,
+            "max": 0.5,
+            "position_mult": 0.8
+          }
+        ],
+        "volume_score_tiers": [
+          {
+            "max": 0.033,
+            "position_mult": 0.75
+          }
+        ],
+        "adx_trend_penalty": {
+          "min_adx": 40.0,
+          "position_mult": 0.7
+        },
+        "signal_type_caps": {
+          "red_bar_shrinking": {
+            "max_target_portion": 0.1,
+            "apply_to": [
+              "signal_1h",
+              "signal_4h"
+            ]
+          },
+          "green_bar_shrinking": {
+            "max_target_portion": 0.1,
+            "apply_to": [
+              "signal_1h",
+              "signal_4h"
+            ]
+          }
+        }
       },
       "stop_loss_config": {
         "use_dynamic_stop": true,
@@ -558,7 +627,7 @@
         "vwap_alert_deviation": 0.005,
         "enable_4h_shrink_exit": true,
         "exit_4h_shrink_bars": 2,
-        "exit_4h_min_shrink_pct": 0.20,
+        "exit_4h_min_shrink_pct": 0.2,
         "exit_4h_require_profit": true,
         "enable_stable_continuation_slow_4h_shrink_exit": true,
         "stable_continuation_exit_4h_shrink_bars": 3,
@@ -591,7 +660,7 @@
         "enabled": true,
         "session_reset": "daily_utc0",
         "lookback_15m": 3,
-        "positive_delta_ratio_threshold": 0.10,
+        "positive_delta_ratio_threshold": 0.1,
         "positive_pressure_threshold": 0.0,
         "session_ratio_change_threshold": -0.003,
         "session_price_change_threshold": -0.005,
@@ -610,7 +679,7 @@
           {
             "utc_start": "03:00",
             "utc_end": "05:30",
-            "position_scale": 0.70
+            "position_scale": 0.7
           },
           {
             "utc_start": "14:30",
@@ -1298,9 +1367,9 @@
                 },
                 "position_management": {
                   "enable_green_bar_growing_probe_overlay": true,
-                  "green_bar_growing_probe_position_penalty": 0.10,
+                  "green_bar_growing_probe_position_penalty": 0.1,
                   "green_bar_growing_probe_max_leverage": 2,
-                  "vol_vwap_warn_position_scale": 0.50
+                  "vol_vwap_warn_position_scale": 0.5
                 },
                 "short_quality_filter": {
                   "enabled": false
@@ -1368,7 +1437,7 @@
                   "light_1h_confirmation_when_4h_primary": true,
                   "enable_4h_preflip_trial_entries": true,
                   "preflip_trial_min_shrink_pct_long": 0.75,
-                  "preflip_trial_min_shrink_pct_short": 0.30,
+                  "preflip_trial_min_shrink_pct_short": 0.3,
                   "preflip_trial_min_signal_score": 0.77,
                   "preflip_trial_min_vwap_score": 0.06,
                   "preflip_trial_entry_scale": 0.35,
@@ -1377,7 +1446,7 @@
                 "stop_loss_config": {
                   "enable_4h_shrink_exit": true,
                   "exit_4h_shrink_bars": 2,
-                  "exit_4h_min_shrink_pct": 0.20,
+                  "exit_4h_min_shrink_pct": 0.2,
                   "exit_4h_require_profit": true
                 },
                 "short_quality_filter": {
@@ -1399,7 +1468,7 @@
                   "light_1h_confirmation_when_4h_primary": true,
                   "enable_4h_preflip_trial_entries": true,
                   "preflip_trial_min_shrink_pct_long": 0.75,
-                  "preflip_trial_min_shrink_pct_short": 0.30,
+                  "preflip_trial_min_shrink_pct_short": 0.3,
                   "preflip_trial_min_signal_score": 0.77,
                   "preflip_trial_min_vwap_score": 0.06,
                   "preflip_trial_entry_scale": 0.35,
@@ -1408,13 +1477,13 @@
                   "green_bar_growing_short_min_adx_1h": 25.0,
                   "green_bar_growing_short_max_adx_1h": 30.0,
                   "enable_flip_bullish_cvd_context_filter": true,
-                  "flip_bullish_max_cvd_upper_wick_ratio": 0.20,
+                  "flip_bullish_max_cvd_upper_wick_ratio": 0.2,
                   "flip_bullish_min_cvd_1h_delta_ratio": 0.03
                 },
                 "stop_loss_config": {
                   "enable_4h_shrink_exit": true,
                   "exit_4h_shrink_bars": 2,
-                  "exit_4h_min_shrink_pct": 0.20,
+                  "exit_4h_min_shrink_pct": 0.2,
                   "exit_4h_require_profit": true
                 },
                 "short_quality_filter": {
@@ -1436,7 +1505,7 @@
                   "light_1h_confirmation_when_4h_primary": true,
                   "enable_4h_preflip_trial_entries": true,
                   "preflip_trial_min_shrink_pct_long": 0.75,
-                  "preflip_trial_min_shrink_pct_short": 0.30,
+                  "preflip_trial_min_shrink_pct_short": 0.3,
                   "preflip_trial_min_signal_score": 0.77,
                   "preflip_trial_min_vwap_score": 0.06,
                   "preflip_trial_entry_scale": 0.35,
@@ -1445,13 +1514,13 @@
                   "green_bar_growing_short_min_adx_1h": 20.0,
                   "green_bar_growing_short_max_adx_1h": 30.0,
                   "enable_flip_bullish_cvd_context_filter": true,
-                  "flip_bullish_max_cvd_upper_wick_ratio": 0.20,
+                  "flip_bullish_max_cvd_upper_wick_ratio": 0.2,
                   "flip_bullish_min_cvd_1h_delta_ratio": 0.0
                 },
                 "stop_loss_config": {
                   "enable_4h_shrink_exit": true,
                   "exit_4h_shrink_bars": 2,
-                  "exit_4h_min_shrink_pct": 0.20,
+                  "exit_4h_min_shrink_pct": 0.2,
                   "exit_4h_require_profit": true
                 },
                 "short_quality_filter": {
@@ -1477,7 +1546,7 @@
                   "light_1h_confirmation_when_4h_primary": true,
                   "enable_4h_preflip_trial_entries": true,
                   "preflip_trial_min_shrink_pct_long": 0.75,
-                  "preflip_trial_min_shrink_pct_short": 0.30,
+                  "preflip_trial_min_shrink_pct_short": 0.3,
                   "preflip_trial_min_signal_score": 0.77,
                   "preflip_trial_min_vwap_score": 0.06,
                   "preflip_trial_entry_scale": 0.35,
@@ -1486,13 +1555,13 @@
                   "green_bar_growing_short_min_adx_1h": 25.0,
                   "green_bar_growing_short_max_adx_1h": 30.0,
                   "enable_flip_bullish_cvd_context_filter": true,
-                  "flip_bullish_max_cvd_upper_wick_ratio": 0.20,
+                  "flip_bullish_max_cvd_upper_wick_ratio": 0.2,
                   "flip_bullish_min_cvd_1h_delta_ratio": 0.03
                 },
                 "stop_loss_config": {
                   "enable_4h_shrink_exit": true,
                   "exit_4h_shrink_bars": 2,
-                  "exit_4h_min_shrink_pct": 0.30,
+                  "exit_4h_min_shrink_pct": 0.3,
                   "exit_4h_require_profit": false,
                   "exit_4h_weak_loss_threshold": -0.001
                 },
@@ -1533,7 +1602,7 @@
                   "light_1h_confirmation_when_4h_primary": true,
                   "enable_4h_preflip_trial_entries": true,
                   "preflip_trial_min_shrink_pct_long": 0.75,
-                  "preflip_trial_min_shrink_pct_short": 0.30,
+                  "preflip_trial_min_shrink_pct_short": 0.3,
                   "preflip_trial_min_signal_score": 0.77,
                   "preflip_trial_min_vwap_score": 0.06,
                   "preflip_trial_entry_scale": 0.35,
@@ -1542,13 +1611,13 @@
                   "green_bar_growing_short_min_adx_1h": 25.0,
                   "green_bar_growing_short_max_adx_1h": 30.0,
                   "enable_flip_bullish_cvd_context_filter": true,
-                  "flip_bullish_max_cvd_upper_wick_ratio": 0.20,
+                  "flip_bullish_max_cvd_upper_wick_ratio": 0.2,
                   "flip_bullish_min_cvd_1h_delta_ratio": 0.03
                 },
                 "stop_loss_config": {
                   "enable_4h_shrink_exit": true,
                   "exit_4h_shrink_bars": 2,
-                  "exit_4h_min_shrink_pct": 0.20,
+                  "exit_4h_min_shrink_pct": 0.2,
                   "exit_4h_require_profit": true
                 },
                 "session_risk_control": {
@@ -1588,7 +1657,7 @@
                   "light_1h_confirmation_when_4h_primary": true,
                   "enable_4h_preflip_trial_entries": true,
                   "preflip_trial_min_shrink_pct_long": 0.75,
-                  "preflip_trial_min_shrink_pct_short": 0.30,
+                  "preflip_trial_min_shrink_pct_short": 0.3,
                   "preflip_trial_min_signal_score": 0.77,
                   "preflip_trial_min_vwap_score": 0.06,
                   "preflip_trial_entry_scale": 0.35,
@@ -1597,13 +1666,13 @@
                   "green_bar_growing_short_min_adx_1h": 25.0,
                   "green_bar_growing_short_max_adx_1h": 30.0,
                   "enable_flip_bullish_cvd_context_filter": true,
-                  "flip_bullish_max_cvd_upper_wick_ratio": 0.20,
+                  "flip_bullish_max_cvd_upper_wick_ratio": 0.2,
                   "flip_bullish_min_cvd_1h_delta_ratio": 0.03
                 },
                 "stop_loss_config": {
                   "enable_4h_shrink_exit": true,
                   "exit_4h_shrink_bars": 2,
-                  "exit_4h_min_shrink_pct": 0.20,
+                  "exit_4h_min_shrink_pct": 0.2,
                   "exit_4h_require_profit": true
                 },
                 "session_risk_control": {
@@ -1612,7 +1681,7 @@
                     {
                       "utc_start": "03:00",
                       "utc_end": "05:30",
-                      "position_scale": 0.70
+                      "position_scale": 0.7
                     },
                     {
                       "utc_start": "14:30",
@@ -1648,7 +1717,7 @@
                   "light_1h_confirmation_when_4h_primary": true,
                   "enable_4h_preflip_trial_entries": true,
                   "preflip_trial_min_shrink_pct_long": 0.75,
-                  "preflip_trial_min_shrink_pct_short": 0.30,
+                  "preflip_trial_min_shrink_pct_short": 0.3,
                   "preflip_trial_min_signal_score": 0.77,
                   "preflip_trial_min_vwap_score": 0.06,
                   "preflip_trial_entry_scale": 0.35,
@@ -1657,13 +1726,13 @@
                   "green_bar_growing_short_min_adx_1h": 25.0,
                   "green_bar_growing_short_max_adx_1h": 30.0,
                   "enable_flip_bullish_cvd_context_filter": true,
-                  "flip_bullish_max_cvd_upper_wick_ratio": 0.20,
+                  "flip_bullish_max_cvd_upper_wick_ratio": 0.2,
                   "flip_bullish_min_cvd_1h_delta_ratio": 0.03
                 },
                 "stop_loss_config": {
                   "enable_4h_shrink_exit": true,
                   "exit_4h_shrink_bars": 2,
-                  "exit_4h_min_shrink_pct": 0.20,
+                  "exit_4h_min_shrink_pct": 0.2,
                   "exit_4h_require_profit": true
                 },
                 "session_risk_control": {
@@ -1672,7 +1741,7 @@
                     {
                       "utc_start": "03:00",
                       "utc_end": "05:30",
-                      "position_scale": 0.70
+                      "position_scale": 0.7
                     },
                     {
                       "utc_start": "14:30",
@@ -1704,10 +1773,10 @@
                     "MORPHOUSDT",
                     "TRUMPUSDT"
                   ],
-                  "watchlist_max_position_portion": 0.40,
+                  "watchlist_max_position_portion": 0.4,
                   "watchlist_max_leverage": 2,
                   "watchlist_apply_session_scale_double": true,
-                  "watchlist_session_scale_multiplier": 0.80
+                  "watchlist_session_scale_multiplier": 0.8
                 }
               }
             }
@@ -1729,7 +1798,7 @@
                   "watchlist_max_position_portion": 0.0,
                   "watchlist_max_leverage": 0,
                   "watchlist_apply_session_scale_double": true,
-                  "watchlist_session_scale_multiplier": 0.80
+                  "watchlist_session_scale_multiplier": 0.8
                 }
               }
             }
@@ -1748,17 +1817,17 @@
                   "tiers": [
                     {
                       "min": 0.12,
-                      "max": 0.20,
-                      "position_mult": 0.80
+                      "max": 0.2,
+                      "position_mult": 0.8
                     },
                     {
-                      "min": 0.20,
-                      "max": 0.30,
-                      "position_mult": 1.00
+                      "min": 0.2,
+                      "max": 0.3,
+                      "position_mult": 1.0
                     },
                     {
-                      "min": 0.30,
-                      "max": 1.00,
+                      "min": 0.3,
+                      "max": 1.0,
                       "position_mult": 1.15
                     }
                   ]
@@ -1773,8 +1842,8 @@
             "fund_flow": {
               "macd_mtf_strategy_v2": {
                 "entry_filters": {
-                  "preflip_trial_min_shrink_pct_long": 0.60,
-                  "preflip_trial_min_shrink_pct_short": 0.40
+                  "preflip_trial_min_shrink_pct_long": 0.6,
+                  "preflip_trial_min_shrink_pct_short": 0.4
                 }
               }
             }
@@ -1786,8 +1855,8 @@
             "fund_flow": {
               "macd_mtf_strategy_v2": {
                 "entry_filters": {
-                  "preflip_trial_min_shrink_pct_long": 0.60,
-                  "preflip_trial_min_shrink_pct_short": 0.40
+                  "preflip_trial_min_shrink_pct_long": 0.6,
+                  "preflip_trial_min_shrink_pct_short": 0.4
                 },
                 "symbol_risk_tiers": {
                   "watchlist_symbols": [
@@ -1797,10 +1866,10 @@
                     "MORPHOUSDT",
                     "TRUMPUSDT"
                   ],
-                  "watchlist_max_position_portion": 0.40,
+                  "watchlist_max_position_portion": 0.4,
                   "watchlist_max_leverage": 2,
                   "watchlist_apply_session_scale_double": true,
-                  "watchlist_session_scale_multiplier": 0.80
+                  "watchlist_session_scale_multiplier": 0.8
                 }
               }
             }
@@ -1830,7 +1899,7 @@
               "macd_mtf_strategy_v2": {
                 "scoring_weights": {
                   "weight_1h_direction": 0.15,
-                  "weight_4h_direction": 0.40
+                  "weight_4h_direction": 0.4
                 }
               }
             }
@@ -1912,12 +1981,12 @@
                   "vwap_score_tiers": [
                     {
                       "max": 0.25,
-                      "position_mult": 0.60
+                      "position_mult": 0.6
                     },
                     {
                       "min": 0.25,
-                      "max": 0.50,
-                      "position_mult": 0.80
+                      "max": 0.5,
+                      "position_mult": 0.8
                     }
                   ],
                   "volume_score_tiers": [
@@ -1928,11 +1997,11 @@
                   ],
                   "adx_trend_penalty": {
                     "min_adx": 40.0,
-                    "position_mult": 0.70
+                    "position_mult": 0.7
                   },
                   "signal_type_caps": {
                     "green_bar_shrinking": {
-                      "max_target_portion": 0.10
+                      "max_target_portion": 0.1
                     },
                     "red_bar_shrinking": {
                       "max_target_portion": 0.12
@@ -1968,7 +2037,7 @@
                   "enabled": false
                 },
                 "entry_thresholds": {
-                  "soft_long_min_signal_score": 0.80
+                  "soft_long_min_signal_score": 0.8
                 }
               }
             }
@@ -2037,7 +2106,7 @@
                 },
                 "position_management": {
                   "enable_red_bar_growing_probe_overlay": true,
-                  "red_bar_growing_probe_position_penalty": 0.50,
+                  "red_bar_growing_probe_position_penalty": 0.5,
                   "red_bar_growing_probe_max_leverage": 2
                 }
               }
@@ -2255,6 +2324,22 @@
           "notes": "BTC+ETH tuned 30-day profile: +5.45% return, -3.12% max drawdown, PF 1.85 after excluding weak entry hours and tightening trend/volatility gates."
         }
       }
+    },
+    "dual_leg_extreme_hedge": {
+      "enabled": true,
+      "shadow_mode": true,
+      "min_unrealized_loss_ratio": 0.015,
+      "min_signal_score": 0.72,
+      "min_regime_atr_pct": 0.012,
+      "max_target_portion": 0.08,
+      "leverage_cap": 2,
+      "shock_detector": {
+        "type": "btc_or_atr",
+        "btc_5m_threshold": -0.015,
+        "btc_15m_threshold": -0.02,
+        "min_atr_pct": 0.012
+      },
+      "comment": "Only allow opposite-leg hedge in hedge mode when existing leg is losing and the new opposite signal occurs during an extreme volatility shock."
     }
   },
   "schedule": {

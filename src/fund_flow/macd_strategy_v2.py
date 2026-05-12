@@ -944,14 +944,32 @@ class MACDStrategyV2Engine:
     def resolve_signal_type_position_cap(
         self,
         signal_type_4h: Optional[str],
+        signal_type_1h: Optional[str] = None,
     ) -> float:
         if not bool(self.config.enable_dynamic_position_sizing):
             return 0.0
-        signal_type = str(signal_type_4h or "").strip().lower()
-        raw_cap = (self.config.dynamic_signal_type_position_caps or {}).get(signal_type)
-        if not isinstance(raw_cap, dict):
-            return 0.0
-        return self._clamp(float(raw_cap.get("max_target_portion", 0.0) or 0.0), 0.0, 1.0)
+        signal_by_field = {
+            "signal_1h": str(signal_type_1h or "").strip().lower(),
+            "signal_type_1h": str(signal_type_1h or "").strip().lower(),
+            "1h": str(signal_type_1h or "").strip().lower(),
+            "signal_4h": str(signal_type_4h or "").strip().lower(),
+            "signal_type_4h": str(signal_type_4h or "").strip().lower(),
+            "4h": str(signal_type_4h or "").strip().lower(),
+        }
+        for cap_key, raw_cap in (self.config.dynamic_signal_type_position_caps or {}).items():
+            if not isinstance(raw_cap, dict):
+                continue
+            apply_to = raw_cap.get("apply_to", ["signal_4h"])
+            if isinstance(apply_to, str):
+                apply_fields = [apply_to]
+            elif isinstance(apply_to, list):
+                apply_fields = apply_to
+            else:
+                apply_fields = ["signal_4h"]
+            cap_signal = str(cap_key or "").strip().lower()
+            if any(signal_by_field.get(str(field or "").strip().lower(), "") == cap_signal for field in apply_fields):
+                return self._clamp(float(raw_cap.get("max_target_portion", 0.0) or 0.0), 0.0, 1.0)
+        return 0.0
 
     @classmethod
     def _normalized_change(cls, current: float, previous: float) -> float:
@@ -5376,7 +5394,10 @@ class MACDStrategyV2Engine:
             adx_1h=adx_1h,
             market_regime=market_regime,
         )
-        signal_cap = self.resolve_signal_type_position_cap(signal_type_4h)
+        signal_cap = self.resolve_signal_type_position_cap(
+            signal_type_4h=signal_type_4h,
+            signal_type_1h=signal_type_1h,
+        )
         if signal_cap > 0:
             portion = min(portion, signal_cap)
         if (

@@ -3003,6 +3003,270 @@ class TradingBot:
             return (entry_price - current_price) / entry_price
         return 0.0
 
+    def _dual_leg_extreme_hedge_config(self) -> Dict[str, Any]:
+        ff_cfg = self.config.get("fund_flow", {}) if isinstance(self.config, dict) else {}
+        raw = ff_cfg.get("dual_leg_extreme_hedge", {}) if isinstance(ff_cfg.get("dual_leg_extreme_hedge"), dict) else {}
+        shock_raw = raw.get("shock_detector", {}) if isinstance(raw.get("shock_detector"), dict) else {}
+        return {
+            "enabled": bool(raw.get("enabled", False)),
+            "shadow_mode": bool(raw.get("shadow_mode", False)),
+            "min_unrealized_loss_ratio": self._normalize_percent_to_ratio(
+                raw.get("min_unrealized_loss_ratio", 0.012),
+                0.012,
+            ),
+            "min_signal_score": max(0.0, min(1.0, self._to_float(raw.get("min_signal_score"), 0.72))),
+            "min_regime_atr_pct": self._normalize_percent_to_ratio(
+                raw.get("min_regime_atr_pct", 0.012),
+                0.012,
+            ),
+            "max_target_portion": max(
+                0.0,
+                self._normalize_percent_to_ratio(raw.get("max_target_portion", 0.08), 0.08),
+            ),
+            "leverage_cap": max(1, int(self._to_float(raw.get("leverage_cap"), 2))),
+            "shock_detector": {
+                "type": str(shock_raw.get("type", "atr_only") or "atr_only").strip().lower(),
+                "btc_5m_threshold": self._to_float(shock_raw.get("btc_5m_threshold"), -0.015),
+                "btc_15m_threshold": self._to_float(shock_raw.get("btc_15m_threshold"), -0.020),
+                "min_atr_pct": self._normalize_percent_to_ratio(
+                    shock_raw.get("min_atr_pct", raw.get("min_regime_atr_pct", 0.012)),
+                    0.012,
+                ),
+            },
+        }
+
+    def _probe_floor_rescue_config(self) -> Dict[str, Any]:
+        ff_cfg = self.config.get("fund_flow", {}) if isinstance(self.config, dict) else {}
+        raw = ff_cfg.get("probe_floor_rescue", {}) if isinstance(ff_cfg.get("probe_floor_rescue"), dict) else {}
+        return {
+            "enabled": bool(raw.get("enabled", False)),
+            "shadow_mode": bool(raw.get("shadow_mode", True)),
+            "min_score_threshold": max(0.0, min(1.0, self._to_float(raw.get("min_score_threshold"), 0.80))),
+            "probe_portion": max(0.0, self._normalize_percent_to_ratio(raw.get("probe_portion", 0.06), 0.06)),
+            "probe_leverage_cap": max(1, int(self._to_float(raw.get("probe_leverage_cap"), 2))),
+        }
+
+    def _apply_probe_floor_rescue(
+        self,
+        *,
+        decision: FundFlowDecision,
+        min_open_portion: float,
+    ) -> Tuple[FundFlowDecision, Dict[str, Any]]:
+        cfg = self._probe_floor_rescue_config()
+        original_target = float(decision.target_portion_of_balance)
+        meta = {
+            "enabled": bool(cfg.get("enabled", False)),
+            "applied": False,
+            "shadow_mode": bool(cfg.get("shadow_mode", True)),
+            "original_target_portion": original_target,
+        }
+        if not bool(cfg.get("enabled", False)):
+            meta["reason"] = "disabled"
+            return decision, meta
+        if decision.operation not in (FundFlowOperation.BUY, FundFlowOperation.SELL):
+            meta["reason"] = "not_entry"
+            return decision, meta
+        if original_target >= float(min_open_portion):
+            meta["reason"] = "target_above_min_open"
+            return decision, meta
+
+        md = dict(decision.metadata or {}) if isinstance(getattr(decision, "metadata", None), dict) else {}
+        signal_score = max(
+            self._to_float(md.get("signal_score"), 0.0),
+            self._to_float(md.get("competition_score"), 0.0),
+        )
+        min_score = self._to_float(cfg.get("min_score_threshold"), 0.80)
+        if signal_score < min_score:
+            meta.update({"reason": f"signal_score={signal_score:.4f}", "signal_score": signal_score})
+            return decision, meta
+
+        probe_portion = max(
+            float(min_open_portion),
+            self._to_float(cfg.get("probe_portion"), float(min_open_portion)),
+        )
+        leverage_cap = int(cfg.get("probe_leverage_cap", 2) or 2)
+        meta.update(
+            {
+                "reason": "eligible",
+                "signal_score": signal_score,
+                "min_score_threshold": min_score,
+                "probe_portion": probe_portion,
+                "probe_leverage_cap": leverage_cap,
+            }
+        )
+        if bool(cfg.get("shadow_mode", True)):
+            md.update(
+                {
+                    "probe_floor_rescue_shadow": True,
+                    "probe_floor_rescue_original_target": original_target,
+                    "probe_floor_rescue_probe_portion": probe_portion,
+                    "probe_floor_rescue_signal_score": signal_score,
+                }
+            )
+            decision.metadata = md
+            return decision, meta
+
+        md.update(
+            {
+                "probe_floor_rescue_applied": True,
+                "probe_floor_rescue_original_target": original_target,
+                "probe_floor_rescue_probe_portion": probe_portion,
+                "probe_floor_rescue_signal_score": signal_score,
+            }
+        )
+        adjusted = FundFlowDecision(
+            operation=decision.operation,
+            symbol=decision.symbol,
+            target_portion_of_balance=probe_portion,
+            leverage=min(int(decision.leverage), leverage_cap),
+            max_price=decision.max_price,
+            min_price=decision.min_price,
+            time_in_force=decision.time_in_force,
+            take_profit_price=decision.take_profit_price,
+            stop_loss_price=decision.stop_loss_price,
+            tp_execution=decision.tp_execution,
+            sl_execution=decision.sl_execution,
+            reason=decision.reason,
+            metadata=md,
+        )
+        meta["applied"] = True
+        return adjusted, meta
+
+    def _resolve_dual_leg_shock_context(self, md: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
+        shock_cfg = cfg.get("shock_detector", {}) if isinstance(cfg.get("shock_detector"), dict) else {}
+        detector_type = str(shock_cfg.get("type", "atr_only") or "atr_only").strip().lower()
+        regime_atr_pct = abs(self._to_float(md.get("regime_atr_pct"), 0.0))
+        min_atr = self._to_float(shock_cfg.get("min_atr_pct"), self._to_float(cfg.get("min_regime_atr_pct"), 0.012))
+        btc_5m = self._to_float(md.get("btc_return_5m", md.get("btc_5m_return")), 0.0)
+        btc_15m = self._to_float(md.get("btc_return_15m", md.get("btc_15m_return")), 0.0)
+        btc_5m_threshold = self._to_float(shock_cfg.get("btc_5m_threshold"), -0.015)
+        btc_15m_threshold = self._to_float(shock_cfg.get("btc_15m_threshold"), -0.020)
+        atr_shock = regime_atr_pct >= min_atr
+        btc_shock = detector_type == "btc_or_atr" and (btc_5m <= btc_5m_threshold or btc_15m <= btc_15m_threshold)
+        level = "NONE"
+        if atr_shock or btc_shock:
+            level = "LIGHT"
+        if detector_type != "btc_or_atr" and not atr_shock:
+            level = "NONE"
+        return {
+            "shock_detected": bool(atr_shock or btc_shock),
+            "btc_shock_level": level,
+            "regime_atr_pct": regime_atr_pct,
+            "min_atr_pct": min_atr,
+            "btc_return_5m": btc_5m,
+            "btc_return_15m": btc_15m,
+            "btc_shock": btc_shock,
+            "atr_shock": atr_shock,
+        }
+
+    def _maybe_allow_extreme_dual_leg_hedge(
+        self,
+        *,
+        symbol: str,
+        position: Dict[str, Any],
+        decision: FundFlowDecision,
+        current_price: float,
+    ) -> Tuple[bool, FundFlowDecision, Dict[str, Any]]:
+        cfg = self._dual_leg_extreme_hedge_config()
+        if not bool(cfg.get("enabled")):
+            return False, decision, {"reason": "disabled"}
+        shadow_mode = bool(cfg.get("shadow_mode", False))
+
+        current_side = str(position.get("side", "")).upper()
+        signal_side = "LONG" if decision.operation == FundFlowOperation.BUY else "SHORT"
+        if current_side not in ("LONG", "SHORT") or signal_side not in ("LONG", "SHORT") or current_side == signal_side:
+            return False, decision, {"reason": "not_opposite_side"}
+
+        try:
+            if not bool(self.client.broker.get_hedge_mode()):
+                return False, decision, {"reason": "hedge_mode_disabled"}
+        except Exception:
+            return False, decision, {"reason": "hedge_mode_unknown"}
+
+        loss_ratio = max(0.0, -self._position_pnl_ratio(position, current_price))
+        min_loss = self._to_float(cfg.get("min_unrealized_loss_ratio"), 0.012)
+        if loss_ratio < min_loss:
+            return False, decision, {"reason": f"loss_ratio={loss_ratio:.4f}", "loss_ratio": loss_ratio}
+
+        md = dict(decision.metadata or {}) if isinstance(getattr(decision, "metadata", None), dict) else {}
+        signal_score = max(
+            self._to_float(md.get("signal_score"), 0.0),
+            self._to_float(md.get("competition_score"), 0.0),
+        )
+        min_score = self._to_float(cfg.get("min_signal_score"), 0.72)
+        if signal_score < min_score:
+            return False, decision, {"reason": f"signal_score={signal_score:.4f}", "signal_score": signal_score}
+
+        shock_ctx = self._resolve_dual_leg_shock_context(md, cfg)
+        regime_atr_pct = self._to_float(shock_ctx.get("regime_atr_pct"), 0.0)
+        if not bool(shock_ctx.get("shock_detected", False)):
+            return False, decision, {
+                "reason": f"regime_atr_pct={regime_atr_pct:.4f}",
+                **shock_ctx,
+            }
+
+        if shadow_mode:
+            md.update(
+                {
+                    "dual_leg_shadow_allowed": True,
+                    "dual_leg_existing_side": current_side,
+                    "dual_leg_new_side": signal_side,
+                    "dual_leg_loss_ratio": loss_ratio,
+                    "dual_leg_signal_score": signal_score,
+                    "dual_leg_regime_atr_pct": regime_atr_pct,
+                    "btc_shock_level": shock_ctx.get("btc_shock_level"),
+                    "btc_return_5m": shock_ctx.get("btc_return_5m"),
+                    "btc_return_15m": shock_ctx.get("btc_return_15m"),
+                }
+            )
+            decision.metadata = md
+            return False, decision, {
+                "reason": "shadow_allowed",
+                "shadow_mode": True,
+                "loss_ratio": loss_ratio,
+                "signal_score": signal_score,
+                **shock_ctx,
+            }
+
+        max_portion = self._to_float(cfg.get("max_target_portion"), 0.08)
+        adjusted_portion = min(float(decision.target_portion_of_balance), max_portion)
+        adjusted_leverage = min(int(decision.leverage), int(cfg.get("leverage_cap", 2)))
+        md.update(
+            {
+                "dual_leg_extreme_hedge_allowed": True,
+                "dual_leg_existing_side": current_side,
+                "dual_leg_new_side": signal_side,
+                "dual_leg_loss_ratio": loss_ratio,
+                "dual_leg_signal_score": signal_score,
+                "dual_leg_regime_atr_pct": regime_atr_pct,
+                "dual_leg_original_target_portion": float(decision.target_portion_of_balance),
+                "dual_leg_original_leverage": int(decision.leverage),
+            }
+        )
+        adjusted = FundFlowDecision(
+            operation=decision.operation,
+            symbol=decision.symbol,
+            target_portion_of_balance=adjusted_portion,
+            leverage=adjusted_leverage,
+            max_price=decision.max_price,
+            min_price=decision.min_price,
+            time_in_force=decision.time_in_force,
+            take_profit_price=decision.take_profit_price,
+            stop_loss_price=decision.stop_loss_price,
+            tp_execution=decision.tp_execution,
+            sl_execution=decision.sl_execution,
+            reason=f"{decision.reason}_dual_leg_extreme_hedge",
+            metadata=md,
+        )
+        return True, adjusted, {
+            "reason": "allowed",
+            "loss_ratio": loss_ratio,
+            "signal_score": signal_score,
+            "regime_atr_pct": regime_atr_pct,
+            "target_portion": adjusted_portion,
+            "leverage": adjusted_leverage,
+        }
+
     def _soften_conflict_exit_for_small_mae(
         self,
         *,
@@ -5151,6 +5415,61 @@ class TradingBot:
                 has_sl = True
         return {"has_tp": has_tp, "has_sl": has_sl, "orders": normalized_orders}
 
+    def _cleanup_opposite_side_protection_orders(self, symbol: str, position: Dict[str, Any]) -> Dict[str, Any]:
+        side = str(position.get("side", "")).upper()
+        if side not in ("LONG", "SHORT"):
+            return {"status": "skipped", "reason": f"invalid_side:{side}"}
+
+        snapshot = {}
+        try:
+            snapshot = self._position_snapshot_by_symbol([symbol]).get(str(symbol).upper(), {})
+        except Exception:
+            snapshot = {}
+        if isinstance(snapshot, dict) and bool(snapshot.get("hedge_conflict")):
+            return {"status": "skipped", "reason": "hedge_conflict"}
+
+        if isinstance(snapshot, dict):
+            snapshot_side = str(snapshot.get("side", "")).upper()
+            if snapshot_side in ("LONG", "SHORT"):
+                side = snapshot_side
+
+        stale_side = "SHORT" if side == "LONG" else "LONG"
+        stale_orders = self._open_protection_orders(symbol, side=stale_side)
+        if not stale_orders:
+            return {"status": "noop", "side": stale_side, "orders": 0}
+
+        stale_side_enum = IntentPositionSide.SHORT if stale_side == "SHORT" else IntentPositionSide.LONG
+        if hasattr(self.client, "_cancel_existing_protection_orders"):
+            result = self.client._cancel_existing_protection_orders(
+                symbol=symbol,
+                side=stale_side_enum,
+                cancel_tp=True,
+                cancel_sl=True,
+            )
+            if isinstance(result, dict):
+                return {"side": stale_side, "orders": len(stale_orders), **result}
+            return {"status": "unknown", "side": stale_side, "orders": len(stale_orders), "raw": result}
+
+        cancelled = 0
+        failed = 0
+        for order in stale_orders:
+            order_id = order.get("orderId")
+            if order_id is None:
+                failed += 1
+                continue
+            try:
+                self.client.cancel_order(symbol, int(order_id))
+                cancelled += 1
+            except Exception:
+                failed += 1
+        return {
+            "status": "success" if failed == 0 else "partial",
+            "side": stale_side,
+            "orders": len(stale_orders),
+            "cancelled": cancelled,
+            "failed": failed,
+        }
+
     def _protection_requirements(self) -> Dict[str, bool]:
         cfg = getattr(self, "config", {}) or {}
         ff_cfg = cfg.get("fund_flow", {}) or {}
@@ -6191,6 +6510,17 @@ class TradingBot:
             try:
                 position = self.position_data.get_current_position(symbol)
                 if isinstance(position, dict):
+                    cleanup_result = self._cleanup_opposite_side_protection_orders(symbol, position)
+                    cleanup_status = str(cleanup_result.get("status", "")).lower()
+                    if cleanup_status in ("success", "partial"):
+                        cleaned_symbols += 1
+                        cleaned_orders += int(self._to_float(cleanup_result.get("orders"), 0.0))
+                        print(
+                            f"🧹 {symbol} 当前持仓方向={position.get('side')}，"
+                            f"清理相反方向保护单 side={cleanup_result.get('side')} "
+                            f"orders={cleanup_result.get('orders')} "
+                            f"status={cleanup_result.get('status')} failed={cleanup_result.get('failed')}"
+                        )
                     continue
                 if self._has_pending_entry_order(symbol):
                     continue
@@ -7755,23 +8085,41 @@ class TradingBot:
                 if decision.operation in (FundFlowOperation.BUY, FundFlowOperation.SELL):
                     signal_side = "LONG" if decision.operation == FundFlowOperation.BUY else "SHORT"
                     if current_side != signal_side:
-                        print(
-                            f"⏭️ {symbol} 已有反向持仓({current_side})，当前策略不做同周期反手，跳过开仓信号"
-                        )
-                        self._log_entry_gate_block(
+                        dual_allowed, dual_decision, dual_meta = self._maybe_allow_extreme_dual_leg_hedge(
                             symbol=symbol,
-                            gate="reverse_position_suppression",
-                            reason="no_same_cycle_flip",
-                            threshold=current_side,
-                            value=signal_side,
+                            position=position,
                             decision=decision,
-                            flow_context=flow_context,
-                            trigger_context=trigger_context,
-                            market_data=market_data,
-                            flow_snapshot=flow_snapshot,
-                            side=current_side,
+                            current_price=current_price,
                         )
-                        continue
+                        if dual_allowed:
+                            decision = dual_decision
+                            print(
+                                f"🛡️ {symbol} 极端行情允许双腿对冲: "
+                                f"{current_side}->{signal_side}, "
+                                f"loss={self._to_float(dual_meta.get('loss_ratio'), 0.0):.2%}, "
+                                f"score={self._to_float(dual_meta.get('signal_score'), 0.0):.2f}, "
+                                f"atr={self._to_float(dual_meta.get('regime_atr_pct'), 0.0):.2%}, "
+                                f"portion={decision.target_portion_of_balance:.3f}, lev={decision.leverage}x"
+                            )
+                        else:
+                            print(
+                                f"⏭️ {symbol} 已有反向持仓({current_side})，当前策略不做同周期反手，跳过开仓信号 "
+                                f"reason={dual_meta.get('reason')}"
+                            )
+                            self._log_entry_gate_block(
+                                symbol=symbol,
+                                gate="reverse_position_suppression",
+                                reason=f"no_same_cycle_flip:{dual_meta.get('reason')}",
+                                threshold=current_side,
+                                value=signal_side,
+                                decision=decision,
+                                flow_context=flow_context,
+                                trigger_context=trigger_context,
+                                market_data=market_data,
+                                flow_snapshot=flow_snapshot,
+                                side=current_side,
+                            )
+                            continue
             
                 # DCA/马丁模式：已有持仓时仅按回撤阈值+阶梯倍数触发加仓
                 if bool(dca_cfg_local.get("enabled")) and decision.operation != FundFlowOperation.CLOSE:
@@ -8669,6 +9017,11 @@ class TradingBot:
                     float(getattr(self.fund_flow_risk_engine, "min_open_portion", 0.1) or 0.1),
                 )
                 if float(decision.target_portion_of_balance) < min_open_portion:
+                    decision, probe_meta = self._apply_probe_floor_rescue(
+                        decision=decision,
+                        min_open_portion=min_open_portion,
+                    )
+                if float(decision.target_portion_of_balance) < min_open_portion:
                     print(
                         f"⏭️ {symbol} 目标开仓比例低于最小下单阈值，跳过开仓: "
                         f"target={float(decision.target_portion_of_balance):.4f}, "
@@ -8685,7 +9038,7 @@ class TradingBot:
                         trigger_context=trigger_context,
                         market_data=market_data,
                         flow_snapshot=flow_snapshot,
-                        extra={"open_new_entry": True},
+                        extra={"open_new_entry": True, "probe_floor_rescue": probe_meta},
                     )
                     continue
                 item_max_active_symbols = max(
