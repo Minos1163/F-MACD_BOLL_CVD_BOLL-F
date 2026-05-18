@@ -30,6 +30,53 @@ DEFAULT_COMPETITION_CLUSTER_BONUS_MAP = {
 }
 
 
+DEFAULT_SIGNAL_COMBO_HARD_BLOCK_RULES = [
+    {"direction": "long", "signal_1h": "flip_bearish", "action": "BLOCK"},
+    {"direction": "long", "signal_1h": "red_bar_shrinking", "action": "PROBE", "max_portion": 0.042},
+    {"direction": "long", "signal_1h": "green_bar_growing", "action": "BLOCK"},
+    {"direction": "long", "signal_1h": "green_bar_shrinking", "action": "SHADOW"},
+    {"direction": "short", "signal_1h": "flip_bullish", "action": "BLOCK"},
+    {"direction": "short", "signal_1h": "red_bar_growing", "action": "BLOCK"},
+    {"direction": "short", "signal_1h": "red_bar_shrinking", "action": "SHADOW"},
+]
+
+
+PARTIAL_CONFIRM_TABLE: Dict[Tuple[str, str], Dict[str, Any]] = {
+    ("green_bar_shrinking", "red_bar_growing"): {
+        "direction": "long",
+        "confidence": "MEDIUM",
+        "reason": "4H熊力衰减+1H多头启动",
+    },
+    ("green_bar_shrinking", "flip_bullish"): {
+        "direction": "long",
+        "confidence": "HIGH",
+        "reason": "4H熊力衰减+1H金叉确认",
+    },
+    ("green_bar_shrinking", "red_bar_shrinking"): {
+        "direction": "long",
+        "confidence": "LOW",
+        "reason": "4H/1H双收缩，多头萌芽",
+        "shadow_only": True,
+    },
+    ("red_bar_shrinking", "green_bar_growing"): {
+        "direction": "short",
+        "confidence": "MEDIUM",
+        "reason": "4H牛力衰减+1H空头启动",
+    },
+    ("red_bar_shrinking", "flip_bearish"): {
+        "direction": "short",
+        "confidence": "HIGH",
+        "reason": "4H牛力衰减+1H死叉确认",
+    },
+    ("red_bar_shrinking", "green_bar_shrinking"): {
+        "direction": "short",
+        "confidence": "LOW",
+        "reason": "4H/1H双收缩，空头萌芽",
+        "shadow_only": True,
+    },
+}
+
+
 class VetoType(Enum):
     """否决类型"""
     NONE = "none"
@@ -72,6 +119,26 @@ class MACDStrategyV2Config:
     vwap_deviation_optimal: float = 0.005  # 最优偏离区间 ±0.5%
     vwap_deviation_warning: float = 0.015  # 警告偏离 ±1.5%
     vwap_deviation_hard_block: float = 0.030  # 硬性否决偏离 ±3.0%
+    vwap_deviation_gate_mode: str = "fixed"
+    vwap_gate_pass_atr_multiplier: float = 1.5
+    vwap_gate_penalty_atr_multiplier: float = 2.5
+    vwap_gate_block_atr_multiplier: float = 4.0
+    vwap_gate_penalty_mult_slope: float = 0.15
+    vwap_gate_fallback_hard_block_pct: float = 0.06
+    vwap_gate_probe_max_portion: float = 0.06
+    vwap_same_dir_trend_aligned_pass_dev_pct: float = 0.05
+    vwap_same_dir_trend_aligned_penalty_dev_pct: float = 0.10
+    vwap_same_dir_trend_aligned_probe_dev_pct: float = 0.15
+    vwap_same_dir_trend_aligned_penalty_mult: float = 0.90
+    vwap_same_dir_counter_pass_atr_mult: float = 2.0
+    vwap_same_dir_counter_penalty_atr_mult: float = 3.5
+    vwap_same_dir_counter_probe_atr_mult: float = 5.0
+    vwap_same_dir_counter_fallback_hard_block_pct: float = 0.03
+    vwap_same_dir_counter_penalty_mult: float = 0.85
+    vwap_ambiguous_pass_atr_mult: float = 1.5
+    vwap_ambiguous_penalty_atr_mult: float = 2.5
+    vwap_ambiguous_block_atr_mult: float = 4.0
+    vwap_ambiguous_penalty_mult: float = 0.88
     structural_vwap_mode: str = "anchored_weekly"
     structural_vwap_rolling_window: int = 20
     vwap_retest_tolerance: float = 0.003
@@ -162,9 +229,22 @@ class MACDStrategyV2Config:
     neutral_upgrade_probe_rsi_score: float = 0.20
     neutral_upgrade_probe_threshold_score: float = 0.82
     neutral_upgrade_penalty_mult: float = 0.90
+    partial_confirm_enabled: bool = False
+    partial_confirm_shadow_mode: bool = True
+    partial_confirm_thresholds: Dict[str, float] = field(default_factory=lambda: {"HIGH": 0.60, "MEDIUM": 0.58})
+    partial_confirm_max_portions: Dict[str, float] = field(default_factory=lambda: {"HIGH": 0.10, "MEDIUM": 0.06, "LOW": 0.042})
+    partial_confirm_score_4h_partial: Dict[str, float] = field(default_factory=lambda: {"HIGH": 0.15, "MEDIUM": 0.10, "LOW": 0.05})
+    partial_confirm_penalty_mult: float = 0.85
+    partial_confirm_vwap_max_dev_atr_ratio: float = 3.0
+    partial_confirm_long_min_dev_pct: float = -0.02
+    partial_confirm_short_max_dev_pct: float = 0.02
     enable_rsi_rhythm_scoring: bool = True
     enable_rsi_hard_veto: bool = True
     enable_rsi_1h_direction_gate: bool = False
+    enable_rsi_adaptive_direction_gate: bool = False
+    rsi_adaptive_soft_rsi_against_mult: float = 0.88
+    rsi_adaptive_soft_rsi_against_max_portion: float = 0.06
+    rsi_adaptive_soft_rsi_flat_mult: float = 0.93
     rsi_1h_direction_flat_threshold: float = 0.3
     enable_leading_rsi_conflict_pass: bool = True
     leading_rsi_slope_threshold: float = 2.0
@@ -189,6 +269,19 @@ class MACDStrategyV2Config:
     enable_green_bar_growing_probe_overlay: bool = True
     green_bar_growing_probe_position_penalty: float = 0.10
     green_bar_growing_probe_max_leverage: int = 2
+    probe_penalty_floor_notional_usdt: float = 2.0
+    short_floor_max_lift_ratio: float = 5.0
+    counter_trend_long_guard_enabled: bool = False
+    counter_trend_long_vwap_dev_extreme_pct: float = 0.030
+    counter_trend_long_vwap_dev_moderate_pct: float = 0.010
+    counter_trend_long_adx_weak_threshold: float = 18.0
+    counter_trend_long_adx_extreme_threshold: float = 20.0
+    counter_trend_long_min_15m_raw_for_confirm: float = 0.30
+    counter_trend_long_extreme_trend_max_portion: float = 0.060
+    counter_trend_long_extreme_range_action: str = "BLOCK"
+    counter_trend_long_moderate_no_15m_max: float = 0.060
+    counter_trend_long_moderate_ok_max: float = 0.120
+    counter_trend_long_minor_max: float = 0.200
     rsi_4h_long_support: float = 55.0
     rsi_4h_short_support: float = 45.0
     rsi_4h_long_against: float = 40.0
@@ -302,6 +395,10 @@ class MACDStrategyV2Config:
     dynamic_adx_trend_min: float = 0.0
     dynamic_adx_trend_position_mult: float = 1.0
     dynamic_signal_type_position_caps: Dict[str, Any] = field(default_factory=dict)
+    total_compression_floor_enabled: bool = False
+    total_compression_floor_tiers: List[Dict[str, Any]] = field(default_factory=list)
+    signal_combo_hard_block_enabled: bool = True
+    signal_combo_hard_block_rules: List[Dict[str, Any]] = field(default_factory=lambda: list(DEFAULT_SIGNAL_COMBO_HARD_BLOCK_RULES))
     enable_meaningful_short_entry_cap: bool = False
     meaningful_short_micro_target_portion: float = 0.009
     enable_no_trade_meaningful_entry_cap: bool = False
@@ -551,6 +648,276 @@ class MACDStrategyV2Engine:
         if extra:
             payload.update(extra)
         return payload
+
+    def _resolve_vwap_extension_gate(
+        self,
+        directional_extension: float,
+        atr_pct: float = 0.0,
+        *,
+        min_threshold: float = 1e-9,
+        deviation: float = 0.0,
+        direction: str = "",
+        signal_type_4h: str = "",
+        signal_type_1h: str = "",
+    ) -> Tuple[float, Dict[str, Any]]:
+        extension = max(0.0, float(directional_extension or 0.0))
+        fixed_threshold = max(float(self.config.vwap_deviation_hard_block), float(min_threshold))
+        mode = str(self.config.vwap_deviation_gate_mode or "fixed").strip().lower()
+        details: Dict[str, Any] = {
+            "vwap_gate_mode": mode or "fixed",
+            "vwap_gate_action": "vwap_pass",
+            "vwap_probe_mode": False,
+            "vwap_probe_max_portion": float(self.config.vwap_gate_probe_max_portion),
+            "vwap_hard_block_threshold": fixed_threshold,
+            "vwap_deviation_in_atr": 0.0,
+            "vwap_atr_pct": float(atr_pct or 0.0),
+        }
+        if mode == "directional_ablation":
+            return self._resolve_directional_vwap_ablation_gate(
+                extension=extension,
+                atr_pct=float(atr_pct or 0.0),
+                min_threshold=min_threshold,
+                deviation=float(deviation or 0.0),
+                direction=direction,
+                signal_type_4h=signal_type_4h,
+                signal_type_1h=signal_type_1h,
+                details=details,
+            )
+        if mode != "atr_normalized":
+            if extension > fixed_threshold:
+                details["vwap_gate_action"] = "vwap_hard_block"
+            return fixed_threshold, details
+
+        atr_pct_value = float(atr_pct or 0.0)
+        if atr_pct_value <= 0.0:
+            fallback = max(float(self.config.vwap_gate_fallback_hard_block_pct), fixed_threshold)
+            details.update(
+                vwap_gate_action="vwap_hard_block" if extension > fallback else "vwap_pass",
+                vwap_hard_block_threshold=fallback,
+                vwap_gate_fallback_used=True,
+            )
+            logger.info(
+                "[VWAP_GATE] mode=%s dev=%.4f atr_pct=%.4f vwap_deviation_in_atr=0.0000 "
+                "vwap_gate_action=%s threshold=%.4f fallback=legacy",
+                mode,
+                extension,
+                atr_pct_value,
+                details["vwap_gate_action"],
+                fallback,
+            )
+            return fallback, details
+
+        pass_mult = max(0.0, float(self.config.vwap_gate_pass_atr_multiplier))
+        penalty_mult = max(pass_mult, float(self.config.vwap_gate_penalty_atr_multiplier))
+        block_mult = max(penalty_mult, float(self.config.vwap_gate_block_atr_multiplier))
+        threshold = max(atr_pct_value * block_mult, float(min_threshold))
+        dev_in_atr = extension / atr_pct_value
+        if dev_in_atr >= block_mult:
+            action = "vwap_hard_block"
+        elif dev_in_atr >= penalty_mult:
+            action = "vwap_probe"
+        elif dev_in_atr >= pass_mult:
+            action = "vwap_penalty"
+        else:
+            action = "vwap_pass"
+        details.update(
+            vwap_gate_action=action,
+            vwap_probe_mode=action == "vwap_probe",
+            vwap_probe_max_portion=float(self.config.vwap_gate_probe_max_portion),
+            vwap_hard_block_threshold=threshold,
+            vwap_deviation_in_atr=dev_in_atr,
+            vwap_gate_pass_atr_multiplier=pass_mult,
+            vwap_gate_penalty_atr_multiplier=penalty_mult,
+            vwap_gate_block_atr_multiplier=block_mult,
+        )
+        logger.info(
+            "[VWAP_GATE] mode=%s dev=%.4f atr_pct=%.4f vwap_deviation_in_atr=%.4f "
+            "vwap_gate_action=%s threshold=%.4f",
+            mode,
+            extension,
+            atr_pct_value,
+            dev_in_atr,
+            action,
+            threshold,
+        )
+        return threshold, details
+
+    def _resolve_directional_vwap_ablation_gate(
+        self,
+        *,
+        extension: float,
+        atr_pct: float,
+        min_threshold: float,
+        deviation: float,
+        direction: str,
+        signal_type_4h: str,
+        signal_type_1h: str,
+        details: Dict[str, Any],
+    ) -> Tuple[float, Dict[str, Any]]:
+        direction_norm = str(direction or "").strip().lower()
+        sig4 = str(signal_type_4h or "").strip().lower()
+        sig1 = str(signal_type_1h or "").strip().lower()
+        same_direction_pairs = {
+            ("green_bar_growing", "green_bar_growing"),
+            ("green_bar_growing", "green_bar_shrinking"),
+            ("red_bar_growing", "red_bar_growing"),
+            ("red_bar_growing", "red_bar_shrinking"),
+        }
+        is_same_direction = (sig4, sig1) in same_direction_pairs
+        is_trend_aligned = (
+            (direction_norm == "short" and deviation < 0.0)
+            or (direction_norm == "long" and deviation > 0.0)
+        )
+        is_counter_trend = (
+            (direction_norm == "short" and deviation > 0.0)
+            or (direction_norm == "long" and deviation < 0.0)
+        )
+        dev_abs = abs(float(deviation or 0.0))
+        details.update(
+            vwap_gate_same_direction=is_same_direction,
+            vwap_gate_trend_aligned=is_trend_aligned,
+            vwap_gate_counter_trend=is_counter_trend,
+        )
+
+        if is_same_direction and is_trend_aligned:
+            pass_dev = max(0.0, float(self.config.vwap_same_dir_trend_aligned_pass_dev_pct))
+            penalty_dev = max(pass_dev, float(self.config.vwap_same_dir_trend_aligned_penalty_dev_pct))
+            probe_dev = max(penalty_dev, float(self.config.vwap_same_dir_trend_aligned_probe_dev_pct))
+            if dev_abs < pass_dev:
+                action = "same_dir_trend_aligned_pass"
+                threshold = pass_dev
+                score_mult = 1.0
+            elif dev_abs < penalty_dev:
+                action = "same_dir_trend_aligned_penalty"
+                threshold = penalty_dev
+                score_mult = self._clamp(float(self.config.vwap_same_dir_trend_aligned_penalty_mult), 0.0, 1.0)
+            elif dev_abs < probe_dev:
+                action = "same_dir_trend_aligned_probe"
+                threshold = probe_dev
+                score_mult = 0.80
+            else:
+                action = "same_dir_extreme_deviation_block"
+                threshold = probe_dev
+                score_mult = 0.0
+            details.update(
+                vwap_gate_action=action,
+                vwap_probe_mode=action == "same_dir_trend_aligned_probe",
+                vwap_probe_max_portion=float(self.config.vwap_gate_probe_max_portion),
+                vwap_hard_block_threshold=max(threshold, float(min_threshold)),
+                vwap_gate_score_mult=score_mult,
+                vwap_same_dir_trend_aligned_pass_dev_pct=pass_dev,
+                vwap_same_dir_trend_aligned_penalty_dev_pct=penalty_dev,
+                vwap_same_dir_trend_aligned_probe_dev_pct=probe_dev,
+            )
+            logger.info(
+                "[VWAP_GATE] mode=directional_ablation dev=%.4f atr_pct=%.4f "
+                "vwap_gate_action=%s same_direction=%s trend_aligned=%s",
+                dev_abs,
+                atr_pct,
+                action,
+                is_same_direction,
+                is_trend_aligned,
+            )
+            return max(threshold, float(min_threshold)), details
+
+        if is_same_direction and is_counter_trend:
+            pass_mult = max(0.0, float(self.config.vwap_same_dir_counter_pass_atr_mult))
+            penalty_mult = max(pass_mult, float(self.config.vwap_same_dir_counter_penalty_atr_mult))
+            probe_mult = max(penalty_mult, float(self.config.vwap_same_dir_counter_probe_atr_mult))
+            if atr_pct > 0.0:
+                dev_in_atr = dev_abs / atr_pct
+                if dev_in_atr < pass_mult:
+                    action = "same_dir_counter_atr_pass"
+                    score_mult = 1.0
+                elif dev_in_atr < penalty_mult:
+                    action = "same_dir_counter_atr_penalty"
+                    score_mult = self._clamp(float(self.config.vwap_same_dir_counter_penalty_mult), 0.0, 1.0)
+                elif dev_in_atr < probe_mult:
+                    action = "same_dir_counter_atr_probe"
+                    score_mult = 0.75
+                else:
+                    action = "same_dir_counter_block"
+                    score_mult = 0.0
+                threshold = max(atr_pct * probe_mult, float(min_threshold))
+            else:
+                fallback = max(float(self.config.vwap_same_dir_counter_fallback_hard_block_pct), float(min_threshold))
+                dev_in_atr = 0.0
+                action = "same_dir_counter_fallback_pass" if dev_abs < fallback else "same_dir_counter_block"
+                score_mult = 1.0 if action == "same_dir_counter_fallback_pass" else 0.0
+                threshold = fallback
+            details.update(
+                vwap_gate_action=action,
+                vwap_probe_mode=action == "same_dir_counter_atr_probe",
+                vwap_probe_max_portion=float(self.config.vwap_gate_probe_max_portion),
+                vwap_hard_block_threshold=threshold,
+                vwap_gate_score_mult=score_mult,
+                vwap_deviation_in_atr=dev_in_atr,
+                vwap_gate_pass_atr_multiplier=pass_mult,
+                vwap_gate_penalty_atr_multiplier=penalty_mult,
+                vwap_gate_block_atr_multiplier=probe_mult,
+            )
+            logger.info(
+                "[VWAP_GATE] mode=directional_ablation dev=%.4f atr_pct=%.4f "
+                "vwap_deviation_in_atr=%.4f vwap_gate_action=%s counter_trend=%s",
+                dev_abs,
+                atr_pct,
+                dev_in_atr,
+                action,
+                is_counter_trend,
+            )
+            return threshold, details
+
+        pass_mult = max(0.0, float(self.config.vwap_ambiguous_pass_atr_mult))
+        penalty_mult = max(pass_mult, float(self.config.vwap_ambiguous_penalty_atr_mult))
+        block_mult = max(penalty_mult, float(self.config.vwap_ambiguous_block_atr_mult))
+        if atr_pct > 0.0:
+            dev_in_atr = dev_abs / atr_pct
+            if dev_in_atr < pass_mult:
+                action = "ambiguous_atr_pass"
+                score_mult = 1.0
+            elif dev_in_atr < penalty_mult:
+                action = "ambiguous_atr_penalty"
+                score_mult = self._clamp(float(self.config.vwap_ambiguous_penalty_mult), 0.0, 1.0)
+            elif dev_in_atr < block_mult:
+                action = "ambiguous_atr_probe"
+                score_mult = 0.80
+            else:
+                action = "ambiguous_block"
+                score_mult = 0.0
+            threshold = max(atr_pct * block_mult, float(min_threshold))
+        else:
+            dev_in_atr = 0.0
+            threshold = max(float(self.config.vwap_gate_fallback_hard_block_pct), float(min_threshold))
+            action = "ambiguous_block" if dev_abs > threshold else "ambiguous_atr_pass"
+            score_mult = 0.0 if action == "ambiguous_block" else 1.0
+        details.update(
+            vwap_gate_action=action,
+            vwap_probe_mode=action == "ambiguous_atr_probe",
+            vwap_probe_max_portion=float(self.config.vwap_gate_probe_max_portion),
+            vwap_hard_block_threshold=threshold,
+            vwap_gate_score_mult=score_mult,
+            vwap_deviation_in_atr=dev_in_atr,
+            vwap_gate_pass_atr_multiplier=pass_mult,
+            vwap_gate_penalty_atr_multiplier=penalty_mult,
+            vwap_gate_block_atr_multiplier=block_mult,
+        )
+        logger.info(
+            "[VWAP_GATE] mode=directional_ablation dev=%.4f atr_pct=%.4f "
+            "vwap_deviation_in_atr=%.4f vwap_gate_action=%s same_direction=%s",
+            dev_abs,
+            atr_pct,
+            dev_in_atr,
+            action,
+            is_same_direction,
+        )
+        return threshold, details
+
+    @staticmethod
+    def _vwap_gate_is_block(gate_details: Dict[str, Any], directional_extension: float, hard_block: float) -> bool:
+        action = str((gate_details or {}).get("vwap_gate_action") or "").strip().lower()
+        if action.endswith("_block") or action == "vwap_hard_block":
+            return True
+        return float(directional_extension or 0.0) > float(hard_block or 0.0)
 
     @staticmethod
     def _extract_reject_reason_metadata(reason: str) -> Tuple[str, str]:
@@ -970,6 +1337,157 @@ class MACDStrategyV2Engine:
             if any(signal_by_field.get(str(field or "").strip().lower(), "") == cap_signal for field in apply_fields):
                 return self._clamp(float(raw_cap.get("max_target_portion", 0.0) or 0.0), 0.0, 1.0)
         return 0.0
+
+    def resolve_total_compression_floor(self, score: float, base_default_portion: float) -> float:
+        if not bool(self.config.total_compression_floor_enabled):
+            return 0.0
+        signal_score = float(score or 0.0)
+        base = max(0.0, float(base_default_portion or 0.0))
+        best_min_score = -1.0
+        best_floor_mult = 0.0
+        for raw_tier in self.config.total_compression_floor_tiers or []:
+            if not isinstance(raw_tier, dict):
+                continue
+            min_score = float(raw_tier.get("min_score", 0.0) or 0.0)
+            if signal_score + 1e-12 < min_score or min_score < best_min_score:
+                continue
+            best_min_score = min_score
+            best_floor_mult = self._clamp(
+                float(raw_tier.get("min_mult_of_base", 0.0) or 0.0),
+                0.0,
+                1.0,
+            )
+        return base * best_floor_mult
+
+    def _signal_combo_rule_map(self) -> Dict[Tuple[str, str], Dict[str, Any]]:
+        rules = self.config.signal_combo_hard_block_rules or DEFAULT_SIGNAL_COMBO_HARD_BLOCK_RULES
+        out: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        for raw in rules:
+            if not isinstance(raw, dict):
+                continue
+            direction = str(raw.get("direction") or "").strip().lower()
+            signal_1h = str(raw.get("signal_1h") or "").strip().lower()
+            if direction not in {"long", "short"} or not signal_1h:
+                continue
+            item = dict(raw)
+            item["action"] = str(item.get("action") or "PASS").strip().upper()
+            out[(direction, signal_1h)] = item
+        return out
+
+    def _apply_signal_combo_hard_block(
+        self,
+        direction: str,
+        signal_1h: str,
+        symbol: str,
+        score: float,
+    ) -> Dict[str, Any]:
+        if not bool(self.config.signal_combo_hard_block_enabled):
+            return {"action": "PASS", "max_portion": 9999.0}
+        key = (
+            str(direction or "").strip().lower(),
+            str(signal_1h or "").strip().lower(),
+        )
+        rule = self._signal_combo_rule_map().get(key)
+        if not rule:
+            return {"action": "PASS", "max_portion": 9999.0}
+        action = str(rule.get("action") or "PASS").strip().upper()
+        max_portion = self._clamp(float(rule.get("max_portion", 0.0) or 0.0), 0.0, 1.0)
+        if action == "PROBE" and max_portion <= 0:
+            max_portion = 0.042
+        if action not in {"BLOCK", "SHADOW", "PROBE"}:
+            return {"action": "PASS", "max_portion": 9999.0}
+        logger.info(
+            "[COMBO_%s] %s %s+%s score=%.4f max_portion=%.4f",
+            action,
+            str(symbol or "").upper(),
+            key[0],
+            key[1],
+            float(score or 0.0),
+            max_portion,
+        )
+        return {
+            "action": action,
+            "max_portion": max_portion,
+            "direction": key[0],
+            "signal_1h": key[1],
+        }
+
+    def _check_counter_trend_long_guard(
+        self,
+        *,
+        direction: str,
+        vwap_dev_pct: float,
+        adx: float,
+        regime: str,
+        score_15m: float,
+        raw_15m: float,
+        signal_4h: str,
+        signal_1h: str,
+        current_portion: float,
+    ) -> Dict[str, Any]:
+        if not bool(self.config.counter_trend_long_guard_enabled):
+            return {"action": "PASS", "max_portion": current_portion, "reason": "disabled"}
+        if str(direction or "").strip().lower() != "long":
+            return {"action": "PASS", "max_portion": current_portion, "reason": "not_long"}
+
+        dev = float(vwap_dev_pct or 0.0)
+        if dev >= 0:
+            return {"action": "PASS", "max_portion": current_portion, "reason": "above_vwap_long_ok"}
+
+        dev_abs = abs(dev)
+        adx_value = float(adx or 0.0)
+        regime_u = str(regime or "").strip().upper()
+        has_15m_confirm = float(raw_15m or 0.0) >= float(self.config.counter_trend_long_min_15m_raw_for_confirm)
+        weak_or_range = regime_u == "RANGE" or adx_value < float(self.config.counter_trend_long_adx_weak_threshold)
+        extreme_weak_or_range = regime_u == "RANGE" or adx_value < float(self.config.counter_trend_long_adx_extreme_threshold)
+
+        if dev_abs > float(self.config.counter_trend_long_vwap_dev_extreme_pct):
+            if extreme_weak_or_range and str(self.config.counter_trend_long_extreme_range_action).upper() == "BLOCK":
+                return {
+                    "action": "BLOCK",
+                    "max_portion": 0.0,
+                    "reason": f"below_vwap_{dev_abs:.2%}_adx={adx_value:.1f}_range_block",
+                }
+            cap = (
+                float(self.config.counter_trend_long_extreme_trend_max_portion)
+                if has_15m_confirm
+                else min(
+                    float(self.config.counter_trend_long_extreme_trend_max_portion),
+                    float(self.config.counter_trend_long_moderate_no_15m_max),
+                )
+            )
+            return {
+                "action": "PROBE",
+                "max_portion": cap,
+                "reason": (
+                    f"below_vwap_{dev_abs:.2%}_15m_confirmed_probe"
+                    if has_15m_confirm
+                    else f"below_vwap_{dev_abs:.2%}_no_15m_probe"
+                ),
+            }
+
+        if dev_abs > float(self.config.counter_trend_long_vwap_dev_moderate_pct):
+            if not has_15m_confirm or weak_or_range:
+                return {
+                    "action": "PROBE",
+                    "max_portion": float(self.config.counter_trend_long_moderate_no_15m_max),
+                    "reason": (
+                        f"below_vwap_{dev_abs:.2%}_range_adx_probe"
+                        if weak_or_range
+                        else f"below_vwap_{dev_abs:.2%}_no_15m_probe"
+                    ),
+                }
+            return {
+                "action": "PASS",
+                "max_portion": min(current_portion, float(self.config.counter_trend_long_moderate_ok_max)),
+                "reason": f"below_vwap_{dev_abs:.2%}_15m_ok_capped_0.12",
+            }
+
+        return {
+            "action": "PASS",
+            "max_portion": min(current_portion, float(self.config.counter_trend_long_minor_max)),
+            "reason": f"below_vwap_{dev_abs:.2%}_minor_capped_0.20",
+        }
 
     @classmethod
     def _normalized_change(cls, current: float, previous: float) -> float:
@@ -1406,6 +1924,111 @@ class MACDStrategyV2Engine:
                 penalty_mult=float(self.config.neutral_upgrade_penalty_mult),
             )
         return result
+
+    def _check_partial_confirm(self, signal_4h: str, signal_1h: str) -> Optional[Dict[str, Any]]:
+        if not bool(self.config.partial_confirm_enabled):
+            return None
+        key = (
+            str(signal_4h or "").strip().lower(),
+            str(signal_1h or "").strip().lower(),
+        )
+        result = PARTIAL_CONFIRM_TABLE.get(key)
+        return dict(result) if result is not None else None
+
+    @staticmethod
+    def _score_1h_direction_from_signal(signal_1h: str) -> float:
+        signal = str(signal_1h or "").strip().lower()
+        if signal in {"flip_bullish", "flip_bearish"}:
+            return 1.0
+        if signal in {"red_bar_growing", "green_bar_growing"}:
+            return 0.85
+        if signal in {"red_bar_stable", "green_bar_stable"}:
+            return 0.60
+        if signal in {"red_bar_shrinking", "green_bar_shrinking"}:
+            return 0.30
+        return 0.0
+
+    @staticmethod
+    def _score_volume_quality(volume_ratio: float) -> float:
+        ratio = float(volume_ratio or 0.0)
+        if ratio >= 1.0:
+            return 1.0
+        if ratio >= 0.7:
+            return 0.67
+        if ratio > 0.0:
+            return 0.33
+        return 0.0
+
+    def _compute_partial_confirm_shadow_score(
+        self,
+        pc_result: Optional[Dict[str, Any]],
+        *,
+        score_1h: float,
+        score_vwap: float,
+        score_vol: float,
+        score_15m: float,
+        rsi_score: float,
+        vwap_dev_pct: float,
+        atr_pct: float,
+    ) -> Dict[str, Any]:
+        pc = dict(pc_result or {})
+        confidence = str(pc.get("confidence") or "LOW").strip().upper()
+        direction = str(pc.get("direction") or "neutral").strip().lower()
+        score_4h_partial = self._clamp(
+            float((self.config.partial_confirm_score_4h_partial or {}).get(confidence, 0.05) or 0.05),
+            0.0,
+            1.0,
+        )
+        raw_score = (
+            self._clamp(score_1h, 0.0, 1.0) * float(self.config.weight_1h_direction)
+            + score_4h_partial * float(self.config.weight_4h_direction)
+            + self._clamp(rsi_score, 0.0, 1.0) * float(self.config.weight_rsi_rhythm)
+            + self._clamp(score_vwap, 0.0, 1.0) * float(self.config.weight_vwap)
+            + self._clamp(score_15m, 0.0, 1.0) * float(self.config.weight_15m_entry)
+            + self._clamp(score_vol, 0.0, 1.0) * float(self.config.weight_volume)
+        )
+        scored = raw_score * self._clamp(float(self.config.partial_confirm_penalty_mult), 0.0, 1.0)
+        threshold = float((self.config.partial_confirm_thresholds or {}).get(confidence, 0.55) or 0.55)
+        max_portion = float((self.config.partial_confirm_max_portions or {}).get(confidence, 0.042) or 0.042)
+        atr_value = float(atr_pct or 0.0)
+        vwap_dev = float(vwap_dev_pct or 0.0)
+        vwap_dev_atr_ratio = abs(vwap_dev) / atr_value if atr_value > 0 else 999.0
+        vwap_safe = vwap_dev_atr_ratio < float(self.config.partial_confirm_vwap_max_dev_atr_ratio)
+        vwap_aligned = (
+            (direction == "long" and vwap_dev > float(self.config.partial_confirm_long_min_dev_pct))
+            or (direction == "short" and vwap_dev < float(self.config.partial_confirm_short_max_dev_pct))
+        )
+        shadow_only = bool(pc.get("shadow_only", False))
+        would_pass = bool(scored >= threshold and vwap_safe and vwap_aligned and not shadow_only)
+        return {
+            "pc_direction": direction,
+            "pc_confidence": confidence,
+            "pc_score_4h": score_4h_partial,
+            "pc_raw_score": round(raw_score, 4),
+            "pc_scored": round(scored, 4),
+            "pc_threshold": threshold,
+            "pc_max_portion": max_portion,
+            "pc_would_pass": would_pass,
+            "pc_vwap_safe": bool(vwap_safe),
+            "pc_vwap_aligned": bool(vwap_aligned),
+            "pc_vwap_dev_atr_ratio": round(vwap_dev_atr_ratio, 4),
+            "pc_shadow_only": shadow_only,
+            "pc_reason": str(pc.get("reason") or ""),
+        }
+
+    def _emit_partial_confirm_shadow(self, signal_4h: str, signal_1h: str, shadow: Dict[str, Any]) -> None:
+        print(
+            "[PC_SHADOW] "
+            f"{signal_4h}+{signal_1h} "
+            f"dir={shadow.get('pc_direction')} "
+            f"conf={shadow.get('pc_confidence')} "
+            f"score={float(shadow.get('pc_scored', 0.0)):.4f}/th={shadow.get('pc_threshold')} "
+            f"would_pass={bool(shadow.get('pc_would_pass', False))} "
+            f"max_portion={shadow.get('pc_max_portion')} "
+            f"vwap_safe={bool(shadow.get('pc_vwap_safe', False))} "
+            f"vwap_aligned={bool(shadow.get('pc_vwap_aligned', False))} "
+            f"reason={shadow.get('pc_reason')}"
+        )
 
     def _classify_rsi_macd_conflict(
         self,
@@ -1849,6 +2472,67 @@ class MACDStrategyV2Engine:
                 float(self.config.rsi_probe_exposure_mult),
             )
         return result
+
+    def _apply_adaptive_rsi_direction_gate(
+        self,
+        *,
+        rsi_rhythm: Dict[str, Any],
+        signal_type_4h: str,
+        signal_type_1h: str,
+        direction: str,
+    ) -> Dict[str, Any]:
+        adjusted = dict(rsi_rhythm or {})
+        if not self.config.enable_rsi_adaptive_direction_gate:
+            return adjusted
+        if not bool(adjusted.get("hard_veto", False)):
+            return adjusted
+
+        veto_reason = str(adjusted.get("veto_reason") or "")
+        direction_norm = str(direction or "").strip().lower()
+        signal_4h = str(signal_type_4h or "").strip()
+        signal_1h = str(signal_type_1h or "").strip()
+
+        if (
+            veto_reason == "rsi_1h_direction_against_veto"
+            and direction_norm == "short"
+            and signal_4h == "green_bar_growing"
+            and signal_1h == "green_bar_shrinking"
+        ):
+            adjusted.update(
+                hard_veto=False,
+                veto_reason="",
+                entry_type="rsi_soft_against_probe",
+                exposure_mult=max(0.0, float(self.config.rsi_adaptive_soft_rsi_against_mult)),
+                probe_mode=True,
+                rsi_1h_direction_gate_passed=True,
+                rsi_soft_gate_applied=True,
+                rsi_soft_gate_action="PROBE",
+                rsi_soft_max_portion=max(
+                    0.0,
+                    float(self.config.rsi_adaptive_soft_rsi_against_max_portion),
+                ),
+                rsi_soft_gate_reason="soft_short_green_bar_growing_green_bar_shrinking_against",
+            )
+            return adjusted
+
+        if (
+            veto_reason == "rsi_1h_direction_flat_veto"
+            and direction_norm == "short"
+            and signal_4h == "green_bar_growing"
+            and signal_1h == "green_bar_growing"
+        ):
+            adjusted.update(
+                hard_veto=False,
+                veto_reason="",
+                entry_type="rsi_soft_flat_penalty",
+                exposure_mult=max(0.0, float(self.config.rsi_adaptive_soft_rsi_flat_mult)),
+                probe_mode=False,
+                rsi_1h_direction_gate_passed=True,
+                rsi_soft_gate_applied=True,
+                rsi_soft_gate_action="PENALTY",
+                rsi_soft_gate_reason="soft_short_green_bar_growing_green_bar_growing_flat",
+            )
+        return adjusted
 
     def _resolve_rsi_entry_refinement(
         self,
@@ -2874,6 +3558,9 @@ class MACDStrategyV2Engine:
         direction: str,
         *,
         structural_vwap: Optional[float] = None,
+        atr_pct: float = 0.0,
+        signal_type_4h: str = "",
+        signal_type_1h: str = "",
         price_series: Optional[np.ndarray] = None,
         session_vwap_series: Optional[np.ndarray] = None,
         structural_vwap_series: Optional[np.ndarray] = None,
@@ -2913,7 +3600,15 @@ class MACDStrategyV2Engine:
             if direction == 'long':
                 directional_extension = deviation
                 entry_edge = -deviation
-                if directional_extension > self.config.vwap_deviation_hard_block:
+                hard_block, gate_details = self._resolve_vwap_extension_gate(
+                    directional_extension,
+                    atr_pct,
+                    deviation=deviation,
+                    direction=direction,
+                    signal_type_4h=signal_type_4h,
+                    signal_type_1h=signal_type_1h,
+                )
+                if self._vwap_gate_is_block(gate_details, directional_extension, hard_block):
                     return 0.0, VetoType.VWAP_HARD_BLOCK, {
                         "state": "long_overextended_above_value",
                         "location_score": 0.0,
@@ -2925,6 +3620,7 @@ class MACDStrategyV2Engine:
                         "structural_vwap": structural_vwap_value,
                         "session_deviation": deviation,
                         "structural_deviation": deviation,
+                        **gate_details,
                     }
                 if deviation >= self.config.vwap_deviation_warning:
                     state = "long_above_value_extension"
@@ -2939,7 +3635,15 @@ class MACDStrategyV2Engine:
             elif direction == 'short':
                 directional_extension = -deviation
                 entry_edge = deviation
-                if directional_extension > self.config.vwap_deviation_hard_block:
+                hard_block, gate_details = self._resolve_vwap_extension_gate(
+                    directional_extension,
+                    atr_pct,
+                    deviation=deviation,
+                    direction=direction,
+                    signal_type_4h=signal_type_4h,
+                    signal_type_1h=signal_type_1h,
+                )
+                if self._vwap_gate_is_block(gate_details, directional_extension, hard_block):
                     return 0.0, VetoType.VWAP_HARD_BLOCK, {
                         "state": "short_overextended_below_value",
                         "location_score": 0.0,
@@ -2951,6 +3655,7 @@ class MACDStrategyV2Engine:
                         "structural_vwap": structural_vwap_value,
                         "session_deviation": deviation,
                         "structural_deviation": deviation,
+                        **gate_details,
                     }
                 if deviation <= -self.config.vwap_deviation_warning:
                     state = "short_below_value_extension"
@@ -2980,7 +3685,14 @@ class MACDStrategyV2Engine:
                     "structural_deviation": deviation,
                 }
 
-            hard_block = max(self.config.vwap_deviation_hard_block, 1e-9)
+            hard_block, gate_details = self._resolve_vwap_extension_gate(
+                directional_extension,
+                atr_pct,
+                deviation=deviation,
+                direction=direction,
+                signal_type_4h=signal_type_4h,
+                signal_type_1h=signal_type_1h,
+            )
             warning = max(self.config.vwap_deviation_warning, 1e-9)
             entry_edge_quality = 0.5 + 0.5 * self._clamp(entry_edge / warning, -1.0, 1.0)
             value_proximity_quality = 1.0 - self._clamp(abs(deviation) / hard_block, 0.0, 1.0)
@@ -2992,6 +3704,7 @@ class MACDStrategyV2Engine:
                 0.0,
                 1.0,
             )
+            location_score *= self._clamp(float(gate_details.get("vwap_gate_score_mult", 1.0)), 0.0, 1.0)
             alpha_score = round(self.config.weight_vwap * location_score, 4)
             return round(location_score, 4), VetoType.NONE, {
                 "state": state,
@@ -3007,6 +3720,7 @@ class MACDStrategyV2Engine:
                 "structural_vwap": structural_vwap_value,
                 "session_deviation": deviation,
                 "structural_deviation": deviation,
+                **gate_details,
             }
 
         structural_deviation = (price - structural_vwap_value) / structural_vwap_value
@@ -3046,7 +3760,16 @@ class MACDStrategyV2Engine:
         if direction == 'short':
             directional_extension = -deviation
             entry_edge = deviation
-            if directional_extension > self.config.vwap_deviation_hard_block:
+            hard_block, gate_details = self._resolve_vwap_extension_gate(
+                directional_extension,
+                atr_pct,
+                min_threshold=warning + 1e-6,
+                deviation=deviation,
+                direction=direction,
+                signal_type_4h=signal_type_4h,
+                signal_type_1h=signal_type_1h,
+            )
+            if self._vwap_gate_is_block(gate_details, directional_extension, hard_block):
                 return 0.0, VetoType.VWAP_HARD_BLOCK, {
                     "state": "short_overextended_below_value",
                     "location_score": 0.0,
@@ -3058,6 +3781,7 @@ class MACDStrategyV2Engine:
                     "structural_vwap": structural_vwap_value,
                     "session_deviation": deviation,
                     "structural_deviation": structural_deviation,
+                    **gate_details,
                 }
             if short_retest_reject:
                 state = "short_retest_reject"
@@ -3095,6 +3819,7 @@ class MACDStrategyV2Engine:
                 0.0,
                 1.0,
             )
+            location_score *= self._clamp(float(gate_details.get("vwap_gate_score_mult", 1.0)), 0.0, 1.0)
             alpha_score = round(self.config.weight_vwap * location_score, 4)
             return round(location_score, 4), VetoType.NONE, {
                 "state": state,
@@ -3113,12 +3838,22 @@ class MACDStrategyV2Engine:
                 "structural_vwap": structural_vwap_value,
                 "session_deviation": deviation,
                 "structural_deviation": structural_deviation,
+                **gate_details,
             }
 
         if direction == 'long':
             directional_extension = deviation
             entry_edge = -deviation
-            if directional_extension > self.config.vwap_deviation_hard_block:
+            hard_block, gate_details = self._resolve_vwap_extension_gate(
+                directional_extension,
+                atr_pct,
+                min_threshold=warning + 1e-6,
+                deviation=deviation,
+                direction=direction,
+                signal_type_4h=signal_type_4h,
+                signal_type_1h=signal_type_1h,
+            )
+            if self._vwap_gate_is_block(gate_details, directional_extension, hard_block):
                 return 0.0, VetoType.VWAP_HARD_BLOCK, {
                     "state": "long_overextended_above_value",
                     "location_score": 0.0,
@@ -3130,6 +3865,7 @@ class MACDStrategyV2Engine:
                     "structural_vwap": structural_vwap_value,
                     "session_deviation": deviation,
                     "structural_deviation": structural_deviation,
+                    **gate_details,
                 }
             if long_reclaim_confirmed:
                 state = "long_reclaim_confirmed"
@@ -3167,6 +3903,7 @@ class MACDStrategyV2Engine:
                 0.0,
                 1.0,
             )
+            location_score *= self._clamp(float(gate_details.get("vwap_gate_score_mult", 1.0)), 0.0, 1.0)
             alpha_score = round(self.config.weight_vwap * location_score, 4)
             return round(location_score, 4), VetoType.NONE, {
                 "state": state,
@@ -3185,6 +3922,7 @@ class MACDStrategyV2Engine:
                 "structural_vwap": structural_vwap_value,
                 "session_deviation": deviation,
                 "structural_deviation": structural_deviation,
+                **gate_details,
             }
 
         location_score = 0.5
@@ -3643,6 +4381,72 @@ class MACDStrategyV2Engine:
         )
         if trade_direction is None:
             neutral_original_reason = direction_reject_reason or "主方向无明确结论"
+            pc_result = self._check_partial_confirm(signal_type_4h, str(details_1h.get("signal_type") or ""))
+            if pc_result is not None:
+                pc_direction = str(pc_result.get("direction") or "")
+                pc_vwap_score = 0.0
+                pc_vwap_dev_pct = 0.0
+                pc_rsi_rhythm: Dict[str, Any] = {}
+                if pc_direction in {"long", "short"}:
+                    try:
+                        pc_vwap_score, _, pc_vwap_details = self.calculate_vwap_score(
+                            close_price,
+                            vwap,
+                            pc_direction,
+                            structural_vwap=structural_vwap,
+                            atr_pct=(atr_1h / close_price) if close_price > 0 and atr_1h > 0 else 0.0,
+                            signal_type_4h=signal_type_4h,
+                            signal_type_1h=str(details_1h.get("signal_type") or ""),
+                        )
+                        pc_vwap_dev_pct = float(pc_vwap_details.get("session_deviation", 0.0) or 0.0)
+                    except Exception:
+                        pc_vwap_score = 0.0
+                        pc_vwap_dev_pct = 0.0
+                    pc_rsi_rhythm = self.evaluate_rsi_rhythm(
+                        direction=pc_direction,
+                        rsi_15m_series=rsi_15m_series,
+                        rsi_1h_series=rsi_1h_series,
+                        rsi_4h_series=rsi_4h_series,
+                        close_15m_series=close_15m_series,
+                        close_1h_series=close_1h_series,
+                        close_4h_series=close_4h_series,
+                        macd_hist_1h_current=float(details_1h.get("hist_current", 0.0) or 0.0),
+                    )
+                pc_rsi_raw = float(pc_rsi_rhythm.get("raw_score", 0.0) or 0.0)
+                pc_shadow = self._compute_partial_confirm_shadow_score(
+                    pc_result,
+                    score_1h=self._score_1h_direction_from_signal(str(details_1h.get("signal_type") or "")),
+                    score_vwap=pc_vwap_score,
+                    score_vol=self._score_volume_quality(volume_ratio),
+                    score_15m=pc_rsi_raw,
+                    rsi_score=pc_rsi_raw,
+                    vwap_dev_pct=pc_vwap_dev_pct,
+                    atr_pct=(atr_1h / close_price) if close_price > 0 and atr_1h > 0 else 0.0,
+                )
+                self._emit_partial_confirm_shadow(signal_type_4h, str(details_1h.get("signal_type") or ""), pc_shadow)
+                debug_details.update(
+                    partial_confirm_candidate=True,
+                    partial_confirm_shadow_mode=bool(self.config.partial_confirm_shadow_mode),
+                    **pc_shadow,
+                )
+                if not bool(self.config.partial_confirm_shadow_mode) and bool(pc_shadow.get("pc_would_pass", False)):
+                    trade_direction = str(pc_shadow.get("pc_direction") or "")
+                    neutral_upgrade_applied = True
+                    neutral_upgrade_penalty_mult = float(self.config.partial_confirm_penalty_mult)
+                    neutral_upgrade_mode = "partial_confirm"
+                    neutral_upgrade_threshold_override = float(pc_shadow.get("pc_threshold", 0.0) or 0.0)
+                    neutral_upgrade_direction = trade_direction
+                    direction_reject_reason = None
+                    debug_details.update(
+                        trade_direction=trade_direction,
+                        neutral_upgrade_applied=True,
+                        neutral_upgrade_penalty_mult=neutral_upgrade_penalty_mult,
+                        neutral_upgrade_mode=neutral_upgrade_mode,
+                        neutral_upgrade_threshold_override=neutral_upgrade_threshold_override,
+                        neutral_upgrade_direction=neutral_upgrade_direction,
+                    )
+        if trade_direction is None:
+            neutral_original_reason = direction_reject_reason or neutral_original_reason or "主方向无明确结论"
             neutral_upgrade_candidate = next((d for d in (direction_4h, direction_1h) if d in {"long", "short"}), None)
             neutral_upgrade_considered = bool(self.config.enable_neutral_upgrade and neutral_upgrade_candidate)
             debug_details = self._set_stage(
@@ -3853,6 +4657,9 @@ class MACDStrategyV2Engine:
             vwap,
             trade_direction,
             structural_vwap=structural_vwap,
+            atr_pct=(atr_1h / close_price) if close_price > 0 and atr_1h > 0 else 0.0,
+            signal_type_4h=signal_type_4h,
+            signal_type_1h=str(details_1h.get("signal_type") or ""),
             price_series=close_1h_series,
             session_vwap_series=vwap_1h_series,
             structural_vwap_series=structural_vwap_1h_series,
@@ -3887,6 +4694,13 @@ class MACDStrategyV2Engine:
                 "dual_pressure_quality",
                 vwap_details.get("dual_support_quality", 0.0),
             ),
+            vwap_gate_mode=vwap_details.get("vwap_gate_mode", "fixed"),
+            vwap_gate_action=vwap_details.get("vwap_gate_action", ""),
+            vwap_probe_mode=bool(vwap_details.get("vwap_probe_mode", False)),
+            vwap_probe_max_portion=vwap_details.get("vwap_probe_max_portion", self.config.vwap_gate_probe_max_portion),
+            vwap_hard_block_threshold=vwap_details.get("vwap_hard_block_threshold", self.config.vwap_deviation_hard_block),
+            vwap_deviation_in_atr=vwap_details.get("vwap_deviation_in_atr", 0.0),
+            vwap_atr_pct=vwap_details.get("vwap_atr_pct", 0.0),
             vwap_veto=vwap_veto.value if vwap_veto else VetoType.NONE.value,
         )
         
@@ -4053,6 +4867,23 @@ class MACDStrategyV2Engine:
                 rsi_rhythm["ema_15m_refine"] = value
             elif key not in rsi_rhythm or not np.isfinite(rsi_rhythm.get(key, np.nan)):
                 rsi_rhythm[key] = value
+        rsi_rhythm = self._apply_adaptive_rsi_direction_gate(
+            rsi_rhythm=rsi_rhythm,
+            signal_type_4h=signal_type_4h,
+            signal_type_1h=str(details_1h.get("signal_type") or ""),
+            direction=trade_direction,
+        )
+        if bool(rsi_rhythm.get("rsi_soft_gate_applied", False)):
+            logger.info(
+                "[RSI_SOFT] direction=%s combo=%s+%s action=%s reason=%s mult=%.4f max_portion=%.4f",
+                trade_direction,
+                signal_type_4h,
+                str(details_1h.get("signal_type") or ""),
+                str(rsi_rhythm.get("rsi_soft_gate_action") or ""),
+                str(rsi_rhythm.get("rsi_soft_gate_reason") or ""),
+                float(rsi_rhythm.get("exposure_mult", 0.0) or 0.0),
+                float(rsi_rhythm.get("rsi_soft_max_portion", 0.0) or 0.0),
+            )
         can_enter = not bool(rsi_rhythm.get("hard_veto", False))
         entry_score_15m = max(0.0, float(rsi_rhythm.get("weighted_score", 0.0)))
         entry_type_15m = str(rsi_rhythm.get("entry_type") or "")
@@ -4073,6 +4904,10 @@ class MACDStrategyV2Engine:
             "rsi_1h_direction": str(rsi_rhythm.get("rsi_1h_direction") or "unknown"),
             "rsi_1h_direction_gate_passed": bool(rsi_rhythm.get("rsi_1h_direction_gate_passed", True)),
             "rsi_1h_direction_gate_threshold": float(rsi_rhythm.get("rsi_1h_direction_gate_threshold", 0.0)),
+            "rsi_soft_gate_applied": bool(rsi_rhythm.get("rsi_soft_gate_applied", False)),
+            "rsi_soft_gate_action": str(rsi_rhythm.get("rsi_soft_gate_action") or ""),
+            "rsi_soft_gate_reason": str(rsi_rhythm.get("rsi_soft_gate_reason") or ""),
+            "rsi_soft_max_portion": float(rsi_rhythm.get("rsi_soft_max_portion", 0.0) or 0.0),
             "rsi_15m_recent_min": float(rsi_rhythm.get("rsi_15m_recent_min", np.nan)),
             "rsi_15m_recent_max": float(rsi_rhythm.get("rsi_15m_recent_max", np.nan)),
             "rsi_1h_recent_reset_min": float(rsi_rhythm.get("rsi_1h_recent_reset_min", np.nan)),
@@ -4096,6 +4931,10 @@ class MACDStrategyV2Engine:
             rsi_1h_direction=rsi_rhythm.get("rsi_1h_direction"),
             rsi_1h_direction_gate_passed=bool(rsi_rhythm.get("rsi_1h_direction_gate_passed", True)),
             rsi_1h_direction_gate_threshold=rsi_rhythm.get("rsi_1h_direction_gate_threshold"),
+            rsi_soft_gate_applied=bool(rsi_rhythm.get("rsi_soft_gate_applied", False)),
+            rsi_soft_gate_action=str(rsi_rhythm.get("rsi_soft_gate_action") or ""),
+            rsi_soft_gate_reason=str(rsi_rhythm.get("rsi_soft_gate_reason") or ""),
+            rsi_soft_max_portion=float(rsi_rhythm.get("rsi_soft_max_portion", 0.0) or 0.0),
             bb_middle_15m=bb_middle_15m,
             bb_upper_15m=bb_upper_15m,
             bb_lower_15m=bb_lower_15m,
@@ -4762,6 +5601,47 @@ class MACDStrategyV2Engine:
             vol_vwap_warn_min_score_vol=float(self.config.vol_vwap_warn_min_score_vol),
             vol_vwap_warn_min_vwap_score=float(self.config.vol_vwap_warn_min_vwap_score),
         )
+        combo_result = self._apply_signal_combo_hard_block(
+            direction=trade_direction,
+            signal_1h=signal_type_1h,
+            symbol=str(debug_details.get("symbol") or ""),
+            score=score,
+        )
+        combo_action = str(combo_result.get("action") or "PASS").upper()
+        combo_max_portion = float(combo_result.get("max_portion", 0.0) or 0.0)
+        rsi_soft_max_portion = float(rsi_rhythm.get("rsi_soft_max_portion", 0.0) or 0.0)
+        if rsi_soft_max_portion > 0:
+            combo_max_portion = (
+                min(combo_max_portion, rsi_soft_max_portion)
+                if combo_max_portion > 0
+                else rsi_soft_max_portion
+            )
+        debug_details = self._set_stage(
+            debug_details,
+            "combo_hard_block",
+            signal_combo_action=combo_action,
+            signal_combo_max_portion=combo_max_portion,
+        )
+        if combo_action in {"BLOCK", "SHADOW"}:
+            reason = "combo_hard_block" if combo_action == "BLOCK" else "combo_shadow"
+            return self._neutral_signal(
+                reason=reason,
+                score=score,
+                signal_type_1h=signal_type_1h,
+                entry_type_15m=entry_type_15m,
+                entry_score_15m=entry_score_15m,
+                vwap_score=vwap_score,
+                vwap_deviation=vwap_deviation,
+                vwap_state=vwap_state,
+                vwap_location_score=vwap_location_score,
+                ema_multiplier=ema_multiplier,
+                ema_structure_status=ema_status,
+                enhancement_score=enhancement_score,
+                is_4h_enhanced=is_4h_enhanced,
+                is_trial_entry=is_trial_entry,
+                entry_scale=entry_scale,
+                details=self._build_debug_details(**debug_details),
+            )
         trial_short_promotion_eval = self._evaluate_trial_short_below_structure_continuation_promotion(
             primary_mode=primary_mode,
             trade_direction=trade_direction,
@@ -4825,6 +5705,75 @@ class MACDStrategyV2Engine:
                     **debug_details,
                 ),
             )
+
+        ct_long_guard = self._check_counter_trend_long_guard(
+            direction=trade_direction,
+            vwap_dev_pct=vwap_deviation,
+            adx=adx_1h,
+            regime=market_regime,
+            score_15m=score_15m,
+            raw_15m=score_rsi_rhythm_raw,
+            signal_4h=signal_type_4h,
+            signal_1h=signal_type_1h,
+            current_portion=9999.0,
+        )
+        ct_action = str(ct_long_guard.get("action") or "PASS").upper()
+        debug_details = self._set_stage(
+            debug_details,
+            "counter_trend_long_guard",
+            counter_trend_long_guard_enabled=bool(self.config.counter_trend_long_guard_enabled),
+            counter_trend_long_action=ct_action,
+            counter_trend_long_reason=str(ct_long_guard.get("reason") or ""),
+            counter_trend_long_max_portion=float(ct_long_guard.get("max_portion", 0.0) or 0.0),
+        )
+        if ct_action == "BLOCK":
+            logger.info(
+                "[CT_GUARD] block %s %s+%s dev=%.4f adx=%.2f reason=%s",
+                trade_direction,
+                signal_type_4h,
+                signal_type_1h,
+                float(vwap_deviation),
+                float(adx_1h),
+                str(ct_long_guard.get("reason") or ""),
+            )
+            return self._neutral_signal(
+                reason=str(ct_long_guard.get("reason") or "counter_trend_long_block"),
+                score=score,
+                signal_type_1h=signal_type_1h,
+                entry_type_15m=entry_type_15m,
+                entry_score_15m=entry_score_15m,
+                vwap_score=vwap_score,
+                vwap_deviation=vwap_deviation,
+                vwap_state=vwap_state,
+                vwap_location_score=vwap_location_score,
+                ema_multiplier=ema_multiplier,
+                ema_structure_status=ema_status,
+                enhancement_score=enhancement_score,
+                is_4h_enhanced=is_4h_enhanced,
+                is_trial_entry=is_trial_entry,
+                entry_scale=entry_scale,
+                details=self._build_debug_details(**debug_details),
+            )
+        if ct_action == "PROBE":
+            combo_max_portion = (
+                min(combo_max_portion, float(ct_long_guard.get("max_portion", 0.0) or 0.0))
+                if combo_max_portion > 0
+                else float(ct_long_guard.get("max_portion", 0.0) or 0.0)
+            )
+            logger.info(
+                "[CT_GUARD] probe %s %s+%s dev=%.4f adx=%.2f cap=%.4f reason=%s",
+                trade_direction,
+                signal_type_4h,
+                signal_type_1h,
+                float(vwap_deviation),
+                float(adx_1h),
+                combo_max_portion,
+                str(ct_long_guard.get("reason") or ""),
+            )
+        elif ct_action == "PASS" and float(ct_long_guard.get("max_portion", 0.0) or 0.0) > 0:
+            ct_cap = float(ct_long_guard.get("max_portion", 0.0) or 0.0)
+            if ct_cap < 9999.0:
+                combo_max_portion = min(combo_max_portion, ct_cap) if combo_max_portion > 0 else ct_cap
         
         if (
             self.config.enable_score_4h_hard_gate
@@ -5216,6 +6165,12 @@ class MACDStrategyV2Engine:
             'final_block_reason': '',
             'final_leverage_after_rsi': 1.0,
             'final_portion_after_rsi': 1.0,
+            'signal_combo_action': combo_action,
+            'signal_combo_max_portion': combo_max_portion,
+            'rsi_soft_gate_applied': bool(rsi_rhythm.get("rsi_soft_gate_applied", False)),
+            'rsi_soft_gate_action': str(rsi_rhythm.get("rsi_soft_gate_action") or ""),
+            'rsi_soft_gate_reason': str(rsi_rhythm.get("rsi_soft_gate_reason") or ""),
+            'rsi_soft_max_portion': rsi_soft_max_portion,
             'total_score': final_score,
             'stop_price': stop_price,
             'stop_loss_pct': stop_pct,
@@ -5347,6 +6302,8 @@ class MACDStrategyV2Engine:
         rsi_conflict_portion_mult: float = 0.70,
         priority_signal: bool = False,
         rsi_probe_mode: bool = False,
+        vwap_probe_mode: bool = False,
+        signal_combo_max_portion: float = 0.0,
     ) -> float:
         portion_mult = self.calculate_portion_multiplier(score)
         if portion_mult <= 0:
@@ -5394,6 +6351,22 @@ class MACDStrategyV2Engine:
             adx_1h=adx_1h,
             market_regime=market_regime,
         )
+        signal_1h_norm = str(signal_type_1h or "").strip().lower()
+        direction_norm = str(trade_direction or "").strip().lower()
+        direction_danger = (
+            (direction_norm == "long" and signal_1h_norm in {"flip_bearish", "green_bar_growing"})
+            or (direction_norm == "short" and signal_1h_norm in {"flip_bullish", "red_bar_growing"})
+        )
+        floor_exempt = bool(
+            is_trial_entry
+            or rsi_probe_mode
+            or vwap_probe_mode
+            or signal_1h_norm in {"red_bar_shrinking", "green_bar_shrinking"}
+            or direction_danger
+        )
+        floor = 0.0 if floor_exempt else self.resolve_total_compression_floor(score, base_default_portion)
+        if floor > 0:
+            portion = max(portion, min(max_symbol_position_portion, floor))
         signal_cap = self.resolve_signal_type_position_cap(
             signal_type_4h=signal_type_4h,
             signal_type_1h=signal_type_1h,
@@ -5422,10 +6395,12 @@ class MACDStrategyV2Engine:
             portion *= self._clamp(float(self.config.red_bar_growing_probe_position_penalty), 0.0, 1.0)
         if green_bar_probe_mode:
             green_penalty = self._clamp(float(self.config.green_bar_growing_probe_position_penalty), 0.0, 1.0)
-            if green_penalty > 0.10:
-                green_penalty *= self._clamp(float(self.config.rsi_probe_portion_scale), 0.0, 1.0)
             portion *= green_penalty
         if rsi_conflict:
             portion *= self._clamp(float(rsi_conflict_portion_mult), 0.0, 1.0)
         portion *= self.resolve_symbol_risk_session_scale(symbol, session_scale)
+        if vwap_probe_mode:
+            portion = min(portion, self._clamp(float(self.config.vwap_gate_probe_max_portion), 0.0, 1.0))
+        if signal_combo_max_portion and signal_combo_max_portion > 0:
+            portion = min(portion, self._clamp(float(signal_combo_max_portion), 0.0, 1.0))
         return portion

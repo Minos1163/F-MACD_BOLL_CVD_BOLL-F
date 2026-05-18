@@ -1,0 +1,497 @@
+from __future__ import annotations
+
+import sys
+import json
+import logging
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from src.fund_flow.macd_strategy_v2 import MACDStrategyV2Config, MACDStrategyV2Engine, VetoType
+from src.fund_flow.decision_engine import FundFlowDecisionEngine
+
+
+def test_total_compression_floor_preserves_high_score_position_size() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            enable_dynamic_position_sizing=True,
+            dynamic_vwap_score_position_tiers=[
+                {"max": 0.25, "position_mult": 0.60},
+            ],
+            dynamic_volume_score_position_tiers=[
+                {"max": 0.033, "position_mult": 0.75},
+            ],
+            dynamic_adx_trend_min=40.0,
+            dynamic_adx_trend_position_mult=0.70,
+            total_compression_floor_enabled=True,
+            total_compression_floor_tiers=[
+                {"min_score": 0.85, "min_mult_of_base": 0.45},
+                {"min_score": 0.75, "min_mult_of_base": 0.35},
+                {"min_score": 0.65, "min_mult_of_base": 0.25},
+                {"min_score": 0.00, "min_mult_of_base": 0.15},
+            ],
+        )
+    )
+
+    portion = engine.calculate_position_portion(
+        score=0.85,
+        base_default_portion=0.35,
+        base_max_symbol_position_portion=0.50,
+        signal_type_1h="red_bar_growing",
+        signal_type_4h="green_bar_shrinking",
+        vwap_score=0.25,
+        volume_score=0.033,
+        adx_1h=45.0,
+        market_regime="TREND",
+    )
+
+    assert portion == pytest.approx(0.1575)
+
+
+def test_total_compression_floor_does_not_override_signal_type_cap() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            enable_dynamic_position_sizing=True,
+            dynamic_vwap_score_position_tiers=[
+                {"max": 0.25, "position_mult": 0.60},
+            ],
+            dynamic_volume_score_position_tiers=[
+                {"max": 0.033, "position_mult": 0.75},
+            ],
+            dynamic_adx_trend_min=40.0,
+            dynamic_adx_trend_position_mult=0.70,
+            dynamic_signal_type_position_caps={
+                "green_bar_shrinking": {
+                    "max_target_portion": 0.10,
+                    "apply_to": ["signal_4h"],
+                },
+            },
+            total_compression_floor_enabled=True,
+            total_compression_floor_tiers=[
+                {"min_score": 0.85, "min_mult_of_base": 0.45},
+            ],
+        )
+    )
+
+    portion = engine.calculate_position_portion(
+        score=0.85,
+        base_default_portion=0.35,
+        base_max_symbol_position_portion=0.50,
+        signal_type_1h="red_bar_growing",
+        signal_type_4h="green_bar_shrinking",
+        vwap_score=0.25,
+        volume_score=0.033,
+        adx_1h=45.0,
+        market_regime="TREND",
+    )
+
+    assert portion == pytest.approx(0.10)
+
+
+def test_total_compression_floor_does_not_raise_probe_or_shrink_paths() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            enable_dynamic_position_sizing=True,
+            dynamic_vwap_score_position_tiers=[
+                {"max": 0.25, "position_mult": 0.60},
+            ],
+            dynamic_volume_score_position_tiers=[
+                {"max": 0.033, "position_mult": 0.75},
+            ],
+            dynamic_adx_trend_min=40.0,
+            dynamic_adx_trend_position_mult=0.70,
+            total_compression_floor_enabled=True,
+            total_compression_floor_tiers=[
+                {"min_score": 0.85, "min_mult_of_base": 0.45},
+            ],
+        )
+    )
+
+    portion = engine.calculate_position_portion(
+        score=0.85,
+        base_default_portion=0.35,
+        base_max_symbol_position_portion=0.50,
+        trade_direction="long",
+        signal_type_1h="red_bar_shrinking",
+        vwap_score=0.25,
+        volume_score=0.033,
+        adx_1h=45.0,
+        market_regime="TREND",
+        rsi_probe_mode=True,
+    )
+
+    assert portion < 0.1575
+    assert portion == pytest.approx(0.0275625, rel=1e-3)
+
+
+def test_signal_combo_hard_block_blocks_long_flip_bearish() -> None:
+    engine = MACDStrategyV2Engine(MACDStrategyV2Config())
+
+    result = engine._apply_signal_combo_hard_block(
+        direction="long",
+        signal_1h="flip_bearish",
+        symbol="RENDERUSDT",
+        score=0.96,
+    )
+
+    assert result["action"] == "BLOCK"
+    assert result["max_portion"] == pytest.approx(0.0)
+
+
+def test_signal_combo_hard_block_forces_probe_for_long_red_bar_shrinking() -> None:
+    engine = MACDStrategyV2Engine(MACDStrategyV2Config())
+
+    result = engine._apply_signal_combo_hard_block(
+        direction="long",
+        signal_1h="red_bar_shrinking",
+        symbol="PUMPUSDT",
+        score=0.85,
+    )
+
+    assert result["action"] == "PROBE"
+    assert result["max_portion"] == pytest.approx(0.042)
+
+
+def test_live_config_disables_total_compression_floor() -> None:
+    cfg = json.loads(Path("config/trading_config_fund_flow.json").read_text(encoding="utf-8"))
+
+    engine = FundFlowDecisionEngine(cfg)
+
+    strategy_cfg = engine.macd_v2_config
+    assert strategy_cfg.total_compression_floor_enabled is False
+    assert strategy_cfg.total_compression_floor_tiers[0]["min_score"] == pytest.approx(0.85)
+    assert strategy_cfg.total_compression_floor_tiers[0]["min_mult_of_base"] == pytest.approx(0.45)
+
+
+def test_vwap_atr_gate_allows_extension_inside_atr_block_threshold() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            vwap_deviation_gate_mode="atr_normalized",
+            vwap_gate_block_atr_multiplier=4.0,
+            vwap_gate_fallback_hard_block_pct=0.06,
+        )
+    )
+
+    score, veto, details = engine.calculate_vwap_score(
+        price=104.0,
+        vwap=100.0,
+        direction="long",
+        atr_pct=0.02,
+    )
+
+    assert veto is VetoType.NONE
+    assert score > 0
+    assert details["vwap_gate_mode"] == "atr_normalized"
+    assert details["vwap_deviation_in_atr"] == pytest.approx(2.0)
+    assert details["vwap_hard_block_threshold"] == pytest.approx(0.08)
+
+
+def test_vwap_atr_gate_blocks_extension_beyond_atr_block_threshold() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            vwap_deviation_gate_mode="atr_normalized",
+            vwap_gate_block_atr_multiplier=4.0,
+            vwap_gate_fallback_hard_block_pct=0.06,
+        )
+    )
+
+    score, veto, details = engine.calculate_vwap_score(
+        price=104.0,
+        vwap=100.0,
+        direction="long",
+        atr_pct=0.005,
+    )
+
+    assert score == pytest.approx(0.0)
+    assert veto is VetoType.VWAP_HARD_BLOCK
+    assert details["vwap_gate_mode"] == "atr_normalized"
+    assert details["vwap_deviation_in_atr"] == pytest.approx(8.0)
+    assert details["vwap_hard_block_threshold"] == pytest.approx(0.02)
+
+
+def test_directional_vwap_gate_allows_same_direction_trend_aligned_short_extension() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            vwap_deviation_gate_mode="directional_ablation",
+            vwap_same_dir_trend_aligned_pass_dev_pct=0.05,
+            vwap_same_dir_trend_aligned_penalty_dev_pct=0.10,
+            vwap_same_dir_trend_aligned_probe_dev_pct=0.15,
+        )
+    )
+
+    score, veto, details = engine.calculate_vwap_score(
+        price=92.0,
+        vwap=100.0,
+        direction="short",
+        atr_pct=0.01,
+        signal_type_4h="green_bar_growing",
+        signal_type_1h="green_bar_growing",
+    )
+
+    assert veto is VetoType.NONE
+    assert score > 0
+    assert score == pytest.approx(0.045)
+    assert details["vwap_gate_mode"] == "directional_ablation"
+    assert details["vwap_gate_action"] == "same_dir_trend_aligned_penalty"
+    assert details["vwap_gate_score_mult"] == pytest.approx(0.90)
+
+
+def test_directional_vwap_gate_blocks_same_direction_counter_trend_short_extension() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            vwap_deviation_gate_mode="directional_ablation",
+            vwap_same_dir_counter_pass_atr_mult=2.0,
+            vwap_same_dir_counter_penalty_atr_mult=3.5,
+            vwap_same_dir_counter_probe_atr_mult=5.0,
+        )
+    )
+
+    score, veto, details = engine.calculate_vwap_score(
+        price=108.0,
+        vwap=100.0,
+        direction="short",
+        atr_pct=0.01,
+        signal_type_4h="green_bar_growing",
+        signal_type_1h="green_bar_growing",
+    )
+
+    assert score == pytest.approx(0.0)
+    assert veto is VetoType.VWAP_HARD_BLOCK
+    assert details["vwap_gate_action"] == "same_dir_counter_block"
+
+
+def test_vwap_atr_gate_emits_diagnostic_log(caplog: pytest.LogCaptureFixture) -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            vwap_deviation_gate_mode="atr_normalized",
+            vwap_gate_block_atr_multiplier=4.0,
+        )
+    )
+
+    with caplog.at_level(logging.INFO, logger="src.fund_flow.macd_strategy_v2"):
+        engine.calculate_vwap_score(
+            price=92.0,
+            vwap=100.0,
+            direction="short",
+            atr_pct=0.01,
+        )
+
+    assert "[VWAP_GATE]" in caplog.text
+    assert "vwap_gate_action=vwap_hard_block" in caplog.text
+    assert "vwap_deviation_in_atr=8.0000" in caplog.text
+
+
+def test_vwap_atr_probe_band_is_not_hard_block_and_caps_position_size() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            vwap_deviation_gate_mode="atr_normalized",
+            vwap_gate_penalty_atr_multiplier=2.5,
+            vwap_gate_block_atr_multiplier=4.0,
+            vwap_gate_probe_max_portion=0.06,
+        )
+    )
+
+    score, veto, details = engine.calculate_vwap_score(
+        price=103.0,
+        vwap=100.0,
+        direction="long",
+        atr_pct=0.01,
+    )
+    portion = engine.calculate_position_portion(
+        score=0.85,
+        base_default_portion=0.35,
+        base_max_symbol_position_portion=0.50,
+        vwap_score=score,
+        vwap_probe_mode=bool(details.get("vwap_probe_mode")),
+    )
+
+    assert veto is VetoType.NONE
+    assert details["vwap_gate_action"] == "vwap_probe"
+    assert details["vwap_probe_mode"] is True
+    assert portion == pytest.approx(0.06)
+
+
+def test_counter_trend_long_guard_blocks_extreme_below_vwap_weak_trend_long() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            counter_trend_long_guard_enabled=True,
+            counter_trend_long_extreme_range_action="BLOCK",
+        )
+    )
+
+    result = engine._check_counter_trend_long_guard(
+        direction="long",
+        vwap_dev_pct=-0.0457,
+        adx=17.38,
+        regime="TREND",
+        score_15m=0.0135,
+        raw_15m=0.27,
+        signal_4h="red_bar_growing",
+        signal_1h="red_bar_growing",
+        current_portion=0.26775,
+    )
+
+    assert result["action"] == "BLOCK"
+    assert result["max_portion"] == pytest.approx(0.0)
+
+
+def test_counter_trend_long_guard_caps_moderate_below_vwap_range_long_to_probe() -> None:
+    engine = MACDStrategyV2Engine(MACDStrategyV2Config(counter_trend_long_guard_enabled=True))
+
+    result = engine._check_counter_trend_long_guard(
+        direction="long",
+        vwap_dev_pct=-0.0148,
+        adx=12.76,
+        regime="RANGE",
+        score_15m=0.0135,
+        raw_15m=0.27,
+        signal_4h="flip_bullish",
+        signal_1h="red_bar_growing",
+        current_portion=0.26775,
+    )
+
+    assert result["action"] == "PROBE"
+    assert result["max_portion"] == pytest.approx(0.06)
+
+
+def test_green_bar_probe_penalty_uses_configured_multiplier_without_extra_probe_scale() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            enable_green_bar_growing_probe_overlay=True,
+            green_bar_growing_probe_position_penalty=0.25,
+            rsi_probe_portion_scale=0.25,
+        )
+    )
+
+    portion = engine.calculate_position_portion(
+        score=0.75,
+        base_default_portion=0.35,
+        base_max_symbol_position_portion=0.50,
+        trade_direction="short",
+        signal_type_1h="green_bar_growing",
+        signal_type_4h="green_bar_growing",
+        vwap_score=0.20,
+        volume_score=0.10,
+        adx_1h=25.0,
+        market_regime="TREND",
+    )
+
+    assert portion == pytest.approx(0.07)
+
+
+def test_live_fixed_vwap_gate_uses_configured_fallback_hard_block_pct() -> None:
+    cfg = json.loads(Path("config/trading_config_fund_flow.json").read_text(encoding="utf-8"))
+
+    engine = FundFlowDecisionEngine(cfg)
+    strategy_cfg = engine.macd_v2_config
+    macd_engine = MACDStrategyV2Engine(strategy_cfg)
+
+    assert strategy_cfg.vwap_deviation_gate_mode == "directional_ablation"
+    assert strategy_cfg.vwap_same_dir_trend_aligned_pass_dev_pct == pytest.approx(0.05)
+
+    score, veto, details = macd_engine.calculate_vwap_score(
+        price=92.0,
+        vwap=100.0,
+        direction="short",
+        atr_pct=0.01,
+        signal_type_4h="green_bar_growing",
+        signal_type_1h="green_bar_growing",
+    )
+
+    assert veto is VetoType.NONE
+    assert score > 0
+    assert details["vwap_gate_action"] == "same_dir_trend_aligned_penalty"
+
+
+def test_partial_confirm_shadow_scores_shrink_confirm_candidate() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            partial_confirm_enabled=True,
+            partial_confirm_shadow_mode=True,
+            partial_confirm_penalty_mult=0.85,
+        )
+    )
+
+    pc = engine._check_partial_confirm("green_bar_shrinking", "red_bar_growing")
+    shadow = engine._compute_partial_confirm_shadow_score(
+        pc,
+        score_1h=0.1275,
+        score_vwap=0.85,
+        score_vol=0.10,
+        score_15m=0.0,
+        rsi_score=1.0,
+        vwap_dev_pct=-0.01,
+        atr_pct=0.01,
+    )
+
+    assert pc is not None
+    assert shadow["pc_direction"] == "long"
+    assert shadow["pc_confidence"] == "MEDIUM"
+    assert shadow["pc_shadow_only"] is False
+    assert shadow["pc_vwap_safe"] is True
+    assert shadow["pc_vwap_aligned"] is True
+    assert shadow["pc_threshold"] == pytest.approx(0.58)
+    assert shadow["pc_max_portion"] == pytest.approx(0.06)
+
+
+def test_partial_confirm_low_confidence_is_shadow_only() -> None:
+    engine = MACDStrategyV2Engine(MACDStrategyV2Config(partial_confirm_enabled=True))
+
+    pc = engine._check_partial_confirm("green_bar_shrinking", "red_bar_shrinking")
+    shadow = engine._compute_partial_confirm_shadow_score(
+        pc,
+        score_1h=0.0,
+        score_vwap=0.85,
+        score_vol=0.0,
+        score_15m=0.0,
+        rsi_score=1.0,
+        vwap_dev_pct=-0.01,
+        atr_pct=0.01,
+    )
+
+    assert pc["confidence"] == "LOW"
+    assert shadow["pc_shadow_only"] is True
+    assert shadow["pc_would_pass"] is False
+
+
+def test_partial_confirm_shadow_score_uses_rsi_rhythm_sample() -> None:
+    engine = MACDStrategyV2Engine(MACDStrategyV2Config(partial_confirm_enabled=True))
+    pc = engine._check_partial_confirm("green_bar_shrinking", "red_bar_growing")
+
+    rsi = engine.evaluate_rsi_rhythm(
+        direction="long",
+        rsi_15m_series=np.asarray([44.0, 47.0, 51.0, 55.0]),
+        rsi_1h_series=np.asarray([46.0, 48.0, 51.0, 55.0]),
+        rsi_4h_series=np.asarray([50.0, 51.0, 53.0, 55.0]),
+        close_15m_series=np.asarray([95.0, 97.0, 100.0, 104.0]),
+        close_1h_series=np.asarray([95.0, 97.0, 100.0, 104.0]),
+        close_4h_series=np.asarray([95.0, 97.0, 100.0, 104.0]),
+        macd_hist_1h_current=1.0,
+    )
+    shadow = engine._compute_partial_confirm_shadow_score(
+        pc,
+        score_1h=engine._score_1h_direction_from_signal("red_bar_growing"),
+        score_vwap=0.85,
+        score_vol=1.0,
+        score_15m=float(rsi.get("raw_score", 0.0)),
+        rsi_score=float(rsi.get("raw_score", 0.0)),
+        vwap_dev_pct=-0.01,
+        atr_pct=0.01,
+    )
+
+    assert rsi["raw_score"] > 0.0
+    assert shadow["pc_scored"] > 0.40
+
+
+def test_live_config_enables_partial_confirm_shadow_mode() -> None:
+    cfg = json.loads(Path("config/trading_config_fund_flow.json").read_text(encoding="utf-8"))
+
+    engine = FundFlowDecisionEngine(cfg)
+
+    strategy_cfg = engine.macd_v2_config
+    assert strategy_cfg.partial_confirm_enabled is True
+    assert strategy_cfg.partial_confirm_shadow_mode is True
+    assert strategy_cfg.partial_confirm_thresholds["MEDIUM"] == pytest.approx(0.58)

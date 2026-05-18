@@ -119,6 +119,10 @@
   "strategy": {
     "mode": "FUND_FLOW"
   },
+  "logging": {
+    "runtime_file_enabled": true,
+    "api_cycle_stats_enabled": false
+  },
   "dual_timeframe": {
     "enabled": true,
     "strategy_name": "EMA_VWAP_MACD_1H_15M_WITH_4H_RISK",
@@ -203,10 +207,27 @@
   },
   "fund_flow": {
     "default_target_portion": 0.35,
+    "log_compaction": {
+      "attribution_mode": "minimal",
+      "attribution_raw_keep_days": 1,
+      "market_storage_enabled": false,
+      "db_audit_retention_days": 1
+    },
     "add_position_portion": 0.6,
     "max_symbol_position_portion": 0.35,
     "max_active_symbols": 5,
-    "min_open_portion": 0.06,
+    "min_open_notional": {
+      "default_usdt": 2.0,
+      "btc_usdt": 5.0,
+      "major_usdt": 2.0,
+      "major_symbols": [
+        "BTCUSDT",
+        "ETHUSDT",
+        "BNBUSDT",
+        "SOLUSDT",
+        "XRPUSDT"
+      ]
+    },
     "max_open_portion": 1.0,
     "liquidity_norm_factor_weight": 0.12,
     "liquidity_norm_alpha": 0.2,
@@ -216,7 +237,7 @@
       "zscore_lookback_bars": 120,
       "phantom_spread_k": 100
     },
-    "dca_martingale_enabled": true,
+    "dca_martingale_enabled": false,
     "dca_max_additions": 0,
     "dca_drawdown_thresholds": [
       0.01
@@ -297,7 +318,73 @@
       "shadow_mode": true,
       "min_score_threshold": 0.8,
       "probe_portion": 0.06,
+      "probe_min_open_portion": 0.042,
       "probe_leverage_cap": 2
+    },
+    "position_exit_signal_guard": {
+      "enabled": true,
+      "bearish_1h_signals": [
+        "flip_bearish",
+        "green_bar_growing",
+        "green_bar_shrinking",
+        "red_bar_shrinking"
+      ],
+      "bullish_1h_signals": [
+        "flip_bullish",
+        "red_bar_growing",
+        "red_bar_shrinking",
+        "green_bar_shrinking"
+      ],
+      "confirm_bars_required": 2,
+      "mae_trigger_pct": -0.008,
+      "block_dca_on_reverse": true,
+      "reduce_pct": 0.5
+    },
+    "exit_cooldown": {
+      "enabled": true,
+      "cooldown_seconds": 1800,
+      "same_side_only": true
+    },
+    "signal_combo_hard_block": {
+      "enabled": true,
+      "rules": [
+        {
+          "direction": "long",
+          "signal_1h": "flip_bearish",
+          "action": "BLOCK"
+        },
+        {
+          "direction": "long",
+          "signal_1h": "green_bar_growing",
+          "action": "BLOCK"
+        },
+        {
+          "direction": "long",
+          "signal_1h": "red_bar_shrinking",
+          "action": "PROBE",
+          "max_portion": 0.042
+        },
+        {
+          "direction": "long",
+          "signal_1h": "green_bar_shrinking",
+          "action": "SHADOW"
+        },
+        {
+          "direction": "short",
+          "signal_1h": "flip_bullish",
+          "action": "BLOCK"
+        },
+        {
+          "direction": "short",
+          "signal_1h": "red_bar_growing",
+          "action": "BLOCK"
+        },
+        {
+          "direction": "short",
+          "signal_1h": "red_bar_shrinking",
+          "action": "SHADOW"
+        }
+      ]
     },
     "min_leverage": 3,
     "default_leverage": 4,
@@ -401,7 +488,31 @@
         "vwap_retest_tolerance": 0.003,
         "vwap_deviation_optimal": 0.005,
         "vwap_deviation_warning": 0.015,
-        "vwap_deviation_hard_block": 0.03
+        "vwap_deviation_gate": {
+          "mode": "directional_ablation",
+          "same_dir_trend_aligned": {
+            "pass_dev_pct": 0.05,
+            "penalty_dev_pct": 0.1,
+            "probe_dev_pct": 0.15,
+            "probe_max_portion": 0.06,
+            "penalty_mult": 0.9
+          },
+          "same_dir_counter_trend": {
+            "pass_atr_mult": 2.0,
+            "penalty_atr_mult": 3.5,
+            "probe_atr_mult": 5.0,
+            "probe_max_portion": 0.06,
+            "penalty_mult": 0.85,
+            "fallback_hard_block_pct": 0.03
+          },
+          "ambiguous": {
+            "pass_atr_mult": 1.5,
+            "penalty_atr_mult": 2.5,
+            "block_atr_mult": 4.0,
+            "probe_max_portion": 0.06,
+            "penalty_mult": 0.88
+          }
+        }
       },
       "scoring_weights": {
         "weight_1h_direction": 0.15,
@@ -424,6 +535,68 @@
         "flip_bearish": 0.66,
         "flip_bullish": 0.64
       },
+      "partial_confirm": {
+        "shadow_mode": true,
+        "enabled": true,
+        "thresholds": {
+          "HIGH": 0.6,
+          "MEDIUM": 0.58
+        },
+        "max_portions": {
+          "HIGH": 0.1,
+          "MEDIUM": 0.06,
+          "LOW": 0.042
+        },
+        "score_4h_partial": {
+          "HIGH": 0.15,
+          "MEDIUM": 0.1,
+          "LOW": 0.05
+        },
+        "penalty_mult": 0.85,
+        "vwap_safety": {
+          "max_dev_atr_ratio": 3.0,
+          "long_min_dev_pct": -0.02,
+          "short_max_dev_pct": 0.02
+        },
+        "live_signal_map": {
+          "long": [
+            [
+              "green_bar_shrinking",
+              "red_bar_growing",
+              "MEDIUM"
+            ],
+            [
+              "green_bar_shrinking",
+              "flip_bullish",
+              "HIGH"
+            ]
+          ],
+          "short": [
+            [
+              "red_bar_shrinking",
+              "green_bar_growing",
+              "MEDIUM"
+            ],
+            [
+              "red_bar_shrinking",
+              "flip_bearish",
+              "HIGH"
+            ]
+          ],
+          "shadow_only": [
+            [
+              "green_bar_shrinking",
+              "red_bar_shrinking",
+              "LOW"
+            ],
+            [
+              "red_bar_shrinking",
+              "green_bar_shrinking",
+              "LOW"
+            ]
+          ]
+        }
+      },
       "entry_filters": {
         "primary_direction_timeframe": "4h",
         "require_1h_confirmation_when_4h_primary": true,
@@ -437,6 +610,7 @@
         "priority_exec_vip_min_score": 0.92,
         "priority_exec_vip_expire_seconds": 45,
         "priority_exec_vip_allow_retry": true,
+        "entry_market_fallback_min_score": 0.72,
         "enable_vwap_flip_exemption": true,
         "enable_neutral_upgrade": true,
         "neutral_upgrade_min_rsi_score": 0.35,
@@ -551,8 +725,27 @@
           "block_score": -0.3,
           "probe_exposure_mult": 0.2,
           "probe_portion_scale": 0.25,
-          "probe_forced_leverage": 2
+          "probe_forced_leverage": 2,
+          "adaptive_direction_gate": {
+            "enabled": true,
+            "soft_rsi_against_mult": 0.88,
+            "soft_rsi_against_max_portion": 0.06,
+            "soft_rsi_flat_mult": 0.93
+          }
         }
+      },
+      "counter_trend_long_guard": {
+        "enabled": true,
+        "vwap_dev_extreme_pct": 0.03,
+        "vwap_dev_moderate_pct": 0.01,
+        "adx_weak_threshold": 18.0,
+        "adx_extreme_threshold": 20.0,
+        "min_15m_raw_for_confirm": 0.3,
+        "extreme_range_action": "BLOCK",
+        "extreme_trend_max": 0.06,
+        "moderate_no_15m_max": 0.06,
+        "moderate_ok_max": 0.12,
+        "minor_max": 0.2
       },
       "position_management": {
         "priority_allocation_overdraft_pct": 0.08,
@@ -560,8 +753,10 @@
         "red_bar_growing_probe_position_penalty": 0.5,
         "red_bar_growing_probe_max_leverage": 2,
         "enable_green_bar_growing_probe_overlay": true,
-        "green_bar_growing_probe_position_penalty": 0.1,
+        "green_bar_growing_probe_position_penalty": 0.25,
         "green_bar_growing_probe_max_leverage": 2,
+        "probe_penalty_floor_notional_usdt": 2.0,
+        "short_floor_max_lift_ratio": 5.0,
         "vol_vwap_warn_position_scale": 0.5
       },
       "exit_management": {
@@ -618,6 +813,27 @@
               "signal_4h"
             ]
           }
+        },
+        "total_compression_floor": {
+          "enabled": false,
+          "floors": [
+            {
+              "min_score": 0.85,
+              "min_mult_of_base": 0.45
+            },
+            {
+              "min_score": 0.75,
+              "min_mult_of_base": 0.35
+            },
+            {
+              "min_score": 0.65,
+              "min_mult_of_base": 0.25
+            },
+            {
+              "min_score": 0.0,
+              "min_mult_of_base": 0.15
+            }
+          ]
         }
       },
       "stop_loss_config": {
@@ -1193,7 +1409,7 @@
     },
     "execution_degradation": {
       "open_ioc_retry_times": 4,
-      "open_ioc_retry_step_bps": 15,
+      "open_ioc_retry_step_bps": 20,
       "open_ioc_dynamic_step_enabled": true,
       "open_ioc_max_total_slippage_bps": 60,
       "open_gtc_fallback_enabled": true,
@@ -1367,8 +1583,10 @@
                 },
                 "position_management": {
                   "enable_green_bar_growing_probe_overlay": true,
-                  "green_bar_growing_probe_position_penalty": 0.1,
+                  "green_bar_growing_probe_position_penalty": 0.25,
                   "green_bar_growing_probe_max_leverage": 2,
+                  "probe_penalty_floor_notional_usdt": 2.0,
+                  "short_floor_max_lift_ratio": 5.0,
                   "vol_vwap_warn_position_scale": 0.5
                 },
                 "short_quality_filter": {

@@ -21,16 +21,41 @@ class FundFlowRiskEngine:
         symbol_whitelist: Optional[Iterable[str]] = None,
     ) -> None:
         self.config = config or {}
-        fund_flow_cfg = self.config.get("fund_flow", {}) or {}
+        fund_flow_cfg = self.config.get("fund_flow", self.config) or {}
         leverage_cfg = ConfigLoader.get_leverage_settings(self.config, scope="fund_flow")
 
         self.min_leverage = int(leverage_cfg["min_leverage"])
         self.max_leverage = int(leverage_cfg["max_leverage"])
         self.default_leverage = int(leverage_cfg["default_leverage"])
-        self.min_open_portion = float(fund_flow_cfg.get("min_open_portion", 0.08))
+        self.legacy_min_open_portion = float(fund_flow_cfg.get("min_open_portion", 0.0) or 0.0)
+        self.min_open_portion = 0.0
+        notional_cfg = fund_flow_cfg.get("min_open_notional", {})
+        if not isinstance(notional_cfg, dict):
+            notional_cfg = {}
+        self.min_open_notional_default = float(notional_cfg.get("default_usdt", 2.0) or 2.0)
+        self.min_open_notional_major = float(notional_cfg.get("major_usdt", 5.0) or 5.0)
+        self.min_open_notional_btc = float(notional_cfg.get("btc_usdt", self.min_open_notional_major) or self.min_open_notional_major)
+        self.major_symbols = {
+            str(s).upper()
+            for s in notional_cfg.get("major_symbols", ["BTCUSDT"])
+            if str(s).strip()
+        }
+        rescue_cfg = fund_flow_cfg.get("probe_floor_rescue", {})
+        if not isinstance(rescue_cfg, dict):
+            rescue_cfg = {}
         self.probe_min_open_portion = float(
-            fund_flow_cfg.get("probe_min_open_portion", fund_flow_cfg.get("min_open_portion", 0.08))
+            rescue_cfg.get(
+                "probe_min_open_portion",
+                fund_flow_cfg.get("probe_min_open_portion", self.legacy_min_open_portion or 0.0),
+            )
         )
+        v2_cfg = fund_flow_cfg.get("macd_mtf_strategy_v2", {})
+        if not isinstance(v2_cfg, dict):
+            v2_cfg = {}
+        position_cfg = v2_cfg.get("position_management", {})
+        if not isinstance(position_cfg, dict):
+            position_cfg = {}
+        self.short_floor_max_lift_ratio = float(position_cfg.get("short_floor_max_lift_ratio", 5.0) or 5.0)
         self.max_open_portion = float(fund_flow_cfg.get("max_open_portion", 1.0))
         self.price_deviation_limit_percent = float(
             fund_flow_cfg.get("price_deviation_limit_percent", 1.0)
@@ -38,6 +63,7 @@ class FundFlowRiskEngine:
         account_risk_cfg = fund_flow_cfg.get("account_risk", {})
         self.account_risk_cfg = account_risk_cfg if isinstance(account_risk_cfg, dict) else {}
         self.symbol_whitelist = {s.upper() for s in symbol_whitelist or []}
+        self._last_min_notional_meta: Dict[str, Any] = {}
 
     def validate_symbol(
         self,
@@ -78,7 +104,35 @@ class FundFlowRiskEngine:
             return self.max_leverage
         return int(lev)
 
-    def validate_target_portion(self, portion: Any, operation: Operation) -> float:
+    def _get_min_notional(self, symbol: str) -> float:
+        symbol_u = str(symbol or "").upper()
+        if symbol_u == "BTCUSDT":
+            return self.min_open_notional_btc
+        if symbol_u in self.major_symbols:
+            return self.min_open_notional_major
+        return self.min_open_notional_default
+
+    @staticmethod
+    def _metadata_float(metadata: Optional[Dict[str, Any]], *keys: str) -> float:
+        if not isinstance(metadata, dict):
+            return 0.0
+        for key in keys:
+            try:
+                value = float(metadata.get(key, 0.0) or 0.0)
+            except Exception:
+                value = 0.0
+            if value > 0:
+                return value
+        return 0.0
+
+    def validate_target_portion(
+        self,
+        portion: Any,
+        operation: Operation,
+        symbol: str = "",
+        account_equity: float = 0.0,
+    ) -> Optional[float]:
+        self._last_min_notional_meta = {}
         if operation == Operation.HOLD:
             return 0.0
         try:
@@ -91,10 +145,31 @@ class FundFlowRiskEngine:
             if val > 1.0:
                 return 1.0
             return val
-        if not (self.min_open_portion <= val <= self.max_open_portion):
+        if val <= 0 or val > self.max_open_portion:
             raise ValueError(
-                f"target_portion_of_balance 越界: {val:.4f}, 要求 [{self.min_open_portion}, {self.max_open_portion}]"
+                f"target_portion_of_balance out of range: {val:.4f}, required (0, {self.max_open_portion}]"
             )
+        equity = float(account_equity or 0.0)
+        if equity > 0:
+            notional = val * equity
+            min_notional = self._get_min_notional(symbol)
+            if notional < min_notional:
+                min_portion = min_notional / equity if equity > 0 else 0.0
+                lift_ratio = (min_portion / val) if val > 0 else float("inf")
+                self._last_min_notional_meta = {
+                    "target_portion": val,
+                    "account_equity": equity,
+                    "notional_usdt": notional,
+                    "min_notional_usdt": min_notional,
+                    "min_executable_portion": min_portion,
+                    "min_notional_lift_ratio": lift_ratio,
+                    "short_floor_max_lift_ratio": self.short_floor_max_lift_ratio,
+                }
+                if operation == Operation.SELL and lift_ratio <= self.short_floor_max_lift_ratio:
+                    self._last_min_notional_meta["short_executable_floor_applied"] = True
+                    return min_portion
+                self._last_min_notional_meta["short_executable_floor_applied"] = False
+                return None
         return val
 
     def resolve_min_open_portion(self, decision: Optional[FundFlowDecision] = None) -> float:
@@ -166,7 +241,7 @@ class FundFlowRiskEngine:
         if scaled_portion > self.max_open_portion:
             raise ValueError(
                 "account_risk scaled target_portion_of_balance 越界: "
-                f"{scaled_portion:.4f}, 要求 [{self.min_open_portion}, {self.max_open_portion}]"
+                f"{scaled_portion:.4f}, 要求 (0, {self.max_open_portion}]"
             )
 
         min_scaled_leverage = max(1, self._cfg_int(cfg, "min_scaled_leverage", self.min_leverage))
@@ -233,19 +308,79 @@ class FundFlowRiskEngine:
         self.validate_symbol(decision.symbol, decision.operation, position)
         decision.leverage = self.clamp_leverage(decision.leverage)
         if decision.operation in (Operation.BUY, Operation.SELL):
-            min_open_backup = self.min_open_portion
-            try:
-                self.min_open_portion = self.resolve_min_open_portion(decision)
-                decision.target_portion_of_balance = self.validate_target_portion(
-                    decision.target_portion_of_balance,
-                    decision.operation,
+            account_equity = self._metadata_float(
+                decision.metadata,
+                "account_equity",
+                "equity",
+                "available_balance",
+            )
+            validated_portion = self.validate_target_portion(
+                decision.target_portion_of_balance,
+                decision.operation,
+                symbol=decision.symbol,
+                account_equity=account_equity,
+            )
+            if validated_portion is None:
+                metadata = dict(decision.metadata or {})
+                metadata.update(self._last_min_notional_meta)
+                metadata["min_notional_soft_hold"] = True
+                return FundFlowDecision(
+                    operation=Operation.HOLD,
+                    symbol=decision.symbol,
+                    target_portion_of_balance=0.0,
+                    leverage=max(1, int(decision.leverage or self.default_leverage)),
+                    reason=(
+                        "min_notional_below_floor"
+                        if not decision.reason
+                        else f"min_notional_below_floor | {decision.reason}"
+                    ),
+                    metadata=metadata,
                 )
-            finally:
-                self.min_open_portion = min_open_backup
+            decision.target_portion_of_balance = validated_portion
+            if self._last_min_notional_meta:
+                metadata = dict(decision.metadata or {})
+                metadata.update(self._last_min_notional_meta)
+                decision.metadata = metadata
         else:
             decision.target_portion_of_balance = self.validate_target_portion(
                 decision.target_portion_of_balance,
                 decision.operation,
             )
         decision = self._apply_account_risk_scaler(decision)
+        if decision.operation in (Operation.BUY, Operation.SELL):
+            account_equity = self._metadata_float(
+                decision.metadata,
+                "account_equity",
+                "equity",
+                "available_balance",
+            )
+            revalidated_portion = self.validate_target_portion(
+                decision.target_portion_of_balance,
+                decision.operation,
+                symbol=decision.symbol,
+                account_equity=account_equity,
+            )
+            if revalidated_portion is None:
+                metadata = dict(decision.metadata or {})
+                metadata.update(self._last_min_notional_meta)
+                metadata["min_notional_soft_hold"] = True
+                metadata["min_notional_post_account_risk_revalidated"] = True
+                return FundFlowDecision(
+                    operation=Operation.HOLD,
+                    symbol=decision.symbol,
+                    target_portion_of_balance=0.0,
+                    leverage=max(1, int(decision.leverage or self.default_leverage)),
+                    reason=(
+                        "min_notional_below_floor"
+                        if not decision.reason
+                        else f"min_notional_below_floor | {decision.reason}"
+                    ),
+                    metadata=metadata,
+                )
+            if abs(float(revalidated_portion) - float(decision.target_portion_of_balance)) > 1e-12:
+                decision.target_portion_of_balance = float(revalidated_portion)
+                metadata = dict(decision.metadata or {})
+                metadata.update(self._last_min_notional_meta)
+                metadata["min_notional_post_account_risk_revalidated"] = True
+                decision.metadata = metadata
         return decision

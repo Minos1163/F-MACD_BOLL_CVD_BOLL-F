@@ -475,8 +475,19 @@ class FundFlowDecisionEngine:
             macd_cfg = v2_cfg.get("macd_config", {})
             filter_cfg = v2_cfg.get("entry_filters", {}) if isinstance(v2_cfg.get("entry_filters"), dict) else {}
             position_mgmt_cfg = v2_cfg.get("position_management", {}) if isinstance(v2_cfg.get("position_management"), dict) else {}
+            ct_long_guard_cfg = (
+                v2_cfg.get("counter_trend_long_guard", {})
+                if isinstance(v2_cfg.get("counter_trend_long_guard"), dict)
+                else {}
+            )
             exit_mgmt_cfg = v2_cfg.get("exit_management", {}) if isinstance(v2_cfg.get("exit_management"), dict) else {}
             penalty_cfg = v2_cfg.get("penalty_config", {}) if isinstance(v2_cfg.get("penalty_config"), dict) else {}
+            partial_confirm_cfg = v2_cfg.get("partial_confirm", {}) if isinstance(v2_cfg.get("partial_confirm"), dict) else {}
+            pc_thresholds = partial_confirm_cfg.get("thresholds", {}) if isinstance(partial_confirm_cfg.get("thresholds"), dict) else {}
+            pc_max_portions = partial_confirm_cfg.get("max_portions", {}) if isinstance(partial_confirm_cfg.get("max_portions"), dict) else {}
+            pc_score_4h = partial_confirm_cfg.get("score_4h_partial", {}) if isinstance(partial_confirm_cfg.get("score_4h_partial"), dict) else {}
+            pc_vwap_safety = partial_confirm_cfg.get("vwap_safety", {}) if isinstance(partial_confirm_cfg.get("vwap_safety"), dict) else {}
+            combo_cfg = ff.get("signal_combo_hard_block", {}) if isinstance(ff.get("signal_combo_hard_block"), dict) else {}
             rsi_cfg = v2_cfg.get("rsi_config", {}) if isinstance(v2_cfg.get("rsi_config"), dict) else {}
             rsi_rhythm_cfg = rsi_cfg.get("rhythm", {}) if isinstance(rsi_cfg.get("rhythm"), dict) else {}
             flip_bullish_sniper_cfg = (
@@ -566,7 +577,94 @@ class FundFlowDecisionEngine:
                 # VWAP参数
                 vwap_deviation_optimal=self._to_float(vwap_cfg.get("vwap_deviation_optimal"), 0.005),
                 vwap_deviation_warning=self._to_float(vwap_cfg.get("vwap_deviation_warning"), 0.015),
-                vwap_deviation_hard_block=self._to_float(vwap_cfg.get("vwap_deviation_hard_block"), 0.030),
+                vwap_deviation_hard_block=self._to_float(
+                    vwap_cfg.get(
+                        "vwap_deviation_hard_block",
+                        (vwap_cfg.get("vwap_deviation_gate", {}) or {}).get("fallback_hard_block_pct")
+                        if isinstance(vwap_cfg.get("vwap_deviation_gate"), dict)
+                        else None,
+                    ),
+                    0.030,
+                ),
+                vwap_deviation_gate_mode=str((vwap_cfg.get("vwap_deviation_gate", {}) or {}).get("mode", "fixed"))
+                if isinstance(vwap_cfg.get("vwap_deviation_gate"), dict)
+                else "fixed",
+                vwap_gate_pass_atr_multiplier=self._to_float(
+                    (vwap_cfg.get("vwap_deviation_gate", {}) or {}).get("pass_atr_multiplier"),
+                    1.5,
+                ) if isinstance(vwap_cfg.get("vwap_deviation_gate"), dict) else 1.5,
+                vwap_gate_penalty_atr_multiplier=self._to_float(
+                    (vwap_cfg.get("vwap_deviation_gate", {}) or {}).get("penalty_atr_multiplier"),
+                    2.5,
+                ) if isinstance(vwap_cfg.get("vwap_deviation_gate"), dict) else 2.5,
+                vwap_gate_block_atr_multiplier=self._to_float(
+                    (vwap_cfg.get("vwap_deviation_gate", {}) or {}).get("block_atr_multiplier"),
+                    4.0,
+                ) if isinstance(vwap_cfg.get("vwap_deviation_gate"), dict) else 4.0,
+                vwap_gate_penalty_mult_slope=self._to_float(
+                    (vwap_cfg.get("vwap_deviation_gate", {}) or {}).get("penalty_mult_slope"),
+                    0.15,
+                ) if isinstance(vwap_cfg.get("vwap_deviation_gate"), dict) else 0.15,
+                vwap_gate_fallback_hard_block_pct=self._to_float(
+                    (vwap_cfg.get("vwap_deviation_gate", {}) or {}).get("fallback_hard_block_pct"),
+                    0.06,
+                ) if isinstance(vwap_cfg.get("vwap_deviation_gate"), dict) else 0.06,
+                vwap_gate_probe_max_portion=self._to_float(
+                    (vwap_cfg.get("vwap_deviation_gate", {}) or {}).get("probe_max_portion"),
+                    0.06,
+                ) if isinstance(vwap_cfg.get("vwap_deviation_gate"), dict) else 0.06,
+                vwap_same_dir_trend_aligned_pass_dev_pct=self._to_float(
+                    ((vwap_cfg.get("vwap_deviation_gate", {}) or {}).get("same_dir_trend_aligned", {}) or {}).get("pass_dev_pct"),
+                    0.05,
+                ) if isinstance(vwap_cfg.get("vwap_deviation_gate"), dict) else 0.05,
+                vwap_same_dir_trend_aligned_penalty_dev_pct=self._to_float(
+                    ((vwap_cfg.get("vwap_deviation_gate", {}) or {}).get("same_dir_trend_aligned", {}) or {}).get("penalty_dev_pct"),
+                    0.10,
+                ) if isinstance(vwap_cfg.get("vwap_deviation_gate"), dict) else 0.10,
+                vwap_same_dir_trend_aligned_probe_dev_pct=self._to_float(
+                    ((vwap_cfg.get("vwap_deviation_gate", {}) or {}).get("same_dir_trend_aligned", {}) or {}).get("probe_dev_pct"),
+                    0.15,
+                ) if isinstance(vwap_cfg.get("vwap_deviation_gate"), dict) else 0.15,
+                vwap_same_dir_trend_aligned_penalty_mult=self._to_float(
+                    ((vwap_cfg.get("vwap_deviation_gate", {}) or {}).get("same_dir_trend_aligned", {}) or {}).get("penalty_mult"),
+                    0.90,
+                ) if isinstance(vwap_cfg.get("vwap_deviation_gate"), dict) else 0.90,
+                vwap_same_dir_counter_pass_atr_mult=self._to_float(
+                    ((vwap_cfg.get("vwap_deviation_gate", {}) or {}).get("same_dir_counter_trend", {}) or {}).get("pass_atr_mult"),
+                    2.0,
+                ) if isinstance(vwap_cfg.get("vwap_deviation_gate"), dict) else 2.0,
+                vwap_same_dir_counter_penalty_atr_mult=self._to_float(
+                    ((vwap_cfg.get("vwap_deviation_gate", {}) or {}).get("same_dir_counter_trend", {}) or {}).get("penalty_atr_mult"),
+                    3.5,
+                ) if isinstance(vwap_cfg.get("vwap_deviation_gate"), dict) else 3.5,
+                vwap_same_dir_counter_probe_atr_mult=self._to_float(
+                    ((vwap_cfg.get("vwap_deviation_gate", {}) or {}).get("same_dir_counter_trend", {}) or {}).get("probe_atr_mult"),
+                    5.0,
+                ) if isinstance(vwap_cfg.get("vwap_deviation_gate"), dict) else 5.0,
+                vwap_same_dir_counter_fallback_hard_block_pct=self._to_float(
+                    ((vwap_cfg.get("vwap_deviation_gate", {}) or {}).get("same_dir_counter_trend", {}) or {}).get("fallback_hard_block_pct"),
+                    0.03,
+                ) if isinstance(vwap_cfg.get("vwap_deviation_gate"), dict) else 0.03,
+                vwap_same_dir_counter_penalty_mult=self._to_float(
+                    ((vwap_cfg.get("vwap_deviation_gate", {}) or {}).get("same_dir_counter_trend", {}) or {}).get("penalty_mult"),
+                    0.85,
+                ) if isinstance(vwap_cfg.get("vwap_deviation_gate"), dict) else 0.85,
+                vwap_ambiguous_pass_atr_mult=self._to_float(
+                    ((vwap_cfg.get("vwap_deviation_gate", {}) or {}).get("ambiguous", {}) or {}).get("pass_atr_mult"),
+                    1.5,
+                ) if isinstance(vwap_cfg.get("vwap_deviation_gate"), dict) else 1.5,
+                vwap_ambiguous_penalty_atr_mult=self._to_float(
+                    ((vwap_cfg.get("vwap_deviation_gate", {}) or {}).get("ambiguous", {}) or {}).get("penalty_atr_mult"),
+                    2.5,
+                ) if isinstance(vwap_cfg.get("vwap_deviation_gate"), dict) else 2.5,
+                vwap_ambiguous_block_atr_mult=self._to_float(
+                    ((vwap_cfg.get("vwap_deviation_gate", {}) or {}).get("ambiguous", {}) or {}).get("block_atr_mult"),
+                    4.0,
+                ) if isinstance(vwap_cfg.get("vwap_deviation_gate"), dict) else 4.0,
+                vwap_ambiguous_penalty_mult=self._to_float(
+                    ((vwap_cfg.get("vwap_deviation_gate", {}) or {}).get("ambiguous", {}) or {}).get("penalty_mult"),
+                    0.88,
+                ) if isinstance(vwap_cfg.get("vwap_deviation_gate"), dict) else 0.88,
                 structural_vwap_mode=str(vwap_cfg.get("structural_vwap_mode", "anchored_weekly")),
                 structural_vwap_rolling_window=int(self._to_float(vwap_cfg.get("structural_vwap_rolling_window"), 20)),
                 vwap_retest_tolerance=self._to_float(vwap_cfg.get("vwap_retest_tolerance"), 0.003),
@@ -683,9 +781,33 @@ class FundFlowDecisionEngine:
                 neutral_upgrade_probe_rsi_score=self._to_float(filter_cfg.get("neutral_upgrade_probe_rsi_score"), 0.20),
                 neutral_upgrade_probe_threshold_score=self._to_float(filter_cfg.get("neutral_upgrade_probe_threshold_score"), 0.82),
                 neutral_upgrade_penalty_mult=self._to_float(filter_cfg.get("neutral_upgrade_penalty_mult"), 0.90),
+                partial_confirm_enabled=bool(partial_confirm_cfg.get("enabled", False)),
+                partial_confirm_shadow_mode=bool(partial_confirm_cfg.get("shadow_mode", True)),
+                partial_confirm_thresholds=dict(pc_thresholds or {"HIGH": 0.60, "MEDIUM": 0.58}),
+                partial_confirm_max_portions=dict(pc_max_portions or {"HIGH": 0.10, "MEDIUM": 0.06, "LOW": 0.042}),
+                partial_confirm_score_4h_partial=dict(pc_score_4h or {"HIGH": 0.15, "MEDIUM": 0.10, "LOW": 0.05}),
+                partial_confirm_penalty_mult=self._to_float(partial_confirm_cfg.get("penalty_mult"), 0.85),
+                partial_confirm_vwap_max_dev_atr_ratio=self._to_float(pc_vwap_safety.get("max_dev_atr_ratio"), 3.0),
+                partial_confirm_long_min_dev_pct=self._to_float(pc_vwap_safety.get("long_min_dev_pct"), -0.02),
+                partial_confirm_short_max_dev_pct=self._to_float(pc_vwap_safety.get("short_max_dev_pct"), 0.02),
                 enable_rsi_rhythm_scoring=bool(rsi_rhythm_cfg.get("enabled", True)),
                 enable_rsi_hard_veto=bool(rsi_rhythm_cfg.get("enable_hard_veto", True)),
                 enable_rsi_1h_direction_gate=bool(rsi_rhythm_cfg.get("enable_1h_direction_gate", False)),
+                enable_rsi_adaptive_direction_gate=bool(
+                    (rsi_rhythm_cfg.get("adaptive_direction_gate", {}) or {}).get("enabled", False)
+                ),
+                rsi_adaptive_soft_rsi_against_mult=self._to_float(
+                    ((rsi_rhythm_cfg.get("adaptive_direction_gate", {}) or {}).get("soft_rsi_against_mult")),
+                    0.88,
+                ),
+                rsi_adaptive_soft_rsi_against_max_portion=self._to_float(
+                    ((rsi_rhythm_cfg.get("adaptive_direction_gate", {}) or {}).get("soft_rsi_against_max_portion")),
+                    0.06,
+                ),
+                rsi_adaptive_soft_rsi_flat_mult=self._to_float(
+                    ((rsi_rhythm_cfg.get("adaptive_direction_gate", {}) or {}).get("soft_rsi_flat_mult")),
+                    0.93,
+                ),
                 rsi_1h_direction_flat_threshold=self._to_float(
                     rsi_rhythm_cfg.get("direction_flat_threshold"),
                     0.3,
@@ -740,6 +862,54 @@ class FundFlowDecisionEngine:
                 green_bar_growing_probe_max_leverage=max(
                     1,
                     int(self._to_float(position_mgmt_cfg.get("green_bar_growing_probe_max_leverage"), 2)),
+                ),
+                probe_penalty_floor_notional_usdt=self._to_float(
+                    position_mgmt_cfg.get("probe_penalty_floor_notional_usdt"),
+                    2.0,
+                ),
+                short_floor_max_lift_ratio=self._to_float(
+                    position_mgmt_cfg.get("short_floor_max_lift_ratio"),
+                    5.0,
+                ),
+                counter_trend_long_guard_enabled=bool(ct_long_guard_cfg.get("enabled", False)),
+                counter_trend_long_vwap_dev_extreme_pct=self._to_float(
+                    ct_long_guard_cfg.get("vwap_dev_extreme_pct"),
+                    0.030,
+                ),
+                counter_trend_long_vwap_dev_moderate_pct=self._to_float(
+                    ct_long_guard_cfg.get("vwap_dev_moderate_pct"),
+                    0.010,
+                ),
+                counter_trend_long_adx_weak_threshold=self._to_float(
+                    ct_long_guard_cfg.get("adx_weak_threshold"),
+                    18.0,
+                ),
+                counter_trend_long_adx_extreme_threshold=self._to_float(
+                    ct_long_guard_cfg.get("adx_extreme_threshold"),
+                    20.0,
+                ),
+                counter_trend_long_min_15m_raw_for_confirm=self._to_float(
+                    ct_long_guard_cfg.get("min_15m_raw_for_confirm"),
+                    0.30,
+                ),
+                counter_trend_long_extreme_trend_max_portion=self._to_float(
+                    ct_long_guard_cfg.get("extreme_trend_max"),
+                    0.060,
+                ),
+                counter_trend_long_extreme_range_action=str(
+                    ct_long_guard_cfg.get("extreme_range_action", "BLOCK") or "BLOCK"
+                ),
+                counter_trend_long_moderate_no_15m_max=self._to_float(
+                    ct_long_guard_cfg.get("moderate_no_15m_max"),
+                    0.060,
+                ),
+                counter_trend_long_moderate_ok_max=self._to_float(
+                    ct_long_guard_cfg.get("moderate_ok_max"),
+                    0.120,
+                ),
+                counter_trend_long_minor_max=self._to_float(
+                    ct_long_guard_cfg.get("minor_max"),
+                    0.200,
                 ),
                 vol_vwap_warn_min_score_vol=self._to_float(
                     filter_cfg.get("vol_vwap_warn_min_score_vol", filter_cfg.get("volume_vwap_both_low_min_score_vol")),
@@ -1013,6 +1183,19 @@ class FundFlowDecisionEngine:
                 dynamic_adx_trend_min=self._to_float((dynamic_position_cfg.get("adx_trend_penalty", {}) or {}).get("min_adx"), 0.0) if isinstance(dynamic_position_cfg.get("adx_trend_penalty"), dict) else 0.0,
                 dynamic_adx_trend_position_mult=self._to_float((dynamic_position_cfg.get("adx_trend_penalty", {}) or {}).get("position_mult"), 1.0) if isinstance(dynamic_position_cfg.get("adx_trend_penalty"), dict) else 1.0,
                 dynamic_signal_type_position_caps=copy.deepcopy(dynamic_position_cfg.get("signal_type_caps", {})) if isinstance(dynamic_position_cfg.get("signal_type_caps"), dict) else {},
+                total_compression_floor_enabled=bool(
+                    (dynamic_position_cfg.get("total_compression_floor", {}) or {}).get("enabled", False)
+                ) if isinstance(dynamic_position_cfg.get("total_compression_floor"), dict) else False,
+                total_compression_floor_tiers=copy.deepcopy(
+                    (dynamic_position_cfg.get("total_compression_floor", {}) or {}).get("floors", [])
+                ) if (
+                    isinstance(dynamic_position_cfg.get("total_compression_floor"), dict)
+                    and isinstance((dynamic_position_cfg.get("total_compression_floor", {}) or {}).get("floors"), list)
+                ) else [],
+                signal_combo_hard_block_enabled=bool(combo_cfg.get("enabled", True)),
+                signal_combo_hard_block_rules=copy.deepcopy(combo_cfg.get("rules", []))
+                if isinstance(combo_cfg.get("rules"), list)
+                else [],
                 enable_meaningful_short_entry_cap=(
                     bool(short_side_enable_cfg)
                     and not bool(short_side_enable_cfg.get("meaningful", True))
@@ -1755,6 +1938,8 @@ class FundFlowDecisionEngine:
             rsi_conflict=bool((signal.details or {}).get("rsi_macd_conflict", False)),
             rsi_conflict_portion_mult=float((signal.details or {}).get("rsi_conflict_portion_mult", 0.70) or 0.70),
             rsi_probe_mode=rsi_probe_mode,
+            vwap_probe_mode=bool((signal.details or {}).get("vwap_probe_mode", False)),
+            signal_combo_max_portion=self._to_float((signal.details or {}).get("signal_combo_max_portion"), 0.0),
         )
         leverage = macd_v2_engine.calculate_leverage(
             score,
@@ -4537,6 +4722,8 @@ class FundFlowDecisionEngine:
                 rsi_conflict=bool((signal.details or {}).get("rsi_macd_conflict", False)),
                 rsi_conflict_portion_mult=float((signal.details or {}).get("rsi_conflict_portion_mult", 0.70) or 0.70),
                 rsi_probe_mode=self._resolve_macd_v2_probe_mode(signal, macd_v2_engine),
+                vwap_probe_mode=bool((signal.details or {}).get("vwap_probe_mode", False)),
+                signal_combo_max_portion=self._to_float((signal.details or {}).get("signal_combo_max_portion"), 0.0),
             )
             portion = self._apply_macd_v2_vol_vwap_warn_position_scale(portion, signal, metadata)
             metadata["session_risk"] = {
@@ -4668,6 +4855,8 @@ class FundFlowDecisionEngine:
                 rsi_conflict=bool((signal.details or {}).get("rsi_macd_conflict", False)),
                 rsi_conflict_portion_mult=float((signal.details or {}).get("rsi_conflict_portion_mult", 0.70) or 0.70),
                 rsi_probe_mode=self._resolve_macd_v2_probe_mode(signal, macd_v2_engine),
+                vwap_probe_mode=bool((signal.details or {}).get("vwap_probe_mode", False)),
+                signal_combo_max_portion=self._to_float((signal.details or {}).get("signal_combo_max_portion"), 0.0),
             )
             portion = self._apply_macd_v2_vol_vwap_warn_position_scale(portion, signal, metadata)
             metadata["session_risk"] = {
