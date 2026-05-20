@@ -69,6 +69,15 @@ class FundFlowDecisionEngine:
 
         self.engine_params_cfg = ff.get("engine_params", {}) if isinstance(ff.get("engine_params"), dict) else {}
         self.active_signal_pool_id = str(ff.get("active_signal_pool_id", "default_pool") or "default_pool")
+        notional_cfg = ff.get("min_open_notional", {}) if isinstance(ff.get("min_open_notional"), dict) else {}
+        self.min_open_notional_default = self._to_float(notional_cfg.get("default_usdt"), 2.0)
+        self.min_open_notional_major = self._to_float(notional_cfg.get("major_usdt"), self.min_open_notional_default)
+        self.min_open_notional_btc = self._to_float(notional_cfg.get("btc_usdt"), 5.0)
+        self.min_open_notional_major_symbols = {
+            str(s).strip().upper()
+            for s in (notional_cfg.get("major_symbols", []) or [])
+            if str(s).strip()
+        }
 
         regime_cfg = ff.get("regime", {}) if isinstance(ff.get("regime"), dict) else {}
         self.regime_timeframe = str(regime_cfg.get("timeframe", "15m") or "15m").strip().lower()
@@ -480,6 +489,31 @@ class FundFlowDecisionEngine:
                 if isinstance(v2_cfg.get("counter_trend_long_guard"), dict)
                 else {}
             )
+            entry_quality_cfg = (
+                v2_cfg.get("entry_quality_gates", {})
+                if isinstance(v2_cfg.get("entry_quality_gates"), dict)
+                else {}
+            )
+            entry_quality_15m_cfg = (
+                entry_quality_cfg.get("15m_hard_gate", {})
+                if isinstance(entry_quality_cfg.get("15m_hard_gate"), dict)
+                else {}
+            )
+            entry_quality_flip_cfg = (
+                entry_quality_cfg.get("flip_bullish_size_guard", {})
+                if isinstance(entry_quality_cfg.get("flip_bullish_size_guard"), dict)
+                else {}
+            )
+            entry_quality_adx_cfg = (
+                entry_quality_cfg.get("adx_regime_size_cap", {})
+                if isinstance(entry_quality_cfg.get("adx_regime_size_cap"), dict)
+                else {}
+            )
+            entry_quality_ema_cfg = (
+                entry_quality_cfg.get("ema_conditional_multiplier", {})
+                if isinstance(entry_quality_cfg.get("ema_conditional_multiplier"), dict)
+                else {}
+            )
             exit_mgmt_cfg = v2_cfg.get("exit_management", {}) if isinstance(v2_cfg.get("exit_management"), dict) else {}
             penalty_cfg = v2_cfg.get("penalty_config", {}) if isinstance(v2_cfg.get("penalty_config"), dict) else {}
             partial_confirm_cfg = v2_cfg.get("partial_confirm", {}) if isinstance(v2_cfg.get("partial_confirm"), dict) else {}
@@ -537,6 +571,14 @@ class FundFlowDecisionEngine:
             common_stable_continuation_min_vwap_score = filter_cfg.get("stable_continuation_min_vwap_score")
             common_stable_continuation_min_adx_1h = filter_cfg.get("stable_continuation_min_adx_1h")
             common_stable_continuation_min_4h_bars = filter_cfg.get("stable_continuation_min_4h_bars")
+            entry_quality_adx_tiers = (
+                entry_quality_adx_cfg.get("score_tiers", [])
+                if isinstance(entry_quality_adx_cfg.get("score_tiers"), list)
+                else []
+            )
+            entry_quality_adx_high_tier = entry_quality_adx_tiers[0] if len(entry_quality_adx_tiers) > 0 and isinstance(entry_quality_adx_tiers[0], dict) else {}
+            entry_quality_adx_mid_tier = entry_quality_adx_tiers[1] if len(entry_quality_adx_tiers) > 1 and isinstance(entry_quality_adx_tiers[1], dict) else {}
+            entry_quality_adx_low_tier = entry_quality_adx_tiers[2] if len(entry_quality_adx_tiers) > 2 and isinstance(entry_quality_adx_tiers[2], dict) else {}
             default_signal_threshold = self._to_float(
                 thresholds_cfg.get("default", thresholds_cfg.get("min_signal_score")),
                 0.850,
@@ -867,10 +909,6 @@ class FundFlowDecisionEngine:
                     position_mgmt_cfg.get("probe_penalty_floor_notional_usdt"),
                     2.0,
                 ),
-                short_floor_max_lift_ratio=self._to_float(
-                    position_mgmt_cfg.get("short_floor_max_lift_ratio"),
-                    5.0,
-                ),
                 counter_trend_long_guard_enabled=bool(ct_long_guard_cfg.get("enabled", False)),
                 counter_trend_long_vwap_dev_extreme_pct=self._to_float(
                     ct_long_guard_cfg.get("vwap_dev_extreme_pct"),
@@ -1196,6 +1234,65 @@ class FundFlowDecisionEngine:
                 signal_combo_hard_block_rules=copy.deepcopy(combo_cfg.get("rules", []))
                 if isinstance(combo_cfg.get("rules"), list)
                 else [],
+                entry_quality_15m_hard_gate_enabled=bool(entry_quality_15m_cfg.get("enabled", False)),
+                entry_quality_below_vwap_risk_pct=self._to_float(
+                    entry_quality_15m_cfg.get("below_vwap_risk_pct"),
+                    0.005,
+                ),
+                entry_quality_15m_risk_count_full_block=int(
+                    self._to_float(entry_quality_15m_cfg.get("risk_count_full_block"), 3)
+                ),
+                entry_quality_15m_strong_raw=self._to_float(entry_quality_15m_cfg.get("strong_15m_raw"), 0.40),
+                entry_quality_15m_medium_raw=self._to_float(entry_quality_15m_cfg.get("medium_15m_raw"), 0.30),
+                entry_quality_15m_weak_raw=self._to_float(entry_quality_15m_cfg.get("weak_15m_raw"), 0.20),
+                entry_quality_15m_dual_medium_max=self._to_float(
+                    entry_quality_15m_cfg.get("risk_count_dual_probe_max"),
+                    0.080,
+                ),
+                entry_quality_15m_single_ok_max=self._to_float(
+                    entry_quality_15m_cfg.get("risk_count_single_probe_max"),
+                    0.180,
+                ),
+                entry_quality_flip_bullish_size_guard_enabled=bool(entry_quality_flip_cfg.get("enabled", False)),
+                entry_quality_flip_above_vwap_15m_ok_max=self._to_float(
+                    entry_quality_flip_cfg.get("above_vwap_15m_ok_max"),
+                    0.100,
+                ),
+                entry_quality_flip_above_vwap_no_15m_max=self._to_float(
+                    entry_quality_flip_cfg.get("above_vwap_no_15m_max"),
+                    0.060,
+                ),
+                entry_quality_flip_below_vwap_15m_ok_max=self._to_float(
+                    entry_quality_flip_cfg.get("below_vwap_15m_ok_max"),
+                    0.042,
+                ),
+                entry_quality_flip_below_vwap_no_15m_action=str(
+                    entry_quality_flip_cfg.get("below_vwap_no_15m_action", "BLOCK") or "BLOCK"
+                ),
+                entry_quality_adx_regime_size_cap_enabled=bool(entry_quality_adx_cfg.get("enabled", False)),
+                entry_quality_adx_weak_threshold=self._to_float(
+                    entry_quality_adx_cfg.get("weak_adx_threshold"),
+                    20.0,
+                ),
+                entry_quality_adx_cap_high_score=self._to_float(entry_quality_adx_high_tier.get("min_score"), 0.85),
+                entry_quality_adx_cap_high_max=self._to_float(entry_quality_adx_high_tier.get("max_portion"), 0.080),
+                entry_quality_adx_cap_mid_score=self._to_float(entry_quality_adx_mid_tier.get("min_score"), 0.75),
+                entry_quality_adx_cap_mid_max=self._to_float(entry_quality_adx_mid_tier.get("max_portion"), 0.060),
+                entry_quality_adx_cap_low_max=self._to_float(entry_quality_adx_low_tier.get("max_portion"), 0.042),
+                entry_quality_ema_conditional_multiplier_enabled=bool(entry_quality_ema_cfg.get("enabled", False)),
+                entry_quality_ema_strong_mult=self._to_float(entry_quality_ema_cfg.get("strong_mult"), 1.20),
+                entry_quality_ema_fallback_mult=self._to_float(entry_quality_ema_cfg.get("fallback_mult"), 1.00),
+                entry_quality_ema_require_price_vwap_aligned=bool(
+                    entry_quality_ema_cfg.get("require_price_vwap_aligned", True)
+                ),
+                entry_quality_ema_require_15m_raw_min=self._to_float(
+                    entry_quality_ema_cfg.get("require_15m_raw_min"),
+                    0.25,
+                ),
+                entry_quality_ema_require_adx_min=self._to_float(
+                    entry_quality_ema_cfg.get("require_adx_min"),
+                    20.0,
+                ),
                 enable_meaningful_short_entry_cap=(
                     bool(short_side_enable_cfg)
                     and not bool(short_side_enable_cfg.get("meaningful", True))
@@ -1247,6 +1344,12 @@ class FundFlowDecisionEngine:
                     self._to_float(position_mgmt_cfg.get("vol_vwap_warn_position_scale"), 0.50),
                 ),
             )
+            vol_vwap_guard_cfg = (
+                position_mgmt_cfg.get("vol_vwap_warn_scale_min_notional_guard", {})
+                if isinstance(position_mgmt_cfg.get("vol_vwap_warn_scale_min_notional_guard"), dict)
+                else {}
+            )
+            self.vol_vwap_warn_scale_min_notional_guard_enabled = bool(vol_vwap_guard_cfg.get("enabled", True))
             self.macd_v2_engine = MACDStrategyV2Engine(self.macd_v2_config)
             regime_state_cfg = v2_cfg.get("regime_state_machine", {}) if isinstance(v2_cfg.get("regime_state_machine"), dict) else {}
             self.macd_4h_regime_state_cfg = {
@@ -1302,6 +1405,7 @@ class FundFlowDecisionEngine:
             self.macd_v2_engine = None
             self.macd_4h_regime_state_cfg = {"enabled": False}
             self.vol_vwap_warn_position_scale = 0.50
+            self.vol_vwap_warn_scale_min_notional_guard_enabled = True
     
     def _parse_default_weights(self, dw_cfg: Dict[str, Any], prefix: str) -> Dict[str, float]:
         """
@@ -1954,6 +2058,12 @@ class FundFlowDecisionEngine:
         leverage = max(self.min_leverage, min(self.max_leverage, leverage))
 
         local_metadata = dict(metadata)
+        local_metadata.setdefault("symbol", symbol)
+        local_metadata["stage"] = str((signal.details or {}).get("stage") or local_metadata.get("stage") or "final")
+        local_metadata["signal_score_threshold"] = self._to_float(
+            (signal.details or {}).get("signal_score_threshold"),
+            self._to_float(local_metadata.get("signal_score_threshold"), 0.0),
+        )
         local_metadata["signal_direction"] = side
         local_metadata["signal_score"] = score
         local_metadata["is_trial_entry"] = is_trial_entry
@@ -2167,6 +2277,14 @@ class FundFlowDecisionEngine:
             return score * multiplier
         return score
 
+    def _get_min_open_notional_usdt(self, symbol: str) -> float:
+        symbol_u = str(symbol or "").strip().upper()
+        if symbol_u == "BTCUSDT":
+            return float(self.min_open_notional_btc)
+        if symbol_u in self.min_open_notional_major_symbols:
+            return float(self.min_open_notional_major)
+        return float(self.min_open_notional_default)
+
     def _apply_macd_v2_vol_vwap_warn_position_scale(
         self,
         portion: float,
@@ -2183,6 +2301,21 @@ class FundFlowDecisionEngine:
             return portion
 
         original_portion = max(0.0, float(portion or 0.0))
+        if bool(getattr(self, "vol_vwap_warn_scale_min_notional_guard_enabled", True)):
+            account_equity = self._to_float(
+                metadata.get("account_equity", metadata.get("equity", metadata.get("available_balance"))),
+                0.0,
+            )
+            min_notional = self._get_min_open_notional_usdt(
+                str(metadata.get("symbol") or details.get("symbol") or "")
+            )
+            current_notional = original_portion * account_equity if account_equity > 0 else 0.0
+            if account_equity > 0 and current_notional < min_notional:
+                metadata["vol_vwap_warn_position_scale_skipped_below_min_notional"] = True
+                metadata["vol_vwap_warn_original_portion"] = original_portion
+                metadata["vol_vwap_warn_notional_usdt"] = current_notional
+                metadata["vol_vwap_warn_min_notional_usdt"] = min_notional
+                return original_portion
         scale = max(0.0, min(1.0, self._to_float(getattr(self, "vol_vwap_warn_position_scale", 0.50), 0.50)))
         adjusted_portion = original_portion * scale
         metadata["vol_vwap_warn_position_scaled"] = True
@@ -4725,6 +4858,12 @@ class FundFlowDecisionEngine:
                 vwap_probe_mode=bool((signal.details or {}).get("vwap_probe_mode", False)),
                 signal_combo_max_portion=self._to_float((signal.details or {}).get("signal_combo_max_portion"), 0.0),
             )
+            metadata.setdefault("symbol", symbol)
+            metadata["stage"] = str((signal.details or {}).get("stage") or metadata.get("stage") or "final")
+            metadata["signal_score_threshold"] = self._to_float(
+                (signal.details or {}).get("signal_score_threshold"),
+                self._to_float(metadata.get("signal_score_threshold"), 0.0),
+            )
             portion = self._apply_macd_v2_vol_vwap_warn_position_scale(portion, signal, metadata)
             metadata["session_risk"] = {
                 "position_scale": float(session_position_scale),
@@ -4857,6 +4996,12 @@ class FundFlowDecisionEngine:
                 rsi_probe_mode=self._resolve_macd_v2_probe_mode(signal, macd_v2_engine),
                 vwap_probe_mode=bool((signal.details or {}).get("vwap_probe_mode", False)),
                 signal_combo_max_portion=self._to_float((signal.details or {}).get("signal_combo_max_portion"), 0.0),
+            )
+            metadata.setdefault("symbol", symbol)
+            metadata["stage"] = str((signal.details or {}).get("stage") or metadata.get("stage") or "final")
+            metadata["signal_score_threshold"] = self._to_float(
+                (signal.details or {}).get("signal_score_threshold"),
+                self._to_float(metadata.get("signal_score_threshold"), 0.0),
             )
             portion = self._apply_macd_v2_vol_vwap_warn_position_scale(portion, signal, metadata)
             metadata["session_risk"] = {

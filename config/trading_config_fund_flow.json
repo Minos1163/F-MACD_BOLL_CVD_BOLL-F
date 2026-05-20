@@ -216,6 +216,12 @@
     "add_position_portion": 0.6,
     "max_symbol_position_portion": 0.35,
     "max_active_symbols": 5,
+    "position_count_limit_by_margin": {
+      "enabled": true,
+      "small_margin_threshold_usdt": 5.0,
+      "max_small_margin_positions": 5,
+      "max_large_margin_positions": 4
+    },
     "min_open_notional": {
       "default_usdt": 2.0,
       "btc_usdt": 5.0,
@@ -226,6 +232,14 @@
         "BNBUSDT",
         "SOLUSDT",
         "XRPUSDT"
+      ]
+    },
+    "final_signal_notional_floor": {
+      "enabled": true,
+      "apply_to_final_only": true,
+      "apply_to_directions": [
+        "long",
+        "short"
       ]
     },
     "max_open_portion": 1.0,
@@ -747,6 +761,57 @@
         "moderate_ok_max": 0.12,
         "minor_max": 0.2
       },
+      "entry_quality_gates": {
+        "15m_hard_gate": {
+          "enabled": true,
+          "below_vwap_risk_pct": 0.005,
+          "risk_count_full_block": 3,
+          "risk_count_dual_probe_max": 0.08,
+          "risk_count_single_probe_max": 0.18,
+          "strong_15m_raw": 0.4,
+          "medium_15m_raw": 0.3,
+          "weak_15m_raw": 0.2,
+          "risk_factors": [
+            "below_vwap_0_5pct",
+            "adx_lt_20",
+            "no_trade",
+            "flip_entry"
+          ]
+        },
+        "flip_bullish_size_guard": {
+          "enabled": true,
+          "above_vwap_15m_ok_max": 0.1,
+          "above_vwap_no_15m_max": 0.06,
+          "below_vwap_15m_ok_max": 0.042,
+          "below_vwap_no_15m_action": "BLOCK"
+        },
+        "adx_regime_size_cap": {
+          "enabled": true,
+          "weak_adx_threshold": 20.0,
+          "score_tiers": [
+            {
+              "min_score": 0.85,
+              "max_portion": 0.08
+            },
+            {
+              "min_score": 0.75,
+              "max_portion": 0.06
+            },
+            {
+              "min_score": 0.0,
+              "max_portion": 0.042
+            }
+          ]
+        },
+        "ema_conditional_multiplier": {
+          "enabled": true,
+          "strong_mult": 1.2,
+          "fallback_mult": 1.0,
+          "require_price_vwap_aligned": true,
+          "require_15m_raw_min": 0.25,
+          "require_adx_min": 20.0
+        }
+      },
       "position_management": {
         "priority_allocation_overdraft_pct": 0.08,
         "enable_red_bar_growing_probe_overlay": false,
@@ -756,8 +821,10 @@
         "green_bar_growing_probe_position_penalty": 0.25,
         "green_bar_growing_probe_max_leverage": 2,
         "probe_penalty_floor_notional_usdt": 2.0,
-        "short_floor_max_lift_ratio": 5.0,
-        "vol_vwap_warn_position_scale": 0.5
+        "vol_vwap_warn_position_scale": 0.5,
+        "vol_vwap_warn_scale_min_notional_guard": {
+          "enabled": true
+        }
       },
       "exit_management": {
         "enable_priority_signal_shrink_exit": true,
@@ -1586,8 +1653,10 @@
                   "green_bar_growing_probe_position_penalty": 0.25,
                   "green_bar_growing_probe_max_leverage": 2,
                   "probe_penalty_floor_notional_usdt": 2.0,
-                  "short_floor_max_lift_ratio": 5.0,
-                  "vol_vwap_warn_position_scale": 0.5
+                  "vol_vwap_warn_position_scale": 0.5,
+                  "vol_vwap_warn_scale_min_notional_guard": {
+                    "enabled": true
+                  }
                 },
                 "short_quality_filter": {
                   "enabled": false

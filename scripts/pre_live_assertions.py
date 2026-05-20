@@ -101,6 +101,45 @@ def assert_counter_trend_long_guard(v2: Dict[str, Any]) -> List[str]:
     return errors
 
 
+def assert_entry_quality_gates(v2: Dict[str, Any]) -> List[str]:
+    errors: List[str] = []
+    gates = v2.get("entry_quality_gates", {}) if isinstance(v2.get("entry_quality_gates"), dict) else {}
+    gate_15m = gates.get("15m_hard_gate", {}) if isinstance(gates.get("15m_hard_gate"), dict) else {}
+    if gate_15m.get("enabled") is not True:
+        errors.append("entry_quality_gates.15m_hard_gate.enabled must be true")
+    if _as_float(gate_15m.get("medium_15m_raw"), 0.0) < 0.30:
+        errors.append("entry_quality_gates.15m_hard_gate.medium_15m_raw must be >= 0.30")
+    if _as_float(gate_15m.get("below_vwap_risk_pct"), 1.0) > 0.005:
+        errors.append("entry_quality_gates.15m_hard_gate.below_vwap_risk_pct must be <= 0.005")
+    if _as_float(gate_15m.get("risk_count_dual_probe_max"), 1.0) > 0.08:
+        errors.append("entry_quality_gates.15m_hard_gate.risk_count_dual_probe_max must be <= 0.08")
+
+    flip = gates.get("flip_bullish_size_guard", {}) if isinstance(gates.get("flip_bullish_size_guard"), dict) else {}
+    if flip.get("enabled") is not True:
+        errors.append("entry_quality_gates.flip_bullish_size_guard.enabled must be true")
+    if str(flip.get("below_vwap_no_15m_action") or "").strip().upper() != "BLOCK":
+        errors.append("entry_quality_gates.flip_bullish_size_guard.below_vwap_no_15m_action must be BLOCK")
+    if _as_float(flip.get("above_vwap_15m_ok_max"), 1.0) > 0.10:
+        errors.append("entry_quality_gates.flip_bullish_size_guard.above_vwap_15m_ok_max must be <= 0.10")
+
+    adx = gates.get("adx_regime_size_cap", {}) if isinstance(gates.get("adx_regime_size_cap"), dict) else {}
+    if adx.get("enabled") is not True:
+        errors.append("entry_quality_gates.adx_regime_size_cap.enabled must be true")
+    if _as_float(adx.get("weak_adx_threshold"), 0.0) < 20.0:
+        errors.append("entry_quality_gates.adx_regime_size_cap.weak_adx_threshold must be >= 20")
+
+    ema = gates.get("ema_conditional_multiplier", {}) if isinstance(gates.get("ema_conditional_multiplier"), dict) else {}
+    if ema.get("enabled") is not True:
+        errors.append("entry_quality_gates.ema_conditional_multiplier.enabled must be true")
+    if ema.get("require_price_vwap_aligned") is not True:
+        errors.append("entry_quality_gates.ema_conditional_multiplier.require_price_vwap_aligned must be true")
+    if _as_float(ema.get("require_15m_raw_min"), 0.0) < 0.25:
+        errors.append("entry_quality_gates.ema_conditional_multiplier.require_15m_raw_min must be >= 0.25")
+    if _as_float(ema.get("require_adx_min"), 0.0) < 20.0:
+        errors.append("entry_quality_gates.ema_conditional_multiplier.require_adx_min must be >= 20")
+    return errors
+
+
 def assert_short_micro_floor(v2: Dict[str, Any]) -> List[str]:
     errors: List[str] = []
     pm = v2.get("position_management", {}) if isinstance(v2.get("position_management"), dict) else {}
@@ -108,9 +147,39 @@ def assert_short_micro_floor(v2: Dict[str, Any]) -> List[str]:
         errors.append("green_bar_growing_probe_position_penalty must be >= 0.20")
     if _as_float(pm.get("probe_penalty_floor_notional_usdt"), 0.0) < 2.0:
         errors.append("probe_penalty_floor_notional_usdt must be >= 2.0")
-    ratio = _as_float(pm.get("short_floor_max_lift_ratio"), 0.0)
-    if ratio <= 0.0 or ratio > 5.0:
-        errors.append("short_floor_max_lift_ratio must be configured in (0, 5]")
+    if "short_floor_max_lift_ratio" in pm:
+        errors.append("short_floor_max_lift_ratio must be removed; final passed signals lift without ratio cap")
+    guard = pm.get("vol_vwap_warn_scale_min_notional_guard", {})
+    if not isinstance(guard, dict) or guard.get("enabled") is not True:
+        errors.append("vol_vwap_warn_scale_min_notional_guard.enabled must be true")
+    return errors
+
+
+def assert_final_signal_notional_floor(ff: Dict[str, Any]) -> List[str]:
+    floor = ff.get("final_signal_notional_floor", {})
+    if not isinstance(floor, dict):
+        return ["final_signal_notional_floor must be configured"]
+    errors: List[str] = []
+    if floor.get("enabled") is not True:
+        errors.append("final_signal_notional_floor.enabled must be true")
+    if floor.get("apply_to_final_only") is not True:
+        errors.append("final_signal_notional_floor.apply_to_final_only must be true")
+    return errors
+
+
+def assert_position_count_limit_by_margin(ff: Dict[str, Any]) -> List[str]:
+    limit = ff.get("position_count_limit_by_margin", {})
+    if not isinstance(limit, dict):
+        return ["position_count_limit_by_margin must be configured"]
+    errors: List[str] = []
+    if limit.get("enabled") is not True:
+        errors.append("position_count_limit_by_margin.enabled must be true")
+    if _as_float(limit.get("small_margin_threshold_usdt"), 0.0) != 5.0:
+        errors.append("position_count_limit_by_margin.small_margin_threshold_usdt must be 5.0")
+    if int(_as_float(limit.get("max_small_margin_positions"), 0.0)) != 5:
+        errors.append("position_count_limit_by_margin.max_small_margin_positions must be 5")
+    if int(_as_float(limit.get("max_large_margin_positions"), 0.0)) != 4:
+        errors.append("position_count_limit_by_margin.max_large_margin_positions must be 4")
     return errors
 
 
@@ -169,7 +238,10 @@ def run_assertions(config_path: Path) -> int:
     errors.extend(assert_rsi_adaptive_gate(v2))
     errors.extend(assert_probe_notional_coherence(ff))
     errors.extend(assert_counter_trend_long_guard(v2))
+    errors.extend(assert_entry_quality_gates(v2))
     errors.extend(assert_short_micro_floor(v2))
+    errors.extend(assert_final_signal_notional_floor(ff))
+    errors.extend(assert_position_count_limit_by_margin(ff))
     errors.extend(assert_dca_disabled(ff))
 
     if errors:

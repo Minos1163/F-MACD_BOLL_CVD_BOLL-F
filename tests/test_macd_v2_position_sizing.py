@@ -10,7 +10,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.fund_flow.macd_strategy_v2 import MACDStrategyV2Config, MACDStrategyV2Engine, VetoType
+from src.fund_flow.macd_strategy_v2 import MACDSignalV2, MACDStrategyV2Config, MACDStrategyV2Engine, VetoType
 from src.fund_flow.decision_engine import FundFlowDecisionEngine
 
 
@@ -153,6 +153,107 @@ def test_signal_combo_hard_block_forces_probe_for_long_red_bar_shrinking() -> No
 
     assert result["action"] == "PROBE"
     assert result["max_portion"] == pytest.approx(0.042)
+
+
+def test_15m_entry_gate_blocks_multi_risk_long_with_weak_15m() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(entry_quality_15m_hard_gate_enabled=True)
+    )
+
+    result = engine._apply_15m_entry_gate(
+        direction="long",
+        raw_15m=0.18,
+        entry_15m="-",
+        vwap_dev_pct=-0.015,
+        adx=17.0,
+        regime="NO_TRADE",
+        signal_4h="flip_bullish",
+        signal_1h="red_bar_growing",
+        current_portion=0.17,
+    )
+
+    assert result["action"] == "BLOCK"
+    assert "multi_risk" in result["reason"]
+
+
+def test_15m_entry_gate_caps_dual_risk_long_to_probe() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(entry_quality_15m_hard_gate_enabled=True)
+    )
+
+    result = engine._apply_15m_entry_gate(
+        direction="long",
+        raw_15m=0.12,
+        entry_15m="-",
+        vwap_dev_pct=-0.008,
+        adx=17.29,
+        regime="TREND",
+        signal_4h="red_bar_growing",
+        signal_1h="red_bar_growing",
+        current_portion=0.17,
+    )
+
+    assert result["action"] == "PROBE"
+    assert result["max_portion"] == pytest.approx(0.04)
+    assert "dual_risk" in result["reason"]
+
+
+def test_flip_bullish_size_guard_blocks_below_vwap_without_15m_confirmation() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(entry_quality_flip_bullish_size_guard_enabled=True)
+    )
+
+    result = engine._apply_flip_bullish_size_guard(
+        signal_4h="flip_bullish",
+        signal_1h="red_bar_growing",
+        vwap_dev_pct=-0.0091,
+        raw_15m=0.18,
+        entry_15m="-",
+        current_portion=0.17,
+    )
+
+    assert result["action"] == "BLOCK"
+    assert "below_vwap_no_15m" in result["reason"]
+
+
+def test_regime_size_cap_limits_weak_adx_new_entry() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(entry_quality_adx_regime_size_cap_enabled=True)
+    )
+
+    capped = engine._apply_regime_size_cap(
+        direction="long",
+        adx=17.29,
+        regime="TREND",
+        current_portion=0.17,
+        signal_score=0.80,
+    )
+
+    assert capped == pytest.approx(0.06)
+
+
+def test_ema_multiplier_strong_requires_price_15m_and_adx_alignment() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(entry_quality_ema_conditional_multiplier_enabled=True)
+    )
+
+    capped = engine._resolve_ema_multiplier(
+        ema_raw_mult=1.20,
+        vwap_dev_pct=0.0001,
+        raw_15m=0.24,
+        adx=32.42,
+        direction="long",
+    )
+    allowed = engine._resolve_ema_multiplier(
+        ema_raw_mult=1.20,
+        vwap_dev_pct=0.0001,
+        raw_15m=0.30,
+        adx=32.42,
+        direction="long",
+    )
+
+    assert capped == pytest.approx(1.0)
+    assert allowed == pytest.approx(1.2)
 
 
 def test_live_config_disables_total_compression_floor() -> None:
@@ -380,6 +481,38 @@ def test_green_bar_probe_penalty_uses_configured_multiplier_without_extra_probe_
     )
 
     assert portion == pytest.approx(0.07)
+
+
+def test_vol_vwap_warn_scale_skips_dust_position_below_min_notional() -> None:
+    cfg = {
+        "fund_flow": {
+            "min_open_notional": {
+                "default_usdt": 2.0,
+                "btc_usdt": 5.0,
+                "major_usdt": 2.0,
+            },
+            "macd_mtf_strategy_v2": {
+                "position_management": {
+                    "vol_vwap_warn_position_scale": 0.5,
+                    "vol_vwap_warn_scale_min_notional_guard": {"enabled": True},
+                }
+            },
+        }
+    }
+    engine = FundFlowDecisionEngine(cfg)
+    signal = MACDSignalV2(
+        direction="short",
+        signal_score=0.77,
+        signal_type_1h="green_bar_growing",
+        details={"vol_vwap_warn": True, "score_volume": 0.033, "vwap_score": 0.0432},
+    )
+    metadata = {"account_equity": 111.18}
+
+    portion = engine._apply_macd_v2_vol_vwap_warn_position_scale(0.000437, signal, metadata)
+
+    assert portion == pytest.approx(0.000437)
+    assert metadata["vol_vwap_warn_position_scaled"] is False
+    assert metadata["vol_vwap_warn_position_scale_skipped_below_min_notional"] is True
 
 
 def test_live_fixed_vwap_gate_uses_configured_fallback_hard_block_pct() -> None:

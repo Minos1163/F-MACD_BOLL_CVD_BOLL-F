@@ -270,7 +270,6 @@ class MACDStrategyV2Config:
     green_bar_growing_probe_position_penalty: float = 0.10
     green_bar_growing_probe_max_leverage: int = 2
     probe_penalty_floor_notional_usdt: float = 2.0
-    short_floor_max_lift_ratio: float = 5.0
     counter_trend_long_guard_enabled: bool = False
     counter_trend_long_vwap_dev_extreme_pct: float = 0.030
     counter_trend_long_vwap_dev_moderate_pct: float = 0.010
@@ -399,6 +398,37 @@ class MACDStrategyV2Config:
     total_compression_floor_tiers: List[Dict[str, Any]] = field(default_factory=list)
     signal_combo_hard_block_enabled: bool = True
     signal_combo_hard_block_rules: List[Dict[str, Any]] = field(default_factory=lambda: list(DEFAULT_SIGNAL_COMBO_HARD_BLOCK_RULES))
+    entry_quality_15m_hard_gate_enabled: bool = False
+    entry_quality_below_vwap_risk_pct: float = 0.005
+    entry_quality_15m_risk_count_full_block: int = 3
+    entry_quality_15m_strong_raw: float = 0.40
+    entry_quality_15m_medium_raw: float = 0.30
+    entry_quality_15m_weak_raw: float = 0.20
+    entry_quality_15m_multi_medium_max: float = 0.040
+    entry_quality_15m_multi_strong_max: float = 0.060
+    entry_quality_15m_dual_weak_max: float = 0.040
+    entry_quality_15m_dual_medium_max: float = 0.080
+    entry_quality_15m_dual_strong_max: float = 0.120
+    entry_quality_15m_single_very_weak_max: float = 0.060
+    entry_quality_15m_single_ok_max: float = 0.180
+    entry_quality_flip_bullish_size_guard_enabled: bool = False
+    entry_quality_flip_above_vwap_15m_ok_max: float = 0.100
+    entry_quality_flip_above_vwap_no_15m_max: float = 0.060
+    entry_quality_flip_below_vwap_15m_ok_max: float = 0.042
+    entry_quality_flip_below_vwap_no_15m_action: str = "BLOCK"
+    entry_quality_adx_regime_size_cap_enabled: bool = False
+    entry_quality_adx_weak_threshold: float = 20.0
+    entry_quality_adx_cap_high_score: float = 0.85
+    entry_quality_adx_cap_high_max: float = 0.080
+    entry_quality_adx_cap_mid_score: float = 0.75
+    entry_quality_adx_cap_mid_max: float = 0.060
+    entry_quality_adx_cap_low_max: float = 0.042
+    entry_quality_ema_conditional_multiplier_enabled: bool = False
+    entry_quality_ema_strong_mult: float = 1.20
+    entry_quality_ema_fallback_mult: float = 1.00
+    entry_quality_ema_require_price_vwap_aligned: bool = True
+    entry_quality_ema_require_15m_raw_min: float = 0.25
+    entry_quality_ema_require_adx_min: float = 20.0
     enable_meaningful_short_entry_cap: bool = False
     meaningful_short_micro_target_portion: float = 0.009
     enable_no_trade_meaningful_entry_cap: bool = False
@@ -1488,6 +1518,200 @@ class MACDStrategyV2Engine:
             "max_portion": min(current_portion, float(self.config.counter_trend_long_minor_max)),
             "reason": f"below_vwap_{dev_abs:.2%}_minor_capped_0.20",
         }
+
+    def _apply_15m_entry_gate(
+        self,
+        *,
+        direction: str,
+        raw_15m: float,
+        entry_15m: str,
+        vwap_dev_pct: float,
+        adx: float,
+        regime: str,
+        signal_4h: str,
+        signal_1h: str,
+        current_portion: float,
+    ) -> Dict[str, Any]:
+        if not bool(self.config.entry_quality_15m_hard_gate_enabled):
+            return {"action": "PASS", "max_portion": current_portion, "reason": "disabled"}
+        if str(direction or "").strip().lower() != "long":
+            return {"action": "PASS", "max_portion": current_portion, "reason": "not_long"}
+
+        raw = float(raw_15m or 0.0)
+        entry = str(entry_15m or "").strip()
+        is_below_vwap = float(vwap_dev_pct or 0.0) < -float(self.config.entry_quality_below_vwap_risk_pct)
+        is_weak_adx = float(adx or 0.0) < float(self.config.entry_quality_adx_weak_threshold)
+        is_no_trade = str(regime or "").strip().upper() == "NO_TRADE"
+        is_flip_entry = str(signal_4h or "").strip().lower() == "flip_bullish" or str(signal_1h or "").strip().lower() == "flip_bullish"
+        risk_count = int(is_below_vwap) + int(is_weak_adx) + int(is_no_trade) + int(is_flip_entry)
+        if risk_count <= 0:
+            return {"action": "PASS", "max_portion": current_portion, "reason": "no_15m_gate_risk"}
+
+        has_strong_15m = raw >= float(self.config.entry_quality_15m_strong_raw) and entry not in {"", "-"}
+        has_medium_15m = raw >= float(self.config.entry_quality_15m_medium_raw)
+        has_weak_15m = raw >= float(self.config.entry_quality_15m_weak_raw)
+
+        if risk_count >= int(self.config.entry_quality_15m_risk_count_full_block):
+            if not has_medium_15m:
+                return {
+                    "action": "BLOCK",
+                    "reason": f"multi_risk({risk_count}) + weak_15m={raw:.2f} -> block",
+                    "risk_count": risk_count,
+                }
+            if not has_strong_15m:
+                return {
+                    "action": "PROBE",
+                    "max_portion": float(self.config.entry_quality_15m_multi_medium_max),
+                    "reason": f"multi_risk({risk_count}) + medium_15m -> probe",
+                    "risk_count": risk_count,
+                }
+            return {
+                "action": "PROBE",
+                "max_portion": float(self.config.entry_quality_15m_multi_strong_max),
+                "reason": f"multi_risk({risk_count}) + strong_15m -> probe",
+                "risk_count": risk_count,
+            }
+
+        if risk_count == 2:
+            if not has_medium_15m:
+                return {
+                    "action": "PROBE",
+                    "max_portion": float(self.config.entry_quality_15m_dual_weak_max),
+                    "reason": f"dual_risk + weak_15m={raw:.2f} -> probe",
+                    "risk_count": risk_count,
+                }
+            if not has_strong_15m:
+                return {
+                    "action": "PROBE",
+                    "max_portion": float(self.config.entry_quality_15m_dual_medium_max),
+                    "reason": "dual_risk + medium_15m -> probe",
+                    "risk_count": risk_count,
+                }
+            return {
+                "action": "PASS",
+                "max_portion": min(current_portion, float(self.config.entry_quality_15m_dual_strong_max)),
+                "reason": "dual_risk + strong_15m -> capped",
+                "risk_count": risk_count,
+            }
+
+        if not has_weak_15m:
+            return {
+                "action": "PROBE",
+                "max_portion": float(self.config.entry_quality_15m_single_very_weak_max),
+                "reason": f"single_risk + very_weak_15m={raw:.2f} -> probe",
+                "risk_count": risk_count,
+            }
+        return {
+            "action": "PASS",
+            "max_portion": min(current_portion, float(self.config.entry_quality_15m_single_ok_max)),
+            "reason": "single_risk + ok_15m -> capped",
+            "risk_count": risk_count,
+        }
+
+    def _apply_flip_bullish_size_guard(
+        self,
+        *,
+        signal_4h: str,
+        signal_1h: str,
+        vwap_dev_pct: float,
+        raw_15m: float,
+        entry_15m: str,
+        current_portion: float,
+    ) -> Dict[str, Any]:
+        if not bool(self.config.entry_quality_flip_bullish_size_guard_enabled):
+            return {"action": "PASS", "max_portion": current_portion, "reason": "disabled"}
+        is_flip = str(signal_4h or "").strip().lower() == "flip_bullish" or str(signal_1h or "").strip().lower() == "flip_bullish"
+        if not is_flip:
+            return {"action": "PASS", "max_portion": current_portion, "reason": "not_flip_bullish"}
+
+        price_above_vwap = float(vwap_dev_pct or 0.0) >= 0.0
+        has_15m_confirm = float(raw_15m or 0.0) >= float(self.config.entry_quality_15m_medium_raw) and str(entry_15m or "").strip() not in {"", "-"}
+        if price_above_vwap and has_15m_confirm:
+            return {
+                "action": "PASS",
+                "max_portion": min(current_portion, float(self.config.entry_quality_flip_above_vwap_15m_ok_max)),
+                "reason": "flip_bullish_above_vwap_15m_confirmed",
+            }
+        if price_above_vwap:
+            return {
+                "action": "PROBE",
+                "max_portion": float(self.config.entry_quality_flip_above_vwap_no_15m_max),
+                "reason": f"flip_bullish_above_vwap_no_15m raw={float(raw_15m or 0.0):.2f}",
+            }
+        if has_15m_confirm:
+            return {
+                "action": "PROBE",
+                "max_portion": float(self.config.entry_quality_flip_below_vwap_15m_ok_max),
+                "reason": f"flip_bullish_below_vwap_15m_ok dev={float(vwap_dev_pct or 0.0):.2%}",
+            }
+        action = str(self.config.entry_quality_flip_below_vwap_no_15m_action or "BLOCK").strip().upper()
+        return {
+            "action": "BLOCK" if action == "BLOCK" else "PROBE",
+            "max_portion": 0.0 if action == "BLOCK" else float(self.config.entry_quality_flip_below_vwap_15m_ok_max),
+            "reason": f"flip_bullish_below_vwap_no_15m dev={float(vwap_dev_pct or 0.0):.2%} raw={float(raw_15m or 0.0):.2f}",
+        }
+
+    def _apply_regime_size_cap(
+        self,
+        *,
+        direction: str,
+        adx: float,
+        regime: str,
+        current_portion: float,
+        signal_score: float,
+    ) -> float:
+        if not bool(self.config.entry_quality_adx_regime_size_cap_enabled):
+            return current_portion
+        if str(direction or "").strip().lower() != "long":
+            return current_portion
+        is_weak = float(adx or 0.0) < float(self.config.entry_quality_adx_weak_threshold) or str(regime or "").strip().upper() == "NO_TRADE"
+        if not is_weak:
+            return current_portion
+        score = float(signal_score or 0.0)
+        if score >= float(self.config.entry_quality_adx_cap_high_score):
+            cap = float(self.config.entry_quality_adx_cap_high_max)
+        elif score >= float(self.config.entry_quality_adx_cap_mid_score):
+            cap = float(self.config.entry_quality_adx_cap_mid_max)
+        else:
+            cap = float(self.config.entry_quality_adx_cap_low_max)
+        return min(current_portion, cap)
+
+    def _resolve_ema_multiplier(
+        self,
+        *,
+        ema_raw_mult: float,
+        vwap_dev_pct: float,
+        raw_15m: float,
+        adx: float,
+        direction: str,
+    ) -> float:
+        raw_mult = float(ema_raw_mult or 0.0)
+        if not bool(self.config.entry_quality_ema_conditional_multiplier_enabled):
+            return raw_mult
+        if raw_mult <= float(self.config.entry_quality_ema_fallback_mult):
+            return raw_mult
+
+        direction_norm = str(direction or "").strip().lower()
+        if bool(self.config.entry_quality_ema_require_price_vwap_aligned):
+            price_ok = (
+                (direction_norm == "long" and float(vwap_dev_pct or 0.0) >= 0.0)
+                or (direction_norm == "short" and float(vwap_dev_pct or 0.0) <= 0.0)
+            )
+        else:
+            price_ok = True
+        rhythm_ok = float(raw_15m or 0.0) >= float(self.config.entry_quality_ema_require_15m_raw_min)
+        trend_ok = float(adx or 0.0) >= float(self.config.entry_quality_ema_require_adx_min)
+        if price_ok and rhythm_ok and trend_ok:
+            return raw_mult
+        logger.debug(
+            "EMA mult capped %.2f->%.2f: price_ok=%s rhythm_ok=%s trend_ok=%s",
+            raw_mult,
+            float(self.config.entry_quality_ema_fallback_mult),
+            price_ok,
+            rhythm_ok,
+            trend_ok,
+        )
+        return float(self.config.entry_quality_ema_fallback_mult)
 
     @classmethod
     def _normalized_change(cls, current: float, previous: float) -> float:
@@ -4939,6 +5163,23 @@ class MACDStrategyV2Engine:
             bb_upper_15m=bb_upper_15m,
             bb_lower_15m=bb_lower_15m,
         )
+        ema_multiplier_raw = ema_multiplier
+        ema_multiplier = self._resolve_ema_multiplier(
+            ema_raw_mult=ema_multiplier,
+            vwap_dev_pct=vwap_deviation,
+            raw_15m=float(rsi_rhythm.get("raw_score", 0.0)),
+            adx=adx_1h,
+            direction=trade_direction,
+        )
+        if ema_multiplier != ema_multiplier_raw:
+            ema_status = "normal" if ema_multiplier >= float(self.config.ema_multiplier_normal) else ema_status
+        debug_details = self._set_stage(
+            debug_details,
+            "ema_conditional_multiplier",
+            ema_conditional_multiplier_enabled=bool(self.config.entry_quality_ema_conditional_multiplier_enabled),
+            ema_multiplier_raw=ema_multiplier_raw,
+            ema_multiplier=ema_multiplier,
+        )
         rsi_launch_sovereign = self._evaluate_rsi_launch_sovereign_mode(
             trade_direction=trade_direction,
             signal_type_1h=details_1h.get('signal_type'),
@@ -5976,6 +6217,108 @@ class MACDStrategyV2Engine:
                     **debug_details,
                 ),
             )
+
+        flip_quality_guard = self._apply_flip_bullish_size_guard(
+            signal_4h=signal_type_4h,
+            signal_1h=signal_type_1h,
+            vwap_dev_pct=vwap_deviation,
+            raw_15m=score_rsi_rhythm_raw,
+            entry_15m=entry_type_15m,
+            current_portion=combo_max_portion if combo_max_portion > 0 else 9999.0,
+        )
+        flip_quality_action = str(flip_quality_guard.get("action") or "PASS").upper()
+        debug_details = self._set_stage(
+            debug_details,
+            "flip_bullish_size_guard",
+            flip_bullish_size_guard_enabled=bool(self.config.entry_quality_flip_bullish_size_guard_enabled),
+            flip_bullish_size_guard_action=flip_quality_action,
+            flip_bullish_size_guard_reason=str(flip_quality_guard.get("reason") or ""),
+            flip_bullish_size_guard_max_portion=float(flip_quality_guard.get("max_portion", 0.0) or 0.0),
+        )
+        if flip_quality_action == "BLOCK":
+            return self._neutral_signal(
+                reason=str(flip_quality_guard.get("reason") or "flip_bullish_size_guard_block"),
+                score=score,
+                signal_type_1h=signal_type_1h,
+                entry_type_15m=entry_type_15m,
+                entry_score_15m=entry_score_15m,
+                vwap_score=vwap_score,
+                vwap_deviation=vwap_deviation,
+                vwap_state=vwap_state,
+                vwap_location_score=vwap_location_score,
+                ema_multiplier=ema_multiplier,
+                ema_structure_status=ema_status,
+                enhancement_score=enhancement_score,
+                is_4h_enhanced=is_4h_enhanced,
+                is_trial_entry=is_trial_entry,
+                entry_scale=entry_scale,
+                details=self._build_debug_details(**debug_details),
+            )
+        if flip_quality_action in {"PROBE", "PASS"} and float(flip_quality_guard.get("max_portion", 0.0) or 0.0) > 0:
+            flip_cap = float(flip_quality_guard.get("max_portion", 0.0) or 0.0)
+            if flip_cap < 9999.0:
+                combo_max_portion = min(combo_max_portion, flip_cap) if combo_max_portion > 0 else flip_cap
+
+        gate_15m = self._apply_15m_entry_gate(
+            direction=trade_direction,
+            raw_15m=score_rsi_rhythm_raw,
+            entry_15m=entry_type_15m,
+            vwap_dev_pct=vwap_deviation,
+            adx=adx_1h,
+            regime=market_regime,
+            signal_4h=signal_type_4h,
+            signal_1h=signal_type_1h,
+            current_portion=combo_max_portion if combo_max_portion > 0 else 9999.0,
+        )
+        gate_15m_action = str(gate_15m.get("action") or "PASS").upper()
+        debug_details = self._set_stage(
+            debug_details,
+            "15m_entry_gate",
+            entry_quality_15m_gate_enabled=bool(self.config.entry_quality_15m_hard_gate_enabled),
+            entry_quality_15m_gate_action=gate_15m_action,
+            entry_quality_15m_gate_reason=str(gate_15m.get("reason") or ""),
+            entry_quality_15m_gate_risk_count=int(gate_15m.get("risk_count", 0) or 0),
+            entry_quality_15m_gate_max_portion=float(gate_15m.get("max_portion", 0.0) or 0.0),
+        )
+        if gate_15m_action == "BLOCK":
+            return self._neutral_signal(
+                reason=str(gate_15m.get("reason") or "15m_entry_gate_block"),
+                score=score,
+                signal_type_1h=signal_type_1h,
+                entry_type_15m=entry_type_15m,
+                entry_score_15m=entry_score_15m,
+                vwap_score=vwap_score,
+                vwap_deviation=vwap_deviation,
+                vwap_state=vwap_state,
+                vwap_location_score=vwap_location_score,
+                ema_multiplier=ema_multiplier,
+                ema_structure_status=ema_status,
+                enhancement_score=enhancement_score,
+                is_4h_enhanced=is_4h_enhanced,
+                is_trial_entry=is_trial_entry,
+                entry_scale=entry_scale,
+                details=self._build_debug_details(**debug_details),
+            )
+        if gate_15m_action in {"PROBE", "PASS"} and float(gate_15m.get("max_portion", 0.0) or 0.0) > 0:
+            gate_cap = float(gate_15m.get("max_portion", 0.0) or 0.0)
+            if gate_cap < 9999.0:
+                combo_max_portion = min(combo_max_portion, gate_cap) if combo_max_portion > 0 else gate_cap
+
+        regime_cap = self._apply_regime_size_cap(
+            direction=trade_direction,
+            adx=adx_1h,
+            regime=market_regime,
+            current_portion=combo_max_portion if combo_max_portion > 0 else 9999.0,
+            signal_score=score,
+        )
+        debug_details = self._set_stage(
+            debug_details,
+            "adx_regime_size_cap",
+            adx_regime_size_cap_enabled=bool(self.config.entry_quality_adx_regime_size_cap_enabled),
+            adx_regime_size_cap_portion=regime_cap,
+        )
+        if regime_cap < 9999.0:
+            combo_max_portion = min(combo_max_portion, regime_cap) if combo_max_portion > 0 else regime_cap
         
         # ========== Step 9: 计算止损 ==========
         stop_price, stop_pct, stop_details = self.calculate_dynamic_stop(
