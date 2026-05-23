@@ -15,6 +15,7 @@ from src.fund_flow.weight_router import WeightRouter
 from src.fund_flow.macd_strategy import MACDStrategyEngine, MACDStrategyConfig, MACDSignal
 # MACD多时间框架策略 V2.0 (VWAP + BOLL 增强版)
 from src.fund_flow.macd_strategy_v2 import MACDStrategyV2Engine, MACDStrategyV2Config, MACDSignalV2, VetoType
+from src.fund_flow.btc_entry_regime import BtcEntryRegimeGate
 from src.fund_flow.filters.symbol_signal_override import SymbolSignalOverrideRegistry
 from src.fund_flow.filters.time_window_filter import TimeWindowFilter, TimeWindowFilterConfig
 from src.fund_flow.v3_filter_integration import V3FilterManager
@@ -68,6 +69,9 @@ class FundFlowDecisionEngine:
         self.take_profit_pct = self._normalize_pct_ratio(take_profit_raw, 0.03)
 
         self.engine_params_cfg = ff.get("engine_params", {}) if isinstance(ff.get("engine_params"), dict) else {}
+        self.btc_entry_regime_gate = BtcEntryRegimeGate(
+            ff.get("btc_entry_regime_gate", {}) if isinstance(ff.get("btc_entry_regime_gate"), dict) else {}
+        )
         self.active_signal_pool_id = str(ff.get("active_signal_pool_id", "default_pool") or "default_pool")
         notional_cfg = ff.get("min_open_notional", {}) if isinstance(ff.get("min_open_notional"), dict) else {}
         self.min_open_notional_default = self._to_float(notional_cfg.get("default_usdt"), 2.0)
@@ -512,6 +516,21 @@ class FundFlowDecisionEngine:
             entry_quality_ema_cfg = (
                 entry_quality_cfg.get("ema_conditional_multiplier", {})
                 if isinstance(entry_quality_cfg.get("ema_conditional_multiplier"), dict)
+                else {}
+            )
+            entry_quality_vwap_score_cfg = (
+                entry_quality_cfg.get("vwap_score_hard_block", {})
+                if isinstance(entry_quality_cfg.get("vwap_score_hard_block"), dict)
+                else {}
+            )
+            entry_quality_no_trade_cfg = (
+                entry_quality_cfg.get("no_trade_gate", {})
+                if isinstance(entry_quality_cfg.get("no_trade_gate"), dict)
+                else {}
+            )
+            entry_quality_range_cfg = (
+                entry_quality_cfg.get("range_gate", {})
+                if isinstance(entry_quality_cfg.get("range_gate"), dict)
                 else {}
             )
             exit_mgmt_cfg = v2_cfg.get("exit_management", {}) if isinstance(v2_cfg.get("exit_management"), dict) else {}
@@ -1293,6 +1312,37 @@ class FundFlowDecisionEngine:
                     entry_quality_ema_cfg.get("require_adx_min"),
                     20.0,
                 ),
+                entry_quality_vwap_score_hard_block_enabled=bool(entry_quality_vwap_score_cfg.get("enabled", False)),
+                entry_quality_vwap_score_below_block=self._to_float(
+                    entry_quality_vwap_score_cfg.get("below_block"),
+                    0.12,
+                ),
+                entry_quality_vwap_score_below_probe=self._to_float(
+                    entry_quality_vwap_score_cfg.get("below_probe"),
+                    0.30,
+                ),
+                entry_quality_vwap_score_probe_max=self._to_float(
+                    entry_quality_vwap_score_cfg.get("probe_max"),
+                    0.042,
+                ),
+                entry_quality_no_trade_gate_enabled=bool(entry_quality_no_trade_cfg.get("enabled", False)),
+                entry_quality_no_trade_block_below_score=self._to_float(
+                    entry_quality_no_trade_cfg.get("block_below_score"),
+                    0.85,
+                ),
+                entry_quality_no_trade_probe_max=self._to_float(
+                    entry_quality_no_trade_cfg.get("probe_max"),
+                    0.042,
+                ),
+                entry_quality_range_gate_enabled=bool(entry_quality_range_cfg.get("enabled", False)),
+                entry_quality_range_block_below_score=self._to_float(
+                    entry_quality_range_cfg.get("block_below_score"),
+                    0.80,
+                ),
+                entry_quality_range_probe_max=self._to_float(
+                    entry_quality_range_cfg.get("probe_max"),
+                    0.060,
+                ),
                 enable_meaningful_short_entry_cap=(
                     bool(short_side_enable_cfg)
                     and not bool(short_side_enable_cfg.get("meaningful", True))
@@ -2069,6 +2119,20 @@ class FundFlowDecisionEngine:
         local_metadata["is_trial_entry"] = is_trial_entry
         local_metadata["entry_scale"] = entry_scale
         local_metadata["rsi_probe_mode"] = rsi_probe_mode
+        local_metadata["gate_cap_applied"] = bool((signal.details or {}).get("gate_cap_applied", False))
+        local_metadata["gate_cap_portion"] = self._to_float((signal.details or {}).get("gate_cap_portion"), 0.0)
+        proposed_operation = Operation.BUY if side == "long" else Operation.SELL
+        pretrade_block = self._apply_entry_quality_pretrade_gates(
+            symbol=symbol,
+            signal=signal,
+            metadata=local_metadata,
+            proposed_operation=proposed_operation,
+            portion=portion,
+            btc_rets_4bar=self._extract_btc_rets_4bar(metadata),
+        )
+        if pretrade_block is not None:
+            return pretrade_block
+        portion = min(portion, self._to_float(local_metadata.get("entry_quality_portion_cap"), portion))
         local_metadata["competition_score"] = self._resolve_macd_v2_competition_score(signal, macd_v2_engine)
         local_metadata["final_leverage_after_rsi"] = leverage
         portion = self._apply_macd_v2_vol_vwap_warn_position_scale(portion, signal, local_metadata)
@@ -2162,6 +2226,95 @@ class FundFlowDecisionEngine:
             reason=f"macd_v2_regime_short_{regime_state.get('state')}_vwap_{signal.vwap_score:.2f}",
             metadata=local_metadata,
         )
+
+    def _apply_entry_quality_pretrade_gates(
+        self,
+        *,
+        symbol: str,
+        signal: MACDSignalV2,
+        metadata: Dict[str, Any],
+        proposed_operation: Operation,
+        portion: float,
+        btc_rets_4bar: Sequence[float],
+    ) -> Optional[FundFlowDecision]:
+        direction = "long" if proposed_operation == Operation.BUY else "short"
+        capped_portion = float(portion or 0.0)
+
+        btc_values = [self._to_float(x, 0.0) for x in (btc_rets_4bar or [])]
+        btc_regime = self.btc_entry_regime_gate.detect_btc_regime(list(btc_values))
+        btc_gate = self.btc_entry_regime_gate.check_entry(
+            direction=direction,
+            btc_regime=btc_regime,
+            vwap_score=float(signal.vwap_score or 0.0),
+            vwap_dev_pct=float(signal.vwap_deviation or 0.0),
+            signal_4h=str((signal.details or {}).get("signal_type_4h", "") or ""),
+            btc_cumret_4bar=sum(btc_values[-4:]) if btc_values else 0.0,
+        )
+        btc_action = str(btc_gate.get("action") or "PASS").upper()
+        metadata["btc_entry_regime_gate"] = {
+            **btc_gate,
+            "btc_regime": btc_regime.value,
+            "btc_rets_4bar": btc_values[-4:],
+        }
+        if btc_action == "BLOCK":
+            return FundFlowDecision(
+                operation=Operation.HOLD,
+                symbol=symbol,
+                reason="btc_entry_regime_block",
+                metadata=metadata,
+            )
+        if btc_action in {"PROBE", "PROBE_CAP"}:
+            capped_portion = min(capped_portion, self._to_float(btc_gate.get("max_portion"), capped_portion))
+
+        macd_engine = self.macd_v2_engine if isinstance(self.macd_v2_engine, MACDStrategyV2Engine) else MACDStrategyV2Engine(self.macd_v2_config)
+        regime_gate = macd_engine._check_regime_entry_block(
+            regime=str((signal.details or {}).get("market_regime") or metadata.get("regime") or ""),
+            direction=direction,
+            signal_score=float(signal.signal_score or 0.0),
+        )
+        regime_action = str(regime_gate.get("action") or "PASS").upper()
+        metadata["regime_entry_gate"] = dict(regime_gate)
+        if regime_action == "BLOCK":
+            return FundFlowDecision(
+                operation=Operation.HOLD,
+                symbol=symbol,
+                reason="regime_entry_block",
+                metadata=metadata,
+            )
+        if regime_action in {"PROBE", "PROBE_CAP"}:
+            capped_portion = min(capped_portion, self._to_float(regime_gate.get("max_portion"), capped_portion))
+
+        vwap_gate = macd_engine._apply_vwap_score_entry_gate(
+            vwap_score=float(signal.vwap_score or 0.0),
+            current_portion=capped_portion,
+        )
+        vwap_action = str(vwap_gate.get("action") or "PASS").upper()
+        metadata["vwap_score_entry_gate"] = dict(vwap_gate)
+        if vwap_action == "BLOCK":
+            return FundFlowDecision(
+                operation=Operation.HOLD,
+                symbol=symbol,
+                reason="vwap_score_entry_block",
+                metadata=metadata,
+            )
+        if vwap_action in {"PROBE", "PROBE_CAP"}:
+            capped_portion = min(capped_portion, self._to_float(vwap_gate.get("max_portion"), capped_portion))
+
+        if capped_portion < float(portion or 0.0):
+            metadata["entry_quality_portion_cap"] = capped_portion
+        return None
+
+    def _extract_btc_rets_4bar(self, market_flow_context: Dict[str, Any]) -> List[float]:
+        if not isinstance(market_flow_context, dict):
+            return []
+        raw = (
+            market_flow_context.get("btc_rets_4bar")
+            or market_flow_context.get("btc_15m_rets_4bar")
+            or market_flow_context.get("btc_returns_15m_4bar")
+        )
+        if not isinstance(raw, list):
+            return []
+        return [self._to_float(x, 0.0) for x in raw[-4:]]
 
     def _macd_v2_engine_config(self, macd_v2_engine: Any) -> Any:
         return getattr(macd_v2_engine, "config", None) or self.macd_v2_config
@@ -4552,6 +4705,7 @@ class FundFlowDecisionEngine:
             "entry_type_15m": signal.entry_type_15m,
             "vwap_score": signal.vwap_score,
             "vwap_deviation": signal.vwap_deviation,
+            "btc_rets_4bar": self._extract_btc_rets_4bar(market_flow_context),
             "vwap_state": signal.vwap_state,
             "vwap_location_score": signal.vwap_location_score,
             "stable_continuation_active": bool((signal.details or {}).get("stable_continuation_active", False)),
@@ -4864,6 +5018,19 @@ class FundFlowDecisionEngine:
                 (signal.details or {}).get("signal_score_threshold"),
                 self._to_float(metadata.get("signal_score_threshold"), 0.0),
             )
+            metadata["gate_cap_applied"] = bool((signal.details or {}).get("gate_cap_applied", False))
+            metadata["gate_cap_portion"] = self._to_float((signal.details or {}).get("gate_cap_portion"), 0.0)
+            pretrade_block = self._apply_entry_quality_pretrade_gates(
+                symbol=symbol,
+                signal=signal,
+                metadata=metadata,
+                proposed_operation=Operation.BUY,
+                portion=portion,
+                btc_rets_4bar=self._extract_btc_rets_4bar(market_flow_context),
+            )
+            if pretrade_block is not None:
+                return pretrade_block
+            portion = min(portion, self._to_float(metadata.get("entry_quality_portion_cap"), portion))
             portion = self._apply_macd_v2_vol_vwap_warn_position_scale(portion, signal, metadata)
             metadata["session_risk"] = {
                 "position_scale": float(session_position_scale),
@@ -5003,6 +5170,19 @@ class FundFlowDecisionEngine:
                 (signal.details or {}).get("signal_score_threshold"),
                 self._to_float(metadata.get("signal_score_threshold"), 0.0),
             )
+            metadata["gate_cap_applied"] = bool((signal.details or {}).get("gate_cap_applied", False))
+            metadata["gate_cap_portion"] = self._to_float((signal.details or {}).get("gate_cap_portion"), 0.0)
+            pretrade_block = self._apply_entry_quality_pretrade_gates(
+                symbol=symbol,
+                signal=signal,
+                metadata=metadata,
+                proposed_operation=Operation.SELL,
+                portion=portion,
+                btc_rets_4bar=self._extract_btc_rets_4bar(market_flow_context),
+            )
+            if pretrade_block is not None:
+                return pretrade_block
+            portion = min(portion, self._to_float(metadata.get("entry_quality_portion_cap"), portion))
             portion = self._apply_macd_v2_vol_vwap_warn_position_scale(portion, signal, metadata)
             metadata["session_risk"] = {
                 "position_scale": float(session_position_scale),

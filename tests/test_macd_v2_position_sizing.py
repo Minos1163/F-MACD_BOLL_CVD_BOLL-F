@@ -194,8 +194,30 @@ def test_15m_entry_gate_caps_dual_risk_long_to_probe() -> None:
     )
 
     assert result["action"] == "PROBE"
-    assert result["max_portion"] == pytest.approx(0.04)
-    assert "dual_risk" in result["reason"]
+    assert result["max_portion"] == pytest.approx(0.06)
+    assert "rbg_below_vwap" in result["reason"]
+
+
+def test_15m_entry_gate_caps_red_bar_growing_below_vwap_without_15m_confirmation() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(entry_quality_15m_hard_gate_enabled=True)
+    )
+
+    result = engine._apply_15m_entry_gate(
+        direction="long",
+        raw_15m=0.12,
+        entry_15m="-",
+        vwap_dev_pct=-0.0063,
+        adx=21.73,
+        regime="TREND",
+        signal_4h="red_bar_growing",
+        signal_1h="red_bar_growing",
+        current_portion=0.18,
+    )
+
+    assert result["action"] == "PROBE"
+    assert result["max_portion"] == pytest.approx(0.06)
+    assert "rbg_below_vwap" in result["reason"]
 
 
 def test_flip_bullish_size_guard_blocks_below_vwap_without_15m_confirmation() -> None:
@@ -254,6 +276,60 @@ def test_ema_multiplier_strong_requires_price_15m_and_adx_alignment() -> None:
 
     assert capped == pytest.approx(1.0)
     assert allowed == pytest.approx(1.2)
+
+
+def test_vwap_score_hard_block_blocks_extremely_low_entry_score() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(entry_quality_vwap_score_hard_block_enabled=True)
+    )
+
+    result = engine._apply_vwap_score_entry_gate(vwap_score=0.10, current_portion=0.18)
+
+    assert result["action"] == "BLOCK"
+    assert "vwap_score" in result["reason"]
+
+
+def test_vwap_score_hard_block_caps_low_entry_score_to_probe() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(entry_quality_vwap_score_hard_block_enabled=True)
+    )
+
+    result = engine._apply_vwap_score_entry_gate(vwap_score=0.25, current_portion=0.18)
+
+    assert result["action"] == "PROBE"
+    assert result["max_portion"] == pytest.approx(0.042)
+
+
+def test_regime_entry_block_blocks_low_score_no_trade_and_caps_high_score_range() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            entry_quality_no_trade_gate_enabled=True,
+            entry_quality_range_gate_enabled=True,
+        )
+    )
+
+    no_trade = engine._check_regime_entry_block(regime="NO_TRADE", direction="long", signal_score=0.80)
+    range_high = engine._check_regime_entry_block(regime="RANGE", direction="short", signal_score=0.82)
+
+    assert no_trade["action"] == "BLOCK"
+    assert range_high["action"] == "PROBE_CAP"
+    assert range_high["max_portion"] == pytest.approx(0.060)
+
+
+def test_macd_v2_dynamic_leverage_uses_three_four_five_ladder() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            rsi_probe_forced_leverage=3,
+            red_bar_growing_probe_max_leverage=3,
+            green_bar_growing_probe_max_leverage=3,
+            preflip_trial_max_leverage=3,
+        )
+    )
+
+    assert engine.calculate_leverage(0.86, signal_type_1h="red_bar_growing") == 5
+    assert engine.calculate_leverage(0.76, signal_type_1h="red_bar_growing") == 4
+    assert engine.calculate_leverage(0.70, signal_type_1h="red_bar_growing") == 3
+    assert engine.calculate_leverage(0.90, signal_type_1h="red_bar_growing", is_trial_entry=True) == 3
 
 
 def test_live_config_disables_total_compression_floor() -> None:

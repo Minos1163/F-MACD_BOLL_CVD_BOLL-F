@@ -52,7 +52,7 @@
     ],
     "min_leverage": 3,
     "default_leverage": 4,
-    "max_leverage": 5,
+    "max_leverage": 9,
     "high_signal_leverage_cap": 5,
     "min_position_percent": 12,
     "max_position_percent": 60,
@@ -215,12 +215,13 @@
     },
     "add_position_portion": 0.6,
     "max_symbol_position_portion": 0.35,
-    "max_active_symbols": 5,
+    "max_active_symbols": 9,
     "position_count_limit_by_margin": {
       "enabled": true,
       "small_margin_threshold_usdt": 5.0,
       "max_small_margin_positions": 5,
-      "max_large_margin_positions": 4
+      "max_large_margin_positions": 4,
+      "small_margin_leverage": 9
     },
     "min_open_notional": {
       "default_usdt": 2.0,
@@ -282,7 +283,7 @@
     },
     "dynamic_max_active_symbols": {
       "enabled": false,
-      "max_active_symbols": 5,
+      "max_active_symbols": 9,
       "min_signal_score": 0.9,
       "min_vwap_score": 0.1,
       "min_regime_adx": 18.0,
@@ -333,7 +334,7 @@
       "min_score_threshold": 0.8,
       "probe_portion": 0.06,
       "probe_min_open_portion": 0.042,
-      "probe_leverage_cap": 2
+      "probe_leverage_cap": 3
     },
     "position_exit_signal_guard": {
       "enabled": true,
@@ -353,6 +354,35 @@
       "mae_trigger_pct": -0.008,
       "block_dca_on_reverse": true,
       "reduce_pct": 0.5
+    },
+    "btc_beta_risk": {
+      "enabled": true,
+      "warmup_on_start": true,
+      "warmup_kline_limit": 50,
+      "default_corr_major_symbols": 0.4,
+      "min_corr_for_btc_weight": 0.2,
+      "btc_against_long_pct": -0.0015,
+      "btc_against_short_pct": 0.0015,
+      "alt_against_15m_pct": -0.001,
+      "alt_against_30m_pct": -0.0015,
+      "corr_window_bars": 48,
+      "fast_fail_window_bars": 2,
+      "fast_fail_mae_threshold": -0.002,
+      "fast_fail_mfe_threshold": 0.002,
+      "risk_score_reduce_threshold": 2,
+      "risk_score_close_threshold": 4,
+      "small_notional_close_threshold": 10.0,
+      "comment": "BTC 15M beta risk accelerates exits only; low-correlation symbols ignore BTC weight"
+    },
+    "btc_entry_regime_gate": {
+      "enabled": true,
+      "falling_avg_ret": -0.001,
+      "rising_avg_ret": 0.001,
+      "chase_short_block_bars": 4,
+      "chase_short_ret_threshold": -0.015,
+      "chase_short_block_vwap": 0.5,
+      "btc_falling_low_vwap_block": 0.3,
+      "btc_falling_below_vwap_probe_max": 0.042
     },
     "exit_cooldown": {
       "enabled": true,
@@ -402,7 +432,7 @@
     },
     "min_leverage": 3,
     "default_leverage": 4,
-    "max_leverage": 5,
+    "max_leverage": 9,
     "high_signal_leverage_cap": 5,
     "strict_leverage_sync": true,
     "account_risk": {
@@ -648,7 +678,7 @@
         "preflip_trial_min_signal_score": 0.66,
         "preflip_trial_min_vwap_score": 0.0,
         "preflip_trial_entry_scale": 0.35,
-        "preflip_trial_max_leverage": 2,
+        "preflip_trial_max_leverage": 3,
         "enable_trial_short_below_structure_continuation_promotion": true,
         "trial_short_below_structure_promotion_min_signal_score": 0.68,
         "trial_short_below_structure_promotion_min_vwap_score": 0.0,
@@ -703,7 +733,7 @@
         "flip_bullish_min_cvd_1h_delta_ratio": 0.03,
         "flip_bearish_min_boll_multiplier": 0.0,
         "flip_bearish_normal_boll_min_signal_score": 0.0,
-        "flip_bearish_normal_boll_max_leverage": 2,
+        "flip_bearish_normal_boll_max_leverage": 3,
         "flip_bearish_min_adx_1h": 30.0,
         "flip_bearish_retest_reject_min_vwap_score": 0.25,
         "flip_bearish_max_bb_middle_slope_1h": 0.0,
@@ -739,7 +769,7 @@
           "block_score": -0.3,
           "probe_exposure_mult": 0.2,
           "probe_portion_scale": 0.25,
-          "probe_forced_leverage": 2,
+          "probe_forced_leverage": 3,
           "adaptive_direction_gate": {
             "enabled": true,
             "soft_rsi_against_mult": 0.88,
@@ -810,16 +840,32 @@
           "require_price_vwap_aligned": true,
           "require_15m_raw_min": 0.25,
           "require_adx_min": 20.0
+        },
+        "vwap_score_hard_block": {
+          "enabled": true,
+          "below_block": 0.12,
+          "below_probe": 0.3,
+          "probe_max": 0.042
+        },
+        "no_trade_gate": {
+          "enabled": true,
+          "block_below_score": 0.85,
+          "probe_max": 0.042
+        },
+        "range_gate": {
+          "enabled": true,
+          "block_below_score": 0.8,
+          "probe_max": 0.06
         }
       },
       "position_management": {
         "priority_allocation_overdraft_pct": 0.08,
         "enable_red_bar_growing_probe_overlay": false,
         "red_bar_growing_probe_position_penalty": 0.5,
-        "red_bar_growing_probe_max_leverage": 2,
+        "red_bar_growing_probe_max_leverage": 3,
         "enable_green_bar_growing_probe_overlay": true,
         "green_bar_growing_probe_position_penalty": 0.25,
-        "green_bar_growing_probe_max_leverage": 2,
+        "green_bar_growing_probe_max_leverage": 3,
         "probe_penalty_floor_notional_usdt": 2.0,
         "vol_vwap_warn_position_scale": 0.5,
         "vol_vwap_warn_scale_min_notional_guard": {
@@ -1163,7 +1209,7 @@
     },
     "engine_params": {
       "TREND": {
-        "max_active_symbols": 5,
+        "max_active_symbols": 9,
         "default_target_portion": 0.6,
         "add_position_portion": 0.6,
         "max_symbol_position_portion": 0.6,
@@ -1213,7 +1259,7 @@
         }
       },
       "RANGE": {
-        "max_active_symbols": 5,
+        "max_active_symbols": 9,
         "default_target_portion": 0.6,
         "add_position_portion": 0.6,
         "max_symbol_position_portion": 0.6,
@@ -1651,7 +1697,7 @@
                 "position_management": {
                   "enable_green_bar_growing_probe_overlay": true,
                   "green_bar_growing_probe_position_penalty": 0.25,
-                  "green_bar_growing_probe_max_leverage": 2,
+                  "green_bar_growing_probe_max_leverage": 3,
                   "probe_penalty_floor_notional_usdt": 2.0,
                   "vol_vwap_warn_position_scale": 0.5,
                   "vol_vwap_warn_scale_min_notional_guard": {
@@ -1728,7 +1774,7 @@
                   "preflip_trial_min_signal_score": 0.77,
                   "preflip_trial_min_vwap_score": 0.06,
                   "preflip_trial_entry_scale": 0.35,
-                  "preflip_trial_max_leverage": 2
+                  "preflip_trial_max_leverage": 3
                 },
                 "stop_loss_config": {
                   "enable_4h_shrink_exit": true,
@@ -1759,7 +1805,7 @@
                   "preflip_trial_min_signal_score": 0.77,
                   "preflip_trial_min_vwap_score": 0.06,
                   "preflip_trial_entry_scale": 0.35,
-                  "preflip_trial_max_leverage": 2,
+                  "preflip_trial_max_leverage": 3,
                   "enable_green_bar_growing_short_adx_1h_range_filter": true,
                   "green_bar_growing_short_min_adx_1h": 25.0,
                   "green_bar_growing_short_max_adx_1h": 30.0,
@@ -1796,7 +1842,7 @@
                   "preflip_trial_min_signal_score": 0.77,
                   "preflip_trial_min_vwap_score": 0.06,
                   "preflip_trial_entry_scale": 0.35,
-                  "preflip_trial_max_leverage": 2,
+                  "preflip_trial_max_leverage": 3,
                   "enable_green_bar_growing_short_adx_1h_range_filter": true,
                   "green_bar_growing_short_min_adx_1h": 20.0,
                   "green_bar_growing_short_max_adx_1h": 30.0,
@@ -1837,7 +1883,7 @@
                   "preflip_trial_min_signal_score": 0.77,
                   "preflip_trial_min_vwap_score": 0.06,
                   "preflip_trial_entry_scale": 0.35,
-                  "preflip_trial_max_leverage": 2,
+                  "preflip_trial_max_leverage": 3,
                   "enable_green_bar_growing_short_adx_1h_range_filter": true,
                   "green_bar_growing_short_min_adx_1h": 25.0,
                   "green_bar_growing_short_max_adx_1h": 30.0,
@@ -1893,7 +1939,7 @@
                   "preflip_trial_min_signal_score": 0.77,
                   "preflip_trial_min_vwap_score": 0.06,
                   "preflip_trial_entry_scale": 0.35,
-                  "preflip_trial_max_leverage": 2,
+                  "preflip_trial_max_leverage": 3,
                   "enable_green_bar_growing_short_adx_1h_range_filter": true,
                   "green_bar_growing_short_min_adx_1h": 25.0,
                   "green_bar_growing_short_max_adx_1h": 30.0,
@@ -1948,7 +1994,7 @@
                   "preflip_trial_min_signal_score": 0.77,
                   "preflip_trial_min_vwap_score": 0.06,
                   "preflip_trial_entry_scale": 0.35,
-                  "preflip_trial_max_leverage": 2,
+                  "preflip_trial_max_leverage": 3,
                   "enable_green_bar_growing_short_adx_1h_range_filter": true,
                   "green_bar_growing_short_min_adx_1h": 25.0,
                   "green_bar_growing_short_max_adx_1h": 30.0,
@@ -2008,7 +2054,7 @@
                   "preflip_trial_min_signal_score": 0.77,
                   "preflip_trial_min_vwap_score": 0.06,
                   "preflip_trial_entry_scale": 0.35,
-                  "preflip_trial_max_leverage": 2,
+                  "preflip_trial_max_leverage": 3,
                   "enable_green_bar_growing_short_adx_1h_range_filter": true,
                   "green_bar_growing_short_min_adx_1h": 25.0,
                   "green_bar_growing_short_max_adx_1h": 30.0,
@@ -2061,7 +2107,7 @@
                     "TRUMPUSDT"
                   ],
                   "watchlist_max_position_portion": 0.4,
-                  "watchlist_max_leverage": 2,
+                  "watchlist_max_leverage": 3,
                   "watchlist_apply_session_scale_double": true,
                   "watchlist_session_scale_multiplier": 0.8
                 }
@@ -2154,7 +2200,7 @@
                     "TRUMPUSDT"
                   ],
                   "watchlist_max_position_portion": 0.4,
-                  "watchlist_max_leverage": 2,
+                  "watchlist_max_leverage": 3,
                   "watchlist_apply_session_scale_double": true,
                   "watchlist_session_scale_multiplier": 0.8
                 }
@@ -2394,7 +2440,7 @@
                 "position_management": {
                   "enable_red_bar_growing_probe_overlay": true,
                   "red_bar_growing_probe_position_penalty": 0.5,
-                  "red_bar_growing_probe_max_leverage": 2
+                  "red_bar_growing_probe_max_leverage": 3
                 }
               }
             }
@@ -2450,7 +2496,7 @@
             "JSTUSDT",
             "FETUSDT"
           ],
-          "max_active_symbols": 5,
+          "max_active_symbols": 9,
           "config_overrides": {
             "fund_flow": {
               "macd_mtf_strategy_v2": {

@@ -67,3 +67,24 @@ def test_pre_live_assertions_reject_disabled_15m_quality_gate(tmp_path: Path) ->
 
     assert result.returncode == 1
     assert "entry_quality_gates.15m_hard_gate.enabled" in result.stdout
+
+
+def test_pre_live_assertions_reject_disabled_btc_entry_regime_gate(tmp_path: Path) -> None:
+    cfg = json.loads(Path("config/trading_config_fund_flow.json").read_text(encoding="utf-8"))
+    cfg["fund_flow"]["btc_entry_regime_gate"]["enabled"] = False
+    cfg["fund_flow"]["btc_beta_risk"]["warmup_on_start"] = False
+    cfg["fund_flow"]["macd_mtf_strategy_v2"]["entry_quality_gates"]["vwap_score_hard_block"]["enabled"] = False
+    bad_cfg = tmp_path / "bad_btc_gate_config.json"
+    bad_cfg.write_text(json.dumps(cfg), encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, "scripts/pre_live_assertions.py", "--config", str(bad_cfg)],
+        cwd=Path(__file__).resolve().parents[1],
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 1
+    assert "btc_entry_regime_gate.enabled" in result.stdout
+    assert "btc_beta_risk.warmup_on_start" in result.stdout
+    assert "entry_quality_gates.vwap_score_hard_block.enabled" in result.stdout

@@ -11,6 +11,7 @@ import atexit
 import argparse
 import csv
 from dataclasses import dataclass
+import hashlib
 import json
 import math
 import os
@@ -55,6 +56,8 @@ from src.fund_flow.log_compaction import (
     compact_json_dumps,
     compact_trigger_context_payload,
 )
+from src.fund_flow.btc_beta_risk import BtcBetaRiskConfig, BtcBetaRiskScorer
+from src.fund_flow.exit_signal_guard import PositionExitSignalGuard
 try:
     from src.risk.enhanced_risk import RiskConfig as _ImportedRiskConfig
 except ModuleNotFoundError:
@@ -74,6 +77,38 @@ if _ImportedRiskConfig is None:
     RiskConfig = _FallbackRiskConfig
 else:
     RiskConfig = _ImportedRiskConfig
+
+
+class ExitCooldownRegistry:
+    """Tracks same-side entry cooldown after an exit."""
+
+    def __init__(self, cooldown_seconds: int = 1800, now_func: Any = None) -> None:
+        self._cooldown_sec = max(0, int(cooldown_seconds))
+        self._now_func = now_func or time.time
+        self._exits: Dict[str, Dict[str, Any]] = {}
+
+    def register_exit(self, symbol: str, side: str) -> None:
+        symbol_up = str(symbol or "").upper()
+        side_up = str(side or "").upper()
+        if not symbol_up or side_up not in {"LONG", "SHORT"} or self._cooldown_sec <= 0:
+            return
+        self._exits[symbol_up] = {"side": side_up, "ts": float(self._now_func())}
+        print(f"[COOLDOWN] {symbol_up} {side_up} exit registered, cooldown={self._cooldown_sec}s")
+
+    def is_blocked(self, symbol: str, proposed_side: str) -> bool:
+        symbol_up = str(symbol or "").upper()
+        side_up = str(proposed_side or "").upper()
+        entry = self._exits.get(symbol_up)
+        if not entry or side_up not in {"LONG", "SHORT"}:
+            return False
+        elapsed = float(self._now_func()) - float(entry.get("ts", 0.0) or 0.0)
+        if elapsed > self._cooldown_sec:
+            self._exits.pop(symbol_up, None)
+            return False
+        blocked = str(entry.get("side") or "").upper() == side_up
+        if blocked:
+            print(f"[COOLDOWN] {symbol_up} {side_up} blocked, elapsed={elapsed:.0f}s/{self._cooldown_sec}s")
+        return blocked
 
 
 def format_macd_v2_score_line(
@@ -330,6 +365,11 @@ class TradingBot:
         self._conflict_exit_streak_by_symbol: Dict[str, int] = {}
         self._conflict_cooldown_until_by_symbol: Dict[str, datetime] = {}
         self._conflict_cooldown_reason_by_symbol: Dict[str, str] = {}
+        self.exit_signal_guard = PositionExitSignalGuard(self._position_exit_signal_guard_config())
+        self.btc_beta_scorer = BtcBetaRiskScorer(self._btc_beta_risk_config())
+        exit_cd_cfg = self._exit_cooldown_config()
+        self.exit_cooldown = ExitCooldownRegistry(int(exit_cd_cfg.get("cooldown_seconds", 1800)))
+        self._dca_blocked_by_exit_guard: set[str] = set()
         self._prev_imbalance_for_phantom: Dict[str, float] = {}
         self._micro_feature_history: Dict[str, Dict[str, Deque[float]]] = {}
         self._signal_registry_version: str = ""
@@ -360,7 +400,49 @@ class TradingBot:
         if mode != "FUND_FLOW":
             print(f"⚠️ 当前 strategy.mode={mode}，仍按 FUND_FLOW 运行（旧模式逻辑已移除）")
 
+    def _build_config_fingerprint_snapshot(self) -> Dict[str, Any]:
+        ff_cfg = self.config.get("fund_flow", {}) if isinstance(self.config, dict) else {}
+        v2_cfg = ff_cfg.get("macd_mtf_strategy_v2", {}) if isinstance(ff_cfg.get("macd_mtf_strategy_v2"), dict) else {}
+        weights = v2_cfg.get("scoring_weights", {}) if isinstance(v2_cfg.get("scoring_weights"), dict) else {}
+        vwap_cfg = v2_cfg.get("vwap_config", {}) if isinstance(v2_cfg.get("vwap_config"), dict) else {}
+        vwap_gate = vwap_cfg.get("vwap_deviation_gate", {}) if isinstance(vwap_cfg.get("vwap_deviation_gate"), dict) else {}
+        entry_filters = v2_cfg.get("entry_filters", {}) if isinstance(v2_cfg.get("entry_filters"), dict) else {}
+        partial_confirm = v2_cfg.get("partial_confirm", {}) if isinstance(v2_cfg.get("partial_confirm"), dict) else {}
+        dynamic = v2_cfg.get("dynamic_position_sizing", {}) if isinstance(v2_cfg.get("dynamic_position_sizing"), dict) else {}
+        caps = dynamic.get("signal_type_caps", {}) if isinstance(dynamic.get("signal_type_caps"), dict) else {}
+        red_shrink = caps.get("red_bar_shrinking", {}) if isinstance(caps.get("red_bar_shrinking"), dict) else {}
+        probe = ff_cfg.get("probe_floor_rescue", {}) if isinstance(ff_cfg.get("probe_floor_rescue"), dict) else {}
+        exit_guard = ff_cfg.get("position_exit_signal_guard", {}) if isinstance(ff_cfg.get("position_exit_signal_guard"), dict) else {}
+        return {
+            "config_path": str(getattr(self, "config_path", "")),
+            "probe_shadow": bool(probe.get("shadow_mode", True)),
+            "probe_min_open": self._to_float(probe.get("probe_min_open_portion"), 0.0),
+            "weight_rsi": self._to_float(weights.get("weight_rsi_rhythm"), 0.0),
+            "weight_4h": self._to_float(weights.get("weight_4h_direction"), 0.0),
+            "weight_4h_enh": self._to_float(weights.get("weight_4h_enhancement"), 0.0),
+            "vwap_gate_mode": str(vwap_gate.get("mode") or "LEGACY"),
+            "vwap_hard_block": self._to_float(vwap_cfg.get("vwap_deviation_hard_block"), 0.0),
+            "vwap_block_atr_multiplier": self._to_float(vwap_gate.get("block_atr_multiplier"), 0.0),
+            "vwap_probe_max_portion": self._to_float(vwap_gate.get("probe_max_portion"), 0.0),
+            "neutral_upg_rsi": self._to_float(entry_filters.get("neutral_upgrade_min_rsi_score"), 0.0),
+            "pc_shadow": partial_confirm.get("shadow_mode", "MISSING"),
+            "pc_enabled": bool(partial_confirm.get("enabled", False)),
+            "exit_guard": bool(exit_guard.get("enabled", False)),
+            "exit_guard_bars": int(self._to_float(exit_guard.get("confirm_bars_required"), 0.0)),
+            "shrink_cap_1h": "signal_1h" in (red_shrink.get("apply_to") or []),
+        }
+
+    def _print_config_fingerprint(self) -> None:
+        snapshot = self._build_config_fingerprint_snapshot()
+        cfg_hash = hashlib.md5(
+            json.dumps(snapshot, sort_keys=True, ensure_ascii=True).encode("utf-8")
+        ).hexdigest()[:8]
+        parts = [f"{key}={value}" for key, value in snapshot.items()]
+        print(f"[CONFIG_FINGERPRINT] hash={cfg_hash} | " + " | ".join(parts))
+
     def _configure_runtime_log_sink(self) -> None:
+        if not bool((self.config.get("logging", {}) or {}).get("runtime_file_enabled", True)):
+            return
         if isinstance(sys.stdout, _DualWriter) and isinstance(sys.stderr, _DualWriter):
             return
         out_mirror = _SixHourBucketFile(self.log_root_dir, "runtime.out.log")
@@ -847,9 +929,11 @@ class TradingBot:
     def _append_api_cycle_stats_log(self, payload: Dict[str, Any]) -> None:
         if not isinstance(payload, dict) or not payload:
             return
+        if not bool((self.config.get("logging", {}) or {}).get("api_cycle_stats_enabled", True)):
+            return
         log_path = self._resolve_api_cycle_stats_log_path_utc()
         with open(log_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            f.write(compact_json_dumps(payload) + "\n")
 
     @staticmethod
     def _normalize_trade_fill_fee(fee: float) -> float:
@@ -1051,6 +1135,7 @@ class TradingBot:
             f"lookback={startup_cfg.get('lookback_minutes')}m, "
             f"interval={startup_cfg.get('kline_interval')}"
         )
+        self._print_config_fingerprint()
         schedule_cfg = self.config.get("schedule", {}) or {}
         tf_seconds = self._decision_timeframe_seconds()
         print(
@@ -2018,6 +2103,287 @@ class TradingBot:
             "allow_high_leverage_opt_in": dca_high_leverage_opt_in,
             "disabled_by_high_leverage": disabled_by_high_leverage,
         }
+
+    def _position_exit_signal_guard_config(self) -> Dict[str, Any]:
+        ff_cfg = self.config.get("fund_flow", {}) if isinstance(self.config, dict) else {}
+        raw = ff_cfg.get("position_exit_signal_guard", {}) if isinstance(ff_cfg.get("position_exit_signal_guard"), dict) else {}
+        return {
+            "enabled": bool(raw.get("enabled", False)),
+            "bearish_1h_signals": raw.get(
+                "bearish_1h_signals",
+                ["flip_bearish", "green_bar_growing", "green_bar_shrinking", "red_bar_shrinking"],
+            ),
+            "bullish_1h_signals": raw.get(
+                "bullish_1h_signals",
+                ["flip_bullish", "red_bar_growing", "red_bar_shrinking", "green_bar_shrinking"],
+            ),
+            "confirm_bars_required": max(1, int(self._to_float(raw.get("confirm_bars_required"), 2))),
+            "mae_trigger_pct": self._to_float(raw.get("mae_trigger_pct"), -0.008),
+            "block_dca_on_reverse": bool(raw.get("block_dca_on_reverse", True)),
+            "reduce_pct": max(0.0, min(1.0, self._to_float(raw.get("reduce_pct"), 0.50))),
+        }
+
+    def _btc_beta_risk_config(self) -> BtcBetaRiskConfig:
+        ff_cfg = self.config.get("fund_flow", {}) if isinstance(self.config, dict) else {}
+        raw = ff_cfg.get("btc_beta_risk", {}) if isinstance(ff_cfg.get("btc_beta_risk"), dict) else {}
+        return BtcBetaRiskConfig(
+            enabled=self._to_bool(raw.get("enabled"), False),
+            warmup_on_start=self._to_bool(raw.get("warmup_on_start"), True),
+            warmup_kline_limit=max(10, int(self._to_float(raw.get("warmup_kline_limit"), 50))),
+            default_corr_major_symbols=self._to_float(raw.get("default_corr_major_symbols"), 0.40),
+            min_corr_for_btc_weight=self._to_float(raw.get("min_corr_for_btc_weight"), 0.20),
+            btc_against_long_pct=self._to_float(raw.get("btc_against_long_pct"), -0.0015),
+            btc_against_short_pct=self._to_float(raw.get("btc_against_short_pct"), 0.0015),
+            alt_against_15m_pct=self._to_float(raw.get("alt_against_15m_pct"), -0.0010),
+            alt_against_30m_pct=self._to_float(raw.get("alt_against_30m_pct"), -0.0015),
+            corr_window_bars=max(10, int(self._to_float(raw.get("corr_window_bars"), 48))),
+            fast_fail_window_bars=max(1, int(self._to_float(raw.get("fast_fail_window_bars"), 2))),
+            fast_fail_mae_threshold=self._to_float(raw.get("fast_fail_mae_threshold"), -0.002),
+            fast_fail_mfe_threshold=self._to_float(raw.get("fast_fail_mfe_threshold"), 0.002),
+            risk_score_reduce_threshold=max(1, int(self._to_float(raw.get("risk_score_reduce_threshold"), 2))),
+            risk_score_close_threshold=max(1, int(self._to_float(raw.get("risk_score_close_threshold"), 4))),
+            small_notional_close_threshold=self._to_float(raw.get("small_notional_close_threshold"), 10.0),
+        )
+
+    def _exit_cooldown_config(self) -> Dict[str, Any]:
+        ff_cfg = self.config.get("fund_flow", {}) if isinstance(self.config, dict) else {}
+        raw = ff_cfg.get("exit_cooldown", {}) if isinstance(ff_cfg.get("exit_cooldown"), dict) else {}
+        return {
+            "enabled": bool(raw.get("enabled", False)),
+            "cooldown_seconds": max(0, int(self._to_float(raw.get("cooldown_seconds"), 1800))),
+            "same_side_only": bool(raw.get("same_side_only", True)),
+        }
+
+    def _ensure_exit_signal_guard(self) -> PositionExitSignalGuard:
+        guard = getattr(self, "exit_signal_guard", None)
+        if not isinstance(guard, PositionExitSignalGuard):
+            guard = PositionExitSignalGuard(self._position_exit_signal_guard_config())
+            self.exit_signal_guard = guard
+        return guard
+
+    def _ensure_btc_beta_scorer(self) -> BtcBetaRiskScorer:
+        scorer = getattr(self, "btc_beta_scorer", None)
+        if not isinstance(scorer, BtcBetaRiskScorer):
+            scorer = BtcBetaRiskScorer(self._btc_beta_risk_config())
+            self.btc_beta_scorer = scorer
+        return scorer
+
+    def _closed_15m_returns_from_symbol(self, symbol: str) -> Tuple[float, float]:
+        try:
+            klines = self.client.get_klines(symbol=symbol, interval="15m", limit=4) or []
+        except TypeError:
+            klines = self.client.get_klines(symbol, "15m", limit=4) or []
+        except Exception as exc:
+            print(f"[BETA_RISK] {symbol} kline fetch failed: {exc}")
+            return 0.0, 0.0
+        closes = self._extract_closed_closes_from_klines(klines)
+        if len(closes) < 3 or closes[-2] <= 0 or closes[-3] <= 0:
+            return 0.0, 0.0
+        ret_15m = (closes[-1] - closes[-2]) / closes[-2]
+        ret_30m = (closes[-1] - closes[-3]) / closes[-3]
+        return float(ret_15m), float(ret_30m)
+
+    def _extract_closed_closes_from_klines(self, klines: Any) -> List[float]:
+        if not isinstance(klines, list):
+            return []
+        now_ms = int(self._now_ts() * 1000)
+        closed: List[Any] = []
+        for item in klines:
+            close_time = None
+            if isinstance(item, (list, tuple)) and len(item) > 6:
+                close_time = self._to_float(item[6], 0.0)
+            elif isinstance(item, dict):
+                close_time = self._to_float(
+                    item.get("close_time", item.get("closeTime", item.get("T"))),
+                    0.0,
+                )
+            if close_time and close_time > now_ms:
+                continue
+            closed.append(item)
+        return self._extract_closes_from_klines(closed)
+
+    def _btc_beta_recent_returns(self, symbol: str) -> Dict[str, float]:
+        btc_15m, btc_30m = self._closed_15m_returns_from_symbol("BTCUSDT")
+        alt_15m, alt_30m = self._closed_15m_returns_from_symbol(symbol)
+        return {
+            "btc_ret_15m": btc_15m,
+            "btc_ret_30m": btc_30m,
+            "alt_ret_15m": alt_15m,
+            "alt_ret_30m": alt_30m,
+        }
+
+    def _closed_15m_returns_4bar_from_symbol(self, symbol: str) -> List[float]:
+        try:
+            klines = self.client.get_klines(symbol=symbol, interval="15m", limit=6) or []
+        except TypeError:
+            klines = self.client.get_klines(symbol, "15m", limit=6) or []
+        except Exception as exc:
+            print(f"[BTC_REGIME] {symbol} kline fetch failed: {exc}")
+            return []
+        closes = self._extract_closed_closes_from_klines(klines)
+        if len(closes) < 5:
+            return []
+        out: List[float] = []
+        for prev, cur in zip(closes[-5:-1], closes[-4:]):
+            if prev > 0:
+                out.append((cur - prev) / prev)
+        return out
+
+    def _position_notional_usdt(self, position: Dict[str, Any], current_price: float) -> float:
+        qty = abs(self._to_float(position.get("amount", position.get("positionAmt", 0.0)), 0.0))
+        mark = self._to_float(position.get("mark_price", position.get("markPrice", current_price)), current_price)
+        if mark <= 0:
+            mark = current_price
+        return abs(qty * mark) if qty > 0 and mark > 0 else 0.0
+
+    def _now_ts(self) -> float:
+        return float(time.time())
+
+    def _btc_beta_position_age_bars(self, pos_key: str) -> int:
+        first_seen = self._to_float(getattr(self, "_position_first_seen_ts", {}).get(pos_key), 0.0)
+        if first_seen <= 0:
+            return 999
+        age_seconds = max(0.0, self._now_ts() - first_seen)
+        return max(1, int(math.ceil(age_seconds / 900.0)))
+
+    def _apply_btc_beta_exit_risk(
+        self,
+        *,
+        symbol: str,
+        position: Dict[str, Any],
+        current_price: float,
+        decision: FundFlowDecision,
+        decision_md: Dict[str, Any],
+    ) -> Tuple[FundFlowDecision, Dict[str, Any]]:
+        scorer = self._ensure_btc_beta_scorer()
+        if not scorer.cfg.enabled:
+            return decision, {"action": "HOLD", "reason": "disabled"}
+        side = str(position.get("side", "")).upper()
+        if side not in ("LONG", "SHORT"):
+            return decision, {"action": "HOLD", "reason": "unsupported_side"}
+
+        pos_key = self._position_track_key(symbol, side)
+        returns = self._btc_beta_recent_returns(symbol)
+        scorer.update_corr_history(symbol, returns["btc_ret_15m"], returns["alt_ret_15m"])
+        extrema = getattr(self, "_position_extrema_by_pos", {}).get(pos_key, {})
+        mfe_ratio = max(0.0, self._to_float(extrema.get("max_favorable_ratio"), 0.0))
+        mae_ratio = min(0.0, self._to_float(extrema.get("max_adverse_ratio"), self._position_pnl_ratio(position, current_price)))
+        result = scorer.score(
+            symbol=symbol,
+            direction=side.lower(),
+            btc_ret_15m=returns["btc_ret_15m"],
+            btc_ret_30m=returns["btc_ret_30m"],
+            alt_ret_15m=returns["alt_ret_15m"],
+            alt_ret_30m=returns["alt_ret_30m"],
+            position_age_bars=self._btc_beta_position_age_bars(pos_key),
+            mfe_pct=mfe_ratio,
+            mae_pct=mae_ratio,
+            position_notional=self._position_notional_usdt(position, current_price),
+        )
+        decision_md["btc_beta_risk"] = dict(result)
+        print(
+            f"[BETA_RISK] {symbol} score={result.get('risk_score')} action={result.get('action')} "
+            f"use_btc={result.get('use_btc')} reason={result.get('reason')}"
+        )
+
+        action = str(result.get("action", "HOLD")).upper()
+        if action == "CLOSE":
+            exit_decision = FundFlowDecision(
+                operation=FundFlowOperation.CLOSE,
+                symbol=symbol,
+                target_portion_of_balance=1.0,
+                leverage=decision.leverage,
+                reason=f"BETA_RISK_CLOSE: {result.get('reason')}",
+                metadata=decision_md,
+            )
+            print(f"[BETA_CLOSE] {symbol}: {result.get('reason')}")
+            return exit_decision, result
+        if action == "REDUCE_50":
+            exit_decision = FundFlowDecision(
+                operation=FundFlowOperation.CLOSE,
+                symbol=symbol,
+                target_portion_of_balance=0.50,
+                leverage=decision.leverage,
+                reason=f"BETA_RISK_REDUCE: {result.get('reason')}",
+                metadata=decision_md,
+            )
+            print(f"[BETA_REDUCE] {symbol}: {result.get('reason')}")
+            return exit_decision, result
+        return decision, result
+
+    def _build_exit_guard_signal(self, decision_md: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "signal_1h": (
+                decision_md.get("signal_1h")
+                or decision_md.get("signal_type_1h")
+                or decision_md.get("macd_signal_1h")
+                or ""
+            ),
+            "veto_code": (
+                decision_md.get("reject_code")
+                or decision_md.get("hold_code")
+                or decision_md.get("veto_type")
+                or decision_md.get("entry_15m")
+                or ""
+            ),
+        }
+
+    def _apply_position_exit_signal_guard(
+        self,
+        *,
+        symbol: str,
+        position: Dict[str, Any],
+        current_price: float,
+        decision: FundFlowDecision,
+        decision_md: Dict[str, Any],
+    ) -> Tuple[FundFlowDecision, Dict[str, Any]]:
+        beta_decision, beta_result = self._apply_btc_beta_exit_risk(
+            symbol=symbol,
+            position=position,
+            current_price=current_price,
+            decision=decision,
+            decision_md=decision_md,
+        )
+        beta_action = str(beta_result.get("action", "HOLD")).upper()
+        if beta_decision is not decision and beta_action == "CLOSE":
+            return beta_decision, beta_result
+
+        guard = self._ensure_exit_signal_guard()
+        side = str(position.get("side", "")).upper()
+        pos_key = self._position_track_key(symbol, side)
+        pnl_ratio = self._position_pnl_ratio(position, current_price)
+        signal = self._build_exit_guard_signal(decision_md)
+        result = guard.evaluate(
+            symbol=symbol,
+            position={**position, "unrealized_pnl_pct": pnl_ratio},
+            signal_now=signal,
+        )
+        if bool(result.get("block_dca")):
+            self._dca_blocked_by_exit_guard.add(pos_key)
+        else:
+            self._dca_blocked_by_exit_guard.discard(pos_key)
+
+        decision_md["position_exit_signal_guard"] = dict(result)
+        action = str(result.get("action", "HOLD")).upper()
+        if action not in {"REDUCE", "CLOSE"}:
+            if beta_decision is not decision and beta_action == "REDUCE_50":
+                return beta_decision, beta_result
+            return decision, result
+
+        reduce_pct = 1.0 if action == "CLOSE" else max(0.0, min(1.0, self._to_float(result.get("reduce_pct"), 0.50)))
+        if reduce_pct <= 0:
+            return decision, result
+
+        exit_decision = FundFlowDecision(
+            operation=FundFlowOperation.CLOSE,
+            symbol=symbol,
+            target_portion_of_balance=reduce_pct,
+            leverage=decision.leverage,
+            reason=f"EXIT_SIGNAL_GUARD_{action}: {result.get('reason')}",
+            metadata=decision_md,
+        )
+        print(f"[ExitGuard] {symbol} {action}: {result.get('reason')}")
+        return exit_decision, result
 
     def _winner_pyramiding_config(self, engine_override: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         ff_cfg = self.config.get("fund_flow", {}) or {}
@@ -3043,6 +3409,7 @@ class TradingBot:
             "shadow_mode": bool(raw.get("shadow_mode", True)),
             "min_score_threshold": max(0.0, min(1.0, self._to_float(raw.get("min_score_threshold"), 0.80))),
             "probe_portion": max(0.0, self._normalize_percent_to_ratio(raw.get("probe_portion", 0.06), 0.06)),
+            "probe_min_open_portion": max(0.0, self._normalize_percent_to_ratio(raw.get("probe_min_open_portion"), 0.0)),
             "probe_leverage_cap": max(1, int(self._to_float(raw.get("probe_leverage_cap"), 2))),
         }
 
@@ -3080,10 +3447,12 @@ class TradingBot:
             meta.update({"reason": f"signal_score={signal_score:.4f}", "signal_score": signal_score})
             return decision, meta
 
-        probe_portion = max(
-            float(min_open_portion),
-            self._to_float(cfg.get("probe_portion"), float(min_open_portion)),
-        )
+        probe_min_open = self._to_float(cfg.get("probe_min_open_portion"), 0.0)
+        probe_portion_cfg = self._to_float(cfg.get("probe_portion"), 0.0)
+        if probe_min_open > 0:
+            probe_portion = max(original_target, probe_min_open)
+        else:
+            probe_portion = max(float(min_open_portion), probe_portion_cfg or float(min_open_portion))
         leverage_cap = int(cfg.get("probe_leverage_cap", 2) or 2)
         meta.update(
             {
@@ -3131,6 +3500,44 @@ class TradingBot:
         )
         meta["applied"] = True
         return adjusted, meta
+
+    def _allows_entry_below_min_open_by_notional(
+        self,
+        *,
+        decision: FundFlowDecision,
+        min_open_portion: float,
+        account_equity: float,
+    ) -> Tuple[bool, Dict[str, Any]]:
+        ff_cfg = self.config.get("fund_flow", {}) if isinstance(self.config, dict) else {}
+        min_notional = self._to_float(ff_cfg.get("min_open_notional_usdt"), 0.0)
+        min_notional_mode = str(ff_cfg.get("min_open_notional_mode", "fixed") or "fixed").strip().lower()
+        target = self._to_float(getattr(decision, "target_portion_of_balance", 0.0), 0.0)
+        equity = self._to_float(account_equity, 0.0)
+        notional = max(0.0, target * equity)
+        if min_notional_mode == "dynamic" and min_notional > 0.0 and equity > 0.0:
+            probe_cfg = self._probe_floor_rescue_config()
+            probe_min_portion = self._to_float(probe_cfg.get("probe_min_open_portion"), 0.0)
+            if probe_min_portion > 0.0:
+                min_notional = min(min_notional, probe_min_portion * equity * 0.95)
+        meta = {
+            "enabled": min_notional > 0.0,
+            "target_portion": target,
+            "min_open_portion": float(min_open_portion),
+            "notional_usdt": notional,
+            "min_open_notional_usdt": min_notional,
+            "min_open_notional_mode": min_notional_mode,
+        }
+        if min_notional <= 0.0:
+            meta["reason"] = "disabled"
+            return False, meta
+        if target >= float(min_open_portion):
+            meta["reason"] = "target_above_min_open"
+            return True, meta
+        if notional >= min_notional:
+            meta["reason"] = "notional_check_passed"
+            return True, meta
+        meta["reason"] = "notional_below_min_open"
+        return False, meta
 
     def _resolve_dual_leg_shock_context(self, md: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
         shock_cfg = cfg.get("shock_detector", {}) if isinstance(cfg.get("shock_detector"), dict) else {}
@@ -4137,9 +4544,10 @@ class TradingBot:
             "conflict_cooldown_reason_by_symbol": self._conflict_cooldown_reason_by_symbol,
             "updated_at": datetime.now().isoformat(),
         }
+        payload = {k: v for k, v in payload.items() if v not in (None, "", [], {})}
         try:
             with open(self._risk_state_path, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2)
+                f.write(compact_json_dumps(payload))
         except Exception:
             pass
 
@@ -4336,6 +4744,7 @@ class TradingBot:
             self.logs_dir,
             bucket_root_dir=self.log_root_dir,
             raw_keep_days=max(0, int(log_compaction_cfg.get("attribution_raw_keep_days", 2) or 2)),
+            mode=str(log_compaction_cfg.get("attribution_mode", "compact") or "compact"),
         )
         self.fund_flow_risk_engine = FundFlowRiskEngine(self.config, symbol_whitelist=symbol_whitelist)
         self.fund_flow_decision_engine = FundFlowDecisionEngine(self.config)
@@ -4357,24 +4766,27 @@ class TradingBot:
         self.fund_flow_storage = None
         sync_result: Dict[str, int] = {"definitions": 0, "pools": 0}
         runtime_pool_cfg = ff_cfg.get("signal_pool", {}) if isinstance(ff_cfg.get("signal_pool"), dict) else {}
-        try:
-            storage = MarketStorage(
-                db_path=os.path.join(self.logs_dir, "fund_flow_strategy.db"),
-                audit_log_retention_days=max(1, int(log_compaction_cfg.get("db_audit_retention_days", 7) or 7)),
-            )
-            self.fund_flow_storage = storage
-            sync_result = storage.upsert_signal_registry_from_config(ff_cfg)
-            active_pool_id = ff_cfg.get("active_signal_pool_id")
-            runtime_pool_cfg_db = storage.get_active_signal_pool_config(
-                active_pool_id=str(active_pool_id) if active_pool_id else None
-            )
-            if runtime_pool_cfg_db:
-                runtime_pool_cfg = runtime_pool_cfg_db
-            self._signal_registry_version = storage.get_signal_registry_version()
-        except Exception as e:
-            self.fund_flow_storage = None
+        if bool(log_compaction_cfg.get("market_storage_enabled", True)):
+            try:
+                storage = MarketStorage(
+                    db_path=os.path.join(self.logs_dir, "fund_flow_strategy.db"),
+                    audit_log_retention_days=max(1, int(log_compaction_cfg.get("db_audit_retention_days", 7) or 7)),
+                )
+                self.fund_flow_storage = storage
+                sync_result = storage.upsert_signal_registry_from_config(ff_cfg)
+                active_pool_id = ff_cfg.get("active_signal_pool_id")
+                runtime_pool_cfg_db = storage.get_active_signal_pool_config(
+                    active_pool_id=str(active_pool_id) if active_pool_id else None
+                )
+                if runtime_pool_cfg_db:
+                    runtime_pool_cfg = runtime_pool_cfg_db
+                self._signal_registry_version = storage.get_signal_registry_version()
+            except Exception as e:
+                self.fund_flow_storage = None
+                self._signal_registry_version = ""
+                print(f"⚠️ MarketStorage 初始化失败，已降级无DB模式: {e}")
+        else:
             self._signal_registry_version = ""
-            print(f"⚠️ MarketStorage 初始化失败，已降级无DB模式: {e}")
 
         self.fund_flow_trigger_engine = TriggerEngine(
             dedupe_window_seconds=int(ff_cfg.get("trigger_dedupe_seconds", 10) or 10),
@@ -4801,6 +5213,40 @@ class TradingBot:
             f"ok_symbols={ok_symbols}/{len(symbols)}, snapshots={total_snapshots}, "
             f"trend_cache={len(self._startup_trend_filter_cache)}"
         )
+        self._warmup_btc_beta_scorer()
+
+    def _warmup_btc_beta_scorer(self) -> None:
+        scorer = self._ensure_btc_beta_scorer()
+        if not scorer.cfg.enabled or not bool(scorer.cfg.warmup_on_start):
+            return
+        symbols = ConfigLoader.get_trading_symbols(self.config)
+        if not symbols:
+            return
+        limit = max(10, int(scorer.cfg.warmup_kline_limit))
+        try:
+            btc_klines = self.client.get_klines("BTCUSDT", "15m", limit=limit) or []
+        except Exception as exc:
+            print(f"[BETA_WARMUP] BTCUSDT failed: {exc}")
+            return
+        btc_closes = self._extract_closed_closes_from_klines(btc_klines)
+        if len(btc_closes) < 10:
+            print("[BETA_WARMUP] BTCUSDT closed klines unavailable, skipping")
+            return
+        warmed = 0
+        for symbol in symbols:
+            symbol_u = str(symbol or "").upper()
+            if not symbol_u or symbol_u == "BTCUSDT":
+                continue
+            try:
+                alt_klines = self.client.get_klines(symbol_u, "15m", limit=limit) or []
+                alt_closes = self._extract_closed_closes_from_klines(alt_klines)
+                if len(alt_closes) < 10:
+                    continue
+                scorer.warmup_from_klines(symbol_u, btc_closes, alt_closes)
+                warmed += 1
+            except Exception as exc:
+                print(f"[BETA_WARMUP] {symbol_u} failed: {exc}")
+        print(f"[BETA_WARMUP] warmed={warmed}/{len(symbols)} symbols")
 
     def _apply_timeframe_context(
         self,
@@ -5056,12 +5502,14 @@ class TradingBot:
         ob_flow = self._extract_orderbook_flow(symbol)
         for k, v in ob_flow.items():
             realtime[k] = v
+        btc_rets_4bar = self._closed_15m_returns_4bar_from_symbol("BTCUSDT")
         return {
             "realtime": realtime,
             "trend_filter": trend_filter,
             "trend_filter_timeframe": primary_timeframe,
             "trend_filter_1m": trend_filter_1m,
             "trend_filters_by_timeframe": trend_filters_by_timeframe,
+            "btc_rets_4bar": btc_rets_4bar,
             "order_flow_1m": order_flow_1m,
             "execution_quality_timeframe": exec_timeframe,
         }
@@ -5113,6 +5561,7 @@ class TradingBot:
             "taker_sell_quote": self._to_float(realtime.get("taker_sell_quote"), 0.0),
             "taker_delta_quote": self._to_float(realtime.get("taker_delta_quote"), 0.0),
             "liquidity_delta_norm": liquidity_delta_norm,
+            "btc_rets_4bar": market_data.get("btc_rets_4bar", []) if isinstance(market_data, dict) else [],
             "mid_price": self._to_float(realtime.get("mid_price"), 0.0),
             "microprice": self._to_float(realtime.get("microprice"), 0.0),
             "micro_delta_norm": self._to_float(realtime.get("micro_delta_norm"), 0.0),
@@ -6640,6 +7089,13 @@ class TradingBot:
             post_close_side = self._extract_position_side(position_for_log)
             post_close_amount = self._extract_position_amount(position_for_log)
             close_action = "REDUCE" if (post_close_side == pre_close_side and post_close_amount > 0.0) else "EXIT"
+            exit_cd_cfg = self._exit_cooldown_config()
+            if bool(exit_cd_cfg.get("enabled")) and close_action == "EXIT":
+                registry = getattr(self, "exit_cooldown", None)
+                if not isinstance(registry, ExitCooldownRegistry):
+                    registry = ExitCooldownRegistry(int(exit_cd_cfg.get("cooldown_seconds", 1800)))
+                    self.exit_cooldown = registry
+                registry.register_exit(symbol, pre_close_side)
             exec_meta = dict(md) if isinstance(md, dict) else {}
             exec_meta["execution_reason"] = str(decision.reason or "")
             try:
@@ -8068,10 +8524,32 @@ class TradingBot:
                     flow_snapshot=flow_snapshot,
                 )
                 continue
+            if decision.operation in (FundFlowOperation.BUY, FundFlowOperation.SELL):
+                exit_cd_cfg = self._exit_cooldown_config()
+                signal_side_for_cd = "LONG" if decision.operation == FundFlowOperation.BUY else "SHORT"
+                registry = getattr(self, "exit_cooldown", None)
+                if (
+                    bool(exit_cd_cfg.get("enabled"))
+                    and isinstance(registry, ExitCooldownRegistry)
+                    and registry.is_blocked(symbol, signal_side_for_cd)
+                ):
+                    self._log_entry_gate_block(
+                        symbol=symbol,
+                        gate="exit_cooldown",
+                        reason="exit_cooldown_active",
+                        threshold=exit_cd_cfg.get("cooldown_seconds"),
+                        value=signal_side_for_cd,
+                        decision=decision,
+                        flow_context=flow_context,
+                        trigger_context=trigger_context,
+                        market_data=market_data,
+                        flow_snapshot=flow_snapshot,
+                    )
+                    continue
             if isinstance(position, dict):
                 current_side = str(position.get("side", "")).upper()
                 current_portion = self._estimate_position_portion(position, account_summary)
-                min_open_portion = max(0.01, float(getattr(self.fund_flow_risk_engine, "min_open_portion", 0.1) or 0.1))
+                min_open_portion = max(0.0, float(getattr(self.fund_flow_risk_engine, "min_open_portion", 0.0) or 0.0))
                 local_max_symbol_position_portion = self._normalize_percent_to_ratio(
                     engine_override.get("max_symbol_position_portion", max_symbol_position_portion),
                     max_symbol_position_portion,
@@ -8081,6 +8559,33 @@ class TradingBot:
                     add_position_portion,
                 )
                 dca_cfg_local = self._dca_config(engine_override)
+                if current_side in ("LONG", "SHORT") and current_portion > 0 and decision.operation != FundFlowOperation.CLOSE:
+                    decision, exit_guard_meta = self._apply_position_exit_signal_guard(
+                        symbol=symbol,
+                        position=position,
+                        current_price=current_price,
+                        decision=decision,
+                        decision_md=decision_md,
+                    )
+                    if decision.operation == FundFlowOperation.CLOSE:
+                        pending_new_entries.append({
+                            "symbol": symbol,
+                            "score": max(1.0, self._decision_signal_score(decision, flow_context)),
+                            "max_active_symbols": max_active_symbols,
+                            "engine": decision_md.get("engine"),
+                            "decision": decision,
+                            "account_summary": account_summary,
+                            "position": position,
+                            "current_price": current_price,
+                            "flow_context": flow_context,
+                            "trigger_type": trigger_type,
+                            "trigger_id": trigger_id,
+                            "trigger_context": trigger_context,
+                            "portfolio": portfolio,
+                            "bypass_capacity_guard": True,
+                            "bypass_ai_final_review": True,
+                        })
+                        continue
             
                 if decision.operation in (FundFlowOperation.BUY, FundFlowOperation.SELL):
                     signal_side = "LONG" if decision.operation == FundFlowOperation.BUY else "SHORT"
@@ -8123,14 +8628,19 @@ class TradingBot:
             
                 # DCA/马丁模式：已有持仓时仅按回撤阈值+阶梯倍数触发加仓
                 if bool(dca_cfg_local.get("enabled")) and decision.operation != FundFlowOperation.CLOSE:
-                    dca_decision = self._build_dca_decision(
-                        symbol=symbol,
-                        position=position,
-                        current_price=current_price,
-                        base_decision=decision,
-                        trigger_context=trigger_context,
-                        dca_cfg=dca_cfg_local,
-                    )
+                    pos_key_for_dca = self._position_track_key(symbol, current_side)
+                    dca_decision = None
+                    if pos_key_for_dca in getattr(self, "_dca_blocked_by_exit_guard", set()):
+                        print(f"[DCA] {symbol} DCA skipped by exit_signal_guard")
+                    else:
+                        dca_decision = self._build_dca_decision(
+                            symbol=symbol,
+                            position=position,
+                            current_price=current_price,
+                            base_decision=decision,
+                            trigger_context=trigger_context,
+                            dca_cfg=dca_cfg_local,
+                        )
                     if dca_decision is not None:
                         decision = dca_decision
                     elif decision.operation in (FundFlowOperation.BUY, FundFlowOperation.SELL):
@@ -9013,8 +9523,8 @@ class TradingBot:
                     )
                     continue
                 min_open_portion = max(
-                    0.01,
-                    float(getattr(self.fund_flow_risk_engine, "min_open_portion", 0.1) or 0.1),
+                    0.0,
+                    float(getattr(self.fund_flow_risk_engine, "min_open_portion", 0.0) or 0.0),
                 )
                 if float(decision.target_portion_of_balance) < min_open_portion:
                     decision, probe_meta = self._apply_probe_floor_rescue(
@@ -9022,25 +9532,38 @@ class TradingBot:
                         min_open_portion=min_open_portion,
                     )
                 if float(decision.target_portion_of_balance) < min_open_portion:
-                    print(
-                        f"⏭️ {symbol} 目标开仓比例低于最小下单阈值，跳过开仓: "
-                        f"target={float(decision.target_portion_of_balance):.4f}, "
-                        f"min_open={min_open_portion:.4f}"
-                    )
-                    self._log_entry_gate_block(
-                        symbol=symbol,
-                        gate="min_open_portion",
-                        reason="target_below_min_open",
-                        threshold=min_open_portion,
-                        value=float(decision.target_portion_of_balance),
+                    notional_allowed, notional_meta = self._allows_entry_below_min_open_by_notional(
                         decision=decision,
-                        flow_context=flow_context,
-                        trigger_context=trigger_context,
-                        market_data=market_data,
-                        flow_snapshot=flow_snapshot,
-                        extra={"open_new_entry": True, "probe_floor_rescue": probe_meta},
+                        min_open_portion=min_open_portion,
+                        account_equity=self._to_float((account_summary or {}).get("equity"), 0.0),
                     )
-                    continue
+                    if notional_allowed:
+                        if isinstance(decision.metadata, dict):
+                            decision.metadata["min_open_notional_gate"] = notional_meta
+                    else:
+                        print(
+                            f"⏭️ {symbol} 目标开仓比例低于最小下单阈值，跳过开仓: "
+                            f"target={float(decision.target_portion_of_balance):.4f}, "
+                            f"min_open={min_open_portion:.4f}"
+                        )
+                        self._log_entry_gate_block(
+                            symbol=symbol,
+                            gate="min_open_portion",
+                            reason="target_below_min_open",
+                            threshold=min_open_portion,
+                            value=float(decision.target_portion_of_balance),
+                            decision=decision,
+                            flow_context=flow_context,
+                            trigger_context=trigger_context,
+                            market_data=market_data,
+                            flow_snapshot=flow_snapshot,
+                            extra={
+                                "open_new_entry": True,
+                                "probe_floor_rescue": probe_meta,
+                                "min_open_notional": notional_meta,
+                            },
+                        )
+                        continue
                 item_max_active_symbols = max(
                     1,
                     int(
@@ -9543,6 +10066,8 @@ class TradingBot:
             flat_tf_seconds = int(ai_review_cfg.get("flat_timeframe_seconds", tf_seconds or 900))
             allow_entries_with_positions = bool(ai_review_cfg.get("allow_entries_with_positions", True))
             now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            if cycles > 0 and cycles % 20 == 0:
+                self._print_config_fingerprint()
             if has_position:
                 position_review_due = self._should_allow_aligned_cycle(
                     bucket_key="position_review",

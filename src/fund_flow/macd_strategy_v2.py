@@ -256,7 +256,7 @@ class MACDStrategyV2Config:
     rsi_rhythm_block_score: float = -0.30
     rsi_probe_exposure_mult: float = 0.20
     rsi_probe_portion_scale: float = 0.25
-    rsi_probe_forced_leverage: int = 2
+    rsi_probe_forced_leverage: int = 3
     short_rsi_probe_only_below: float = 40.0
     enable_15m_spring_threshold_override: bool = True
     spring_override_min_signal_score: float = 0.82
@@ -265,10 +265,10 @@ class MACDStrategyV2Config:
     priority_allocation_overdraft_pct: float = 0.08
     enable_red_bar_growing_probe_overlay: bool = False
     red_bar_growing_probe_position_penalty: float = 0.50
-    red_bar_growing_probe_max_leverage: int = 2
+    red_bar_growing_probe_max_leverage: int = 3
     enable_green_bar_growing_probe_overlay: bool = True
     green_bar_growing_probe_position_penalty: float = 0.10
-    green_bar_growing_probe_max_leverage: int = 2
+    green_bar_growing_probe_max_leverage: int = 3
     probe_penalty_floor_notional_usdt: float = 2.0
     counter_trend_long_guard_enabled: bool = False
     counter_trend_long_vwap_dev_extreme_pct: float = 0.030
@@ -335,7 +335,7 @@ class MACDStrategyV2Config:
     preflip_trial_min_signal_score: float = 0.78
     preflip_trial_min_vwap_score: float = 0.06
     preflip_trial_entry_scale: float = 0.35
-    preflip_trial_max_leverage: int = 2
+    preflip_trial_max_leverage: int = 3
     short_min_vwap_score_for_entry: float = 0.06
     flip_bearish_short_min_vwap_score_for_entry: float = 0.08
     flip_bearish_require_enhancement_or_15m_confirmation: bool = True
@@ -404,9 +404,9 @@ class MACDStrategyV2Config:
     entry_quality_15m_strong_raw: float = 0.40
     entry_quality_15m_medium_raw: float = 0.30
     entry_quality_15m_weak_raw: float = 0.20
-    entry_quality_15m_multi_medium_max: float = 0.040
+    entry_quality_15m_multi_medium_max: float = 0.042
     entry_quality_15m_multi_strong_max: float = 0.060
-    entry_quality_15m_dual_weak_max: float = 0.040
+    entry_quality_15m_dual_weak_max: float = 0.042
     entry_quality_15m_dual_medium_max: float = 0.080
     entry_quality_15m_dual_strong_max: float = 0.120
     entry_quality_15m_single_very_weak_max: float = 0.060
@@ -429,6 +429,16 @@ class MACDStrategyV2Config:
     entry_quality_ema_require_price_vwap_aligned: bool = True
     entry_quality_ema_require_15m_raw_min: float = 0.25
     entry_quality_ema_require_adx_min: float = 20.0
+    entry_quality_vwap_score_hard_block_enabled: bool = False
+    entry_quality_vwap_score_below_block: float = 0.12
+    entry_quality_vwap_score_below_probe: float = 0.30
+    entry_quality_vwap_score_probe_max: float = 0.042
+    entry_quality_no_trade_gate_enabled: bool = False
+    entry_quality_no_trade_block_below_score: float = 0.85
+    entry_quality_no_trade_probe_max: float = 0.042
+    entry_quality_range_gate_enabled: bool = False
+    entry_quality_range_block_below_score: float = 0.80
+    entry_quality_range_probe_max: float = 0.060
     enable_meaningful_short_entry_cap: bool = False
     meaningful_short_micro_target_portion: float = 0.009
     enable_no_trade_meaningful_entry_cap: bool = False
@@ -1550,6 +1560,25 @@ class MACDStrategyV2Engine:
         has_strong_15m = raw >= float(self.config.entry_quality_15m_strong_raw) and entry not in {"", "-"}
         has_medium_15m = raw >= float(self.config.entry_quality_15m_medium_raw)
         has_weak_15m = raw >= float(self.config.entry_quality_15m_weak_raw)
+        is_rbg_below_vwap = (
+            is_below_vwap
+            and str(signal_4h or "").strip().lower() == "red_bar_growing"
+            and str(signal_1h or "").strip().lower() == "red_bar_growing"
+        )
+        if is_rbg_below_vwap:
+            if not (has_medium_15m and entry not in {"", "-"}):
+                return {
+                    "action": "PROBE",
+                    "max_portion": float(self.config.entry_quality_15m_single_very_weak_max),
+                    "reason": f"rbg_below_vwap dev={float(vwap_dev_pct or 0.0):.2%} raw_15m={raw:.2f} no_confirm -> probe",
+                    "risk_count": max(1, risk_count),
+                }
+            return {
+                "action": "PASS",
+                "max_portion": min(current_portion, 0.10),
+                "reason": "rbg_below_vwap with_15m -> capped",
+                "risk_count": max(1, risk_count),
+            }
 
         if risk_count >= int(self.config.entry_quality_15m_risk_count_full_block):
             if not has_medium_15m:
@@ -1675,6 +1704,52 @@ class MACDStrategyV2Engine:
         else:
             cap = float(self.config.entry_quality_adx_cap_low_max)
         return min(current_portion, cap)
+
+    def _apply_vwap_score_entry_gate(
+        self,
+        *,
+        vwap_score: float,
+        current_portion: float,
+    ) -> Dict[str, Any]:
+        if not bool(self.config.entry_quality_vwap_score_hard_block_enabled):
+            return {"action": "PASS", "max_portion": current_portion, "reason": "disabled"}
+        score = float(vwap_score or 0.0)
+        if score < float(self.config.entry_quality_vwap_score_below_block):
+            return {"action": "BLOCK", "reason": f"vwap_score_hard_block({score:.3f})"}
+        if score < float(self.config.entry_quality_vwap_score_below_probe):
+            return {
+                "action": "PROBE",
+                "max_portion": float(self.config.entry_quality_vwap_score_probe_max),
+                "reason": f"vwap_score_probe({score:.3f})",
+            }
+        return {"action": "PASS", "max_portion": current_portion, "reason": "vwap_score_pass"}
+
+    def _check_regime_entry_block(
+        self,
+        *,
+        regime: str,
+        direction: str,
+        signal_score: float,
+    ) -> Dict[str, Any]:
+        regime_u = str(regime or "").strip().upper()
+        score = float(signal_score or 0.0)
+        if regime_u == "NO_TRADE" and bool(self.config.entry_quality_no_trade_gate_enabled):
+            if score >= float(self.config.entry_quality_no_trade_block_below_score):
+                return {
+                    "action": "PROBE_CAP",
+                    "max_portion": float(self.config.entry_quality_no_trade_probe_max),
+                    "reason": "no_trade_high_score_probe",
+                }
+            return {"action": "BLOCK", "reason": f"no_trade_block score={score:.3f}"}
+        if regime_u == "RANGE" and bool(self.config.entry_quality_range_gate_enabled):
+            if score >= float(self.config.entry_quality_range_block_below_score):
+                return {
+                    "action": "PROBE_CAP",
+                    "max_portion": float(self.config.entry_quality_range_probe_max),
+                    "reason": "range_high_score_probe",
+                }
+            return {"action": "BLOCK", "reason": f"range_block score={score:.3f}"}
+        return {"action": "PASS", "reason": "regime_entry_gate_pass"}
 
     def _resolve_ema_multiplier(
         self,
@@ -5850,13 +5925,33 @@ class MACDStrategyV2Engine:
         )
         combo_action = str(combo_result.get("action") or "PASS").upper()
         combo_max_portion = float(combo_result.get("max_portion", 0.0) or 0.0)
+        gate_cap_applied = False
+        gate_cap_portion = 0.0
+
+        def _merge_gate_cap(raw_cap: float, gate_name: str, reason: str) -> None:
+            nonlocal combo_max_portion, gate_cap_applied, gate_cap_portion
+            cap = float(raw_cap or 0.0)
+            if cap <= 0.0 or cap >= 9999.0:
+                return
+            previous = combo_max_portion if combo_max_portion > 0 else 9999.0
+            combo_max_portion = min(previous, cap)
+            if combo_max_portion < previous:
+                gate_cap_applied = True
+                gate_cap_portion = combo_max_portion
+                logger.info(
+                    "[%s_CAP_APPLIED] %s %s+%s %.4f -> %.4f reason=%s",
+                    gate_name,
+                    trade_direction,
+                    signal_type_4h,
+                    signal_type_1h,
+                    previous,
+                    combo_max_portion,
+                    reason,
+                )
+
         rsi_soft_max_portion = float(rsi_rhythm.get("rsi_soft_max_portion", 0.0) or 0.0)
         if rsi_soft_max_portion > 0:
-            combo_max_portion = (
-                min(combo_max_portion, rsi_soft_max_portion)
-                if combo_max_portion > 0
-                else rsi_soft_max_portion
-            )
+            _merge_gate_cap(rsi_soft_max_portion, "RSI_SOFT", str(rsi_rhythm.get("rsi_soft_gate_reason") or ""))
         debug_details = self._set_stage(
             debug_details,
             "combo_hard_block",
@@ -6218,6 +6313,84 @@ class MACDStrategyV2Engine:
                 ),
             )
 
+        vwap_score_gate = self._apply_vwap_score_entry_gate(
+            vwap_score=vwap_score,
+            current_portion=combo_max_portion if combo_max_portion > 0 else 9999.0,
+        )
+        vwap_score_action = str(vwap_score_gate.get("action") or "PASS").upper()
+        debug_details = self._set_stage(
+            debug_details,
+            "vwap_score_entry_gate",
+            vwap_score_entry_gate_enabled=bool(self.config.entry_quality_vwap_score_hard_block_enabled),
+            vwap_score_entry_gate_action=vwap_score_action,
+            vwap_score_entry_gate_reason=str(vwap_score_gate.get("reason") or ""),
+            vwap_score_entry_gate_max_portion=float(vwap_score_gate.get("max_portion", 0.0) or 0.0),
+        )
+        if vwap_score_action == "BLOCK":
+            return self._neutral_signal(
+                reason=str(vwap_score_gate.get("reason") or "vwap_score_entry_gate_block"),
+                score=score,
+                signal_type_1h=signal_type_1h,
+                entry_type_15m=entry_type_15m,
+                entry_score_15m=entry_score_15m,
+                vwap_score=vwap_score,
+                vwap_deviation=vwap_deviation,
+                vwap_state=vwap_state,
+                vwap_location_score=vwap_location_score,
+                ema_multiplier=ema_multiplier,
+                ema_structure_status=ema_status,
+                enhancement_score=enhancement_score,
+                is_4h_enhanced=is_4h_enhanced,
+                is_trial_entry=is_trial_entry,
+                entry_scale=entry_scale,
+                details=self._build_debug_details(**debug_details),
+            )
+        if vwap_score_action in {"PROBE", "PROBE_CAP", "PASS"} and float(vwap_score_gate.get("max_portion", 0.0) or 0.0) > 0:
+            _merge_gate_cap(
+                float(vwap_score_gate.get("max_portion", 0.0) or 0.0),
+                "VWAP_SCORE",
+                str(vwap_score_gate.get("reason") or ""),
+            )
+
+        regime_entry_gate = self._check_regime_entry_block(
+            regime=market_regime,
+            direction=trade_direction,
+            signal_score=score,
+        )
+        regime_entry_action = str(regime_entry_gate.get("action") or "PASS").upper()
+        debug_details = self._set_stage(
+            debug_details,
+            "regime_entry_gate",
+            regime_entry_gate_action=regime_entry_action,
+            regime_entry_gate_reason=str(regime_entry_gate.get("reason") or ""),
+            regime_entry_gate_max_portion=float(regime_entry_gate.get("max_portion", 0.0) or 0.0),
+        )
+        if regime_entry_action == "BLOCK":
+            return self._neutral_signal(
+                reason=str(regime_entry_gate.get("reason") or "regime_entry_gate_block"),
+                score=score,
+                signal_type_1h=signal_type_1h,
+                entry_type_15m=entry_type_15m,
+                entry_score_15m=entry_score_15m,
+                vwap_score=vwap_score,
+                vwap_deviation=vwap_deviation,
+                vwap_state=vwap_state,
+                vwap_location_score=vwap_location_score,
+                ema_multiplier=ema_multiplier,
+                ema_structure_status=ema_status,
+                enhancement_score=enhancement_score,
+                is_4h_enhanced=is_4h_enhanced,
+                is_trial_entry=is_trial_entry,
+                entry_scale=entry_scale,
+                details=self._build_debug_details(**debug_details),
+            )
+        if regime_entry_action in {"PROBE", "PROBE_CAP", "PASS"} and float(regime_entry_gate.get("max_portion", 0.0) or 0.0) > 0:
+            _merge_gate_cap(
+                float(regime_entry_gate.get("max_portion", 0.0) or 0.0),
+                "REGIME",
+                str(regime_entry_gate.get("reason") or ""),
+            )
+
         flip_quality_guard = self._apply_flip_bullish_size_guard(
             signal_4h=signal_type_4h,
             signal_1h=signal_type_1h,
@@ -6255,9 +6428,11 @@ class MACDStrategyV2Engine:
                 details=self._build_debug_details(**debug_details),
             )
         if flip_quality_action in {"PROBE", "PASS"} and float(flip_quality_guard.get("max_portion", 0.0) or 0.0) > 0:
-            flip_cap = float(flip_quality_guard.get("max_portion", 0.0) or 0.0)
-            if flip_cap < 9999.0:
-                combo_max_portion = min(combo_max_portion, flip_cap) if combo_max_portion > 0 else flip_cap
+            _merge_gate_cap(
+                float(flip_quality_guard.get("max_portion", 0.0) or 0.0),
+                "FLIP_BULLISH",
+                str(flip_quality_guard.get("reason") or ""),
+            )
 
         gate_15m = self._apply_15m_entry_gate(
             direction=trade_direction,
@@ -6300,9 +6475,11 @@ class MACDStrategyV2Engine:
                 details=self._build_debug_details(**debug_details),
             )
         if gate_15m_action in {"PROBE", "PASS"} and float(gate_15m.get("max_portion", 0.0) or 0.0) > 0:
-            gate_cap = float(gate_15m.get("max_portion", 0.0) or 0.0)
-            if gate_cap < 9999.0:
-                combo_max_portion = min(combo_max_portion, gate_cap) if combo_max_portion > 0 else gate_cap
+            _merge_gate_cap(
+                float(gate_15m.get("max_portion", 0.0) or 0.0),
+                "15M",
+                str(gate_15m.get("reason") or ""),
+            )
 
         regime_cap = self._apply_regime_size_cap(
             direction=trade_direction,
@@ -6318,7 +6495,7 @@ class MACDStrategyV2Engine:
             adx_regime_size_cap_portion=regime_cap,
         )
         if regime_cap < 9999.0:
-            combo_max_portion = min(combo_max_portion, regime_cap) if combo_max_portion > 0 else regime_cap
+            _merge_gate_cap(regime_cap, "ADX", f"adx={adx_1h:.2f} regime={market_regime}")
         
         # ========== Step 9: 计算止损 ==========
         stop_price, stop_pct, stop_details = self.calculate_dynamic_stop(
@@ -6510,6 +6687,8 @@ class MACDStrategyV2Engine:
             'final_portion_after_rsi': 1.0,
             'signal_combo_action': combo_action,
             'signal_combo_max_portion': combo_max_portion,
+            'gate_cap_applied': gate_cap_applied,
+            'gate_cap_portion': gate_cap_portion,
             'rsi_soft_gate_applied': bool(rsi_rhythm.get("rsi_soft_gate_applied", False)),
             'rsi_soft_gate_action': str(rsi_rhythm.get("rsi_soft_gate_action") or ""),
             'rsi_soft_gate_reason': str(rsi_rhythm.get("rsi_soft_gate_reason") or ""),
@@ -6561,7 +6740,7 @@ class MACDStrategyV2Engine:
         rsi_probe_mode: bool = False,
     ) -> int:
         """
-        根据评分计算杠杆（实盘配置：2X/3X/4X）
+        根据评分计算杠杆（实盘配置：3X/4X/5X）
         
         Args:
             score: 信号评分
@@ -6570,30 +6749,32 @@ class MACDStrategyV2Engine:
         Returns:
             杠杆倍数
         """
-        if score >= 0.90:
-            base_leverage = 4
-        elif score >= 0.85:
-            base_leverage = 3
+        if score >= 0.85:
+            base_leverage = 5
         elif score >= 0.75:
-            base_leverage = 2
+            base_leverage = 4
+        elif score >= 0.0:
+            base_leverage = 3
         else:
             return 0
         
         # BOLL强趋势降杠杆（强趋势可能已运行较长时间）
         if ema_multiplier >= 1.2:
-            leverage = max(2, int(base_leverage * self.config.ema_strong_trend_leverage_mult))
+            leverage = max(3, int(base_leverage * self.config.ema_strong_trend_leverage_mult))
         else:
             leverage = base_leverage
 
         red_bar_probe_mode = self._is_red_bar_growing_probe_overlay(signal_type_1h)
         green_bar_probe_mode = self._is_green_bar_growing_probe_overlay(signal_type_1h)
+        if is_trial_entry:
+            leverage = min(leverage, max(1, int(self.config.preflip_trial_max_leverage or 3)))
         if red_bar_probe_mode:
-            leverage = min(leverage, max(1, int(self.config.red_bar_growing_probe_max_leverage or 2)))
+            leverage = min(leverage, max(1, int(self.config.red_bar_growing_probe_max_leverage or 3)))
         if green_bar_probe_mode:
-            leverage = min(leverage, max(1, int(self.config.green_bar_growing_probe_max_leverage or 2)))
+            leverage = min(leverage, max(1, int(self.config.green_bar_growing_probe_max_leverage or 3)))
         if rsi_probe_mode or red_bar_probe_mode:
-            leverage = min(leverage, max(1, int(self.config.rsi_probe_forced_leverage or 2)))
-        elif rsi_conflict and leverage > 2:
+            leverage = min(leverage, max(1, int(self.config.rsi_probe_forced_leverage or 3)))
+        elif rsi_conflict and leverage > 3:
             leverage -= 1
 
         if (
@@ -6601,9 +6782,6 @@ class MACDStrategyV2Engine:
             and self.config.flip_bearish_normal_ema_max_leverage > 0
         ):
             leverage = min(leverage, int(self.config.flip_bearish_normal_ema_max_leverage))
-
-        if is_trial_entry and self.config.preflip_trial_max_leverage > 0:
-            leverage = min(leverage, int(self.config.preflip_trial_max_leverage))
 
         if self.is_watchlist_symbol(symbol) and self.config.symbol_risk_watchlist_max_leverage > 0:
             leverage = min(leverage, int(self.config.symbol_risk_watchlist_max_leverage))

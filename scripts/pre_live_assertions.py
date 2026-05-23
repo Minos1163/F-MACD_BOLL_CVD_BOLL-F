@@ -137,6 +137,25 @@ def assert_entry_quality_gates(v2: Dict[str, Any]) -> List[str]:
         errors.append("entry_quality_gates.ema_conditional_multiplier.require_15m_raw_min must be >= 0.25")
     if _as_float(ema.get("require_adx_min"), 0.0) < 20.0:
         errors.append("entry_quality_gates.ema_conditional_multiplier.require_adx_min must be >= 20")
+    vwap_score = gates.get("vwap_score_hard_block", {}) if isinstance(gates.get("vwap_score_hard_block"), dict) else {}
+    if vwap_score.get("enabled") is not True:
+        errors.append("entry_quality_gates.vwap_score_hard_block.enabled must be true")
+    if _as_float(vwap_score.get("below_block"), 1.0) > 0.12:
+        errors.append("entry_quality_gates.vwap_score_hard_block.below_block must be <= 0.12")
+    if _as_float(vwap_score.get("below_probe"), 1.0) > 0.30:
+        errors.append("entry_quality_gates.vwap_score_hard_block.below_probe must be <= 0.30")
+    if _as_float(vwap_score.get("probe_max"), 1.0) > 0.042:
+        errors.append("entry_quality_gates.vwap_score_hard_block.probe_max must be <= 0.042")
+    no_trade = gates.get("no_trade_gate", {}) if isinstance(gates.get("no_trade_gate"), dict) else {}
+    if no_trade.get("enabled") is not True:
+        errors.append("entry_quality_gates.no_trade_gate.enabled must be true")
+    if _as_float(no_trade.get("block_below_score"), 0.0) < 0.85:
+        errors.append("entry_quality_gates.no_trade_gate.block_below_score must be >= 0.85")
+    range_gate = gates.get("range_gate", {}) if isinstance(gates.get("range_gate"), dict) else {}
+    if range_gate.get("enabled") is not True:
+        errors.append("entry_quality_gates.range_gate.enabled must be true")
+    if _as_float(range_gate.get("block_below_score"), 0.0) < 0.80:
+        errors.append("entry_quality_gates.range_gate.block_below_score must be >= 0.80")
     return errors
 
 
@@ -180,6 +199,91 @@ def assert_position_count_limit_by_margin(ff: Dict[str, Any]) -> List[str]:
         errors.append("position_count_limit_by_margin.max_small_margin_positions must be 5")
     if int(_as_float(limit.get("max_large_margin_positions"), 0.0)) != 4:
         errors.append("position_count_limit_by_margin.max_large_margin_positions must be 4")
+    if int(_as_float(limit.get("small_margin_leverage"), 0.0)) != 9:
+        errors.append("position_count_limit_by_margin.small_margin_leverage must be 9")
+    if int(_as_float(ff.get("max_leverage"), 0.0)) < 9:
+        errors.append("fund_flow.max_leverage must be >= 9 for small margin leverage override")
+    required_total = int(_as_float(limit.get("max_small_margin_positions"), 0.0)) + int(
+        _as_float(limit.get("max_large_margin_positions"), 0.0)
+    )
+    if required_total > 0 and int(_as_float(ff.get("max_active_symbols"), 0.0)) < required_total:
+        errors.append(f"max_active_symbols must be >= {required_total} for margin buckets")
+    dyn = ff.get("dynamic_max_active_symbols", {})
+    if isinstance(dyn, dict) and required_total > 0 and int(_as_float(dyn.get("max_active_symbols"), 0.0)) < required_total:
+        errors.append(f"dynamic_max_active_symbols.max_active_symbols must be >= {required_total}")
+    return errors
+
+
+def assert_dynamic_leverage_caps(ff: Dict[str, Any], v2: Dict[str, Any]) -> List[str]:
+    errors: List[str] = []
+    pfr = ff.get("probe_floor_rescue", {}) if isinstance(ff.get("probe_floor_rescue"), dict) else {}
+    rsi = v2.get("rsi_config", {}) if isinstance(v2.get("rsi_config"), dict) else {}
+    rhythm = rsi.get("rhythm", {}) if isinstance(rsi.get("rhythm"), dict) else {}
+    filters = v2.get("entry_filters", {}) if isinstance(v2.get("entry_filters"), dict) else {}
+    pm = v2.get("position_management", {}) if isinstance(v2.get("position_management"), dict) else {}
+    caps = {
+        "probe_floor_rescue.probe_leverage_cap": pfr.get("probe_leverage_cap"),
+        "rsi_config.rhythm.probe_forced_leverage": rhythm.get("probe_forced_leverage"),
+        "entry_filters.preflip_trial_max_leverage": filters.get("preflip_trial_max_leverage"),
+        "entry_filters.flip_bearish_normal_boll_max_leverage": filters.get("flip_bearish_normal_boll_max_leverage"),
+        "position_management.red_bar_growing_probe_max_leverage": pm.get("red_bar_growing_probe_max_leverage"),
+        "position_management.green_bar_growing_probe_max_leverage": pm.get("green_bar_growing_probe_max_leverage"),
+    }
+    for key, raw in caps.items():
+        if _as_float(raw, 3.0) < 3.0:
+            errors.append(f"{key} must be >= 3 for 3/4/5 leverage ladder")
+    return errors
+
+
+def assert_btc_beta_risk(ff: Dict[str, Any]) -> List[str]:
+    beta = ff.get("btc_beta_risk", {})
+    if not isinstance(beta, dict):
+        return ["btc_beta_risk must be configured"]
+    errors: List[str] = []
+    if beta.get("enabled") is not True:
+        errors.append("btc_beta_risk.enabled must be true")
+    if beta.get("warmup_on_start") is not True:
+        errors.append("btc_beta_risk.warmup_on_start must be true")
+    if int(_as_float(beta.get("warmup_kline_limit"), 0.0)) < 50:
+        errors.append("btc_beta_risk.warmup_kline_limit must be >= 50")
+    if _as_float(beta.get("default_corr_major_symbols"), 0.0) < 0.35:
+        errors.append("btc_beta_risk.default_corr_major_symbols must be >= 0.35")
+    if _as_float(beta.get("min_corr_for_btc_weight"), 0.0) < 0.20:
+        errors.append("btc_beta_risk.min_corr_for_btc_weight must be >= 0.20")
+    if int(_as_float(beta.get("corr_window_bars"), 0.0)) < 48:
+        errors.append("btc_beta_risk.corr_window_bars must be >= 48")
+    if int(_as_float(beta.get("fast_fail_window_bars"), 0.0)) != 2:
+        errors.append("btc_beta_risk.fast_fail_window_bars must be 2")
+    if _as_float(beta.get("fast_fail_mae_threshold"), 0.0) > -0.002 + 1e-12:
+        errors.append("btc_beta_risk.fast_fail_mae_threshold must be <= -0.002")
+    if _as_float(beta.get("fast_fail_mfe_threshold"), 0.0) > 0.002 + 1e-12:
+        errors.append("btc_beta_risk.fast_fail_mfe_threshold must be <= 0.002")
+    if int(_as_float(beta.get("risk_score_reduce_threshold"), 0.0)) != 2:
+        errors.append("btc_beta_risk.risk_score_reduce_threshold must be 2")
+    if int(_as_float(beta.get("risk_score_close_threshold"), 0.0)) != 4:
+        errors.append("btc_beta_risk.risk_score_close_threshold must be 4")
+    if _as_float(beta.get("small_notional_close_threshold"), 0.0) > 10.0:
+        errors.append("btc_beta_risk.small_notional_close_threshold must be <= 10")
+    return errors
+
+
+def assert_btc_entry_regime_gate(ff: Dict[str, Any]) -> List[str]:
+    gate = ff.get("btc_entry_regime_gate", {})
+    if not isinstance(gate, dict):
+        return ["btc_entry_regime_gate must be configured"]
+    errors: List[str] = []
+    if gate.get("enabled") is not True:
+        errors.append("btc_entry_regime_gate.enabled must be true")
+    if _as_float(gate.get("falling_avg_ret"), 0.0) > -0.001 + 1e-12:
+        errors.append("btc_entry_regime_gate.falling_avg_ret must be <= -0.001")
+    if _as_float(gate.get("rising_avg_ret"), 0.0) < 0.001 - 1e-12:
+        errors.append("btc_entry_regime_gate.rising_avg_ret must be >= 0.001")
+    if int(_as_float(gate.get("chase_short_block_bars"), 0.0)) < 4:
+        errors.append("btc_entry_regime_gate.chase_short_block_bars must be >= 4")
+    if _as_float(gate.get("chase_short_ret_threshold"), 0.0) > -0.015 + 1e-12:
+        errors.append("btc_entry_regime_gate.chase_short_ret_threshold must be <= -0.015")
+    if _as_float(gate.get("btc_falling_low_vwap_block"), 1.0) > 0.30:
+        errors.append("btc_entry_regime_gate.btc_falling_low_vwap_block must be <= 0.30")
     return errors
 
 
@@ -242,6 +346,9 @@ def run_assertions(config_path: Path) -> int:
     errors.extend(assert_short_micro_floor(v2))
     errors.extend(assert_final_signal_notional_floor(ff))
     errors.extend(assert_position_count_limit_by_margin(ff))
+    errors.extend(assert_dynamic_leverage_caps(ff, v2))
+    errors.extend(assert_btc_beta_risk(ff))
+    errors.extend(assert_btc_entry_regime_gate(ff))
     errors.extend(assert_dca_disabled(ff))
 
     if errors:
