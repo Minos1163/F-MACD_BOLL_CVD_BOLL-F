@@ -239,6 +239,130 @@ def build_cancel_quality_summary(trades_df: pd.DataFrame, pending_cancels_df: pd
     }
 
 
+def _bucket_label(value: float, edges: List[float]) -> str:
+    if not edges:
+        return "all"
+    prev = float("-inf")
+    for edge in edges:
+        edge_value = float(edge)
+        if value < edge_value:
+            left = "-inf" if prev == float("-inf") else f"{prev:.2f}"
+            return f"{left}-{edge_value:.2f}"
+        prev = edge_value
+    return f"{prev:.2f}+"
+
+
+def _count_by_bucket(values: pd.Series, edges: List[float]) -> dict:
+    counts: Dict[str, int] = {}
+    for raw in pd.to_numeric(values, errors="coerce").dropna():
+        label = _bucket_label(float(raw), edges)
+        counts[label] = int(counts.get(label, 0) or 0) + 1
+    return counts
+
+
+def _safe_profit_factor(pnls: pd.Series) -> float:
+    wins = pnls[pnls > 0].sum()
+    losses = pnls[pnls <= 0].sum()
+    if losses < 0:
+        return float(wins / abs(losses))
+    return float("inf") if wins > 0 else 0.0
+
+
+def _sharpe_from_equity(equity_df: pd.DataFrame) -> float:
+    if equity_df.empty or "equity" not in equity_df.columns:
+        return 0.0
+    equity = pd.to_numeric(equity_df["equity"], errors="coerce").dropna()
+    returns = equity.pct_change().dropna()
+    if returns.empty:
+        return 0.0
+    std = float(returns.std(ddof=0))
+    if std <= 0:
+        return 0.0
+    return float((returns.mean() / std) * (len(returns) ** 0.5))
+
+
+def _max_drawdown_pct_from_equity(equity_df: pd.DataFrame) -> float:
+    if equity_df.empty or "equity" not in equity_df.columns:
+        return 0.0
+    equity = pd.to_numeric(equity_df["equity"], errors="coerce").dropna()
+    if equity.empty:
+        return 0.0
+    peak = equity.cummax()
+    dd = (peak - equity) / peak.replace(0, pd.NA)
+    return float(dd.max() * 100.0) if not dd.dropna().empty else 0.0
+
+
+def _loss_classification(trades_df: pd.DataFrame) -> dict:
+    result = {"never_worked": 0, "worked_then_reversed": 0, "stopped_before_followthrough": 0}
+    if trades_df.empty:
+        return result
+    for _idx, row in trades_df.iterrows():
+        pnl = float(row.get("pnl", 0.0) or 0.0)
+        if pnl >= 0:
+            continue
+        mfe = float(row.get("mfe_pct_full_hold", 0.0) or 0.0)
+        mae = float(row.get("mae_pct_full_hold", 0.0) or 0.0)
+        minutes = float(row.get("minutes_held", 0.0) or 0.0)
+        if mfe < 0.002:
+            result["never_worked"] += 1
+        elif minutes <= 30.0 and mae <= -0.004:
+            result["stopped_before_followthrough"] += 1
+        else:
+            result["worked_then_reversed"] += 1
+    return result
+
+
+def build_post_mortem_summary(
+    trades_df: pd.DataFrame,
+    equity_df: pd.DataFrame | None = None,
+    pending_cancels_df: pd.DataFrame | None = None,
+) -> dict:
+    equity_df = equity_df if equity_df is not None else pd.DataFrame()
+    pending_cancels_df = pending_cancels_df if pending_cancels_df is not None else pd.DataFrame()
+    pnls = pd.to_numeric(trades_df.get("pnl", pd.Series(dtype=float)), errors="coerce").fillna(0.0)
+    wins = pnls[pnls > 0]
+    losses = pnls[pnls <= 0]
+    trade_count = int(len(pnls))
+    active_points = 0
+    if not equity_df.empty:
+        open_positions = pd.to_numeric(equity_df.get("open_positions", pd.Series(dtype=float)), errors="coerce").fillna(0)
+        pending_orders = pd.to_numeric(equity_df.get("pending_orders", pd.Series(dtype=float)), errors="coerce").fillna(0)
+        active_points = int(((open_positions > 0) | (pending_orders > 0)).sum())
+    equity_points = int(len(equity_df)) if equity_df is not None else 0
+    exit_reasons = (
+        trades_df["reason"].fillna("").astype(str).value_counts().to_dict()
+        if "reason" in trades_df.columns and not trades_df.empty
+        else {}
+    )
+    return {
+        "trade_count": trade_count,
+        "win_rate_pct": float(len(wins) / trade_count * 100.0) if trade_count else 0.0,
+        "profit_factor": _safe_profit_factor(pnls),
+        "expectancy": float(pnls.mean()) if trade_count else 0.0,
+        "gross_profit": float(wins.sum()) if not wins.empty else 0.0,
+        "gross_loss": float(losses.sum()) if not losses.empty else 0.0,
+        "avg_win": float(wins.mean()) if not wins.empty else 0.0,
+        "avg_loss": float(losses.mean()) if not losses.empty else 0.0,
+        "sharpe": _sharpe_from_equity(equity_df),
+        "max_drawdown_pct": _max_drawdown_pct_from_equity(equity_df),
+        "exposure_pct": float(active_points / equity_points * 100.0) if equity_points else 0.0,
+        "exit_reasons": {str(k): int(v) for k, v in exit_reasons.items()},
+        "tail_risk": {
+            "worst_5_pnl": [float(x) for x in pnls.sort_values().head(5).tolist()],
+            "best_5_pnl": [float(x) for x in pnls.sort_values(ascending=False).head(5).tolist()],
+        },
+        "mfe_buckets": _count_by_bucket(trades_df.get("mfe_pct_full_hold", pd.Series(dtype=float)), [0.002, 0.005, 0.01, 0.02]),
+        "mae_buckets": _count_by_bucket(trades_df.get("mae_pct_full_hold", pd.Series(dtype=float)), [-0.02, -0.01, -0.005, 0.0]),
+        "hold_time_buckets": _count_by_bucket(trades_df.get("minutes_held", pd.Series(dtype=float)), [15, 30, 60, 120, 240]),
+        "shadow_score_buckets": _count_by_bucket(
+            trades_df.get("continuation_quality_score_shadow", pd.Series(dtype=float)),
+            [0.25, 0.50, 0.75, 1.00],
+        ),
+        "loss_classification": _loss_classification(trades_df),
+        "pending_cancel_count": int(len(pending_cancels_df)),
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Analyze a backtest trades CSV into symbol and drawdown breakdowns.")
     parser.add_argument("--trades", required=True, help="path to backtest trades csv")
@@ -264,6 +388,7 @@ def main() -> None:
     true_drawdown_csv = prefix.parent / f"{prefix.name}_true_drawdown_breakdown.csv"
     summary_json = prefix.parent / f"{prefix.name}_analysis_summary.json"
     cancel_quality_json = prefix.parent / f"{prefix.name}_cancel_quality_summary.json"
+    post_mortem_json = prefix.parent / f"{prefix.name}_post_mortem_summary.json"
 
     write_csv(symbol_csv, symbol_rows)
     write_csv(drawdown_csv, realized_drawdown_rows)
@@ -274,6 +399,14 @@ def main() -> None:
         trades_df = pd.DataFrame(trades)
         cancel_quality_summary = build_cancel_quality_summary(trades_df, pending_cancels_df)
         cancel_quality_json.write_text(json.dumps(cancel_quality_summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    trades_df = pd.DataFrame(trades)
+    equity_df = pd.read_csv(args.equity_curve, encoding="utf-8-sig") if args.equity_curve else pd.DataFrame()
+    post_mortem_summary = build_post_mortem_summary(
+        trades_df,
+        equity_df,
+        pending_cancels_df if args.pending_cancels else pd.DataFrame(),
+    )
+    post_mortem_json.write_text(json.dumps(post_mortem_summary, ensure_ascii=False, indent=2), encoding="utf-8")
     summary = {
         "trades_file": str(trades_path),
         "initial_capital": float(args.initial_capital),
@@ -283,6 +416,7 @@ def main() -> None:
         "drawdown_breakdown_file": str(drawdown_csv),
         "true_drawdown_breakdown_file": str(true_drawdown_csv),
         "cancel_quality_summary_file": str(cancel_quality_json) if cancel_quality_summary is not None else "",
+        "post_mortem_summary_file": str(post_mortem_json),
         "symbols_traded": len(symbol_rows),
         "drawdown_episodes": len(realized_drawdown_rows),
         "true_drawdown_episodes": len(true_drawdown_rows),
@@ -298,6 +432,7 @@ def main() -> None:
     print(f"true_drawdown_breakdown: {true_drawdown_csv}")
     if cancel_quality_summary is not None:
         print(f"cancel_quality_summary: {cancel_quality_json}")
+    print(f"post_mortem_summary: {post_mortem_json}")
     print(f"summary: {summary_json}")
 
 

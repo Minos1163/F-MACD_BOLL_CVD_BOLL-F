@@ -61,6 +61,27 @@ class FundFlowExecutionRouter:
         self.close_ioc_retry_step_bps = max(0.0, self._to_float(degrade_cfg.get("close_ioc_retry_step_bps", 10.0), 10.0))
         self.close_gtc_fallback_enabled = self._to_bool(degrade_cfg.get("close_gtc_fallback_enabled", True), True)
         self.close_market_fallback_enabled = self._to_bool(degrade_cfg.get("close_market_fallback_enabled", False), False)
+        count_limit_cfg = ff_cfg.get("position_count_limit_by_margin", {}) or {}
+        if not isinstance(count_limit_cfg, dict):
+            count_limit_cfg = {}
+        self.position_count_limit_by_margin_enabled = self._to_bool(count_limit_cfg.get("enabled", False), False)
+        self.position_count_small_margin_threshold_usdt = max(
+            0.0,
+            self._to_float(count_limit_cfg.get("small_margin_threshold_usdt", 5.0), 5.0),
+        )
+        self.position_count_max_small_margin_positions = max(
+            0,
+            int(self._to_float(count_limit_cfg.get("max_small_margin_positions", 5), 5.0)),
+        )
+        self.position_count_max_large_margin_positions = max(
+            0,
+            int(self._to_float(count_limit_cfg.get("max_large_margin_positions", 4), 4.0)),
+        )
+        self.position_count_small_margin_leverage = max(
+            0,
+            int(self._to_float(count_limit_cfg.get("small_margin_leverage", 0), 0.0)),
+        )
+        self.min_entry_margin_usdt = max(0.0, self._to_float(ff_cfg.get("min_entry_margin_usdt", 0.0), 0.0))
 
     @staticmethod
     def _to_float(value: Any, default: float = 0.0) -> float:
@@ -423,6 +444,124 @@ class FundFlowExecutionRouter:
                 "error": str(e),
             }
 
+    def _position_margin_usdt(self, position: Dict[str, Any]) -> float:
+        margin = self._to_float(position.get("margin"), 0.0)
+        if margin > 0:
+            return abs(margin)
+        margin = self._to_float(position.get("initialMargin"), 0.0)
+        if margin > 0:
+            return abs(margin)
+        amount = abs(self._to_float(position.get("positionAmt"), 0.0))
+        entry_price = self._to_float(position.get("entryPrice"), 0.0)
+        leverage = self._to_float(position.get("leverage"), 0.0)
+        if amount > 0 and entry_price > 0 and leverage > 0:
+            return abs(amount * entry_price / leverage)
+        notional = abs(self._to_float(position.get("notional"), 0.0))
+        if notional <= 0:
+            notional = abs(self._to_float(position.get("positionValue"), 0.0))
+        if notional > 0 and leverage > 0:
+            return abs(notional / leverage)
+        return 0.0
+
+    def _check_position_count_limit_by_margin(
+        self,
+        *,
+        symbol: str,
+        new_margin: float,
+        position: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        threshold = float(self.position_count_small_margin_threshold_usdt)
+        bucket = "small" if float(new_margin) < threshold else "large"
+        max_count = (
+            int(self.position_count_max_small_margin_positions)
+            if bucket == "small"
+            else int(self.position_count_max_large_margin_positions)
+        )
+        counts = {"small": 0, "large": 0}
+        if position is not None or not self.position_count_limit_by_margin_enabled or max_count <= 0:
+            return {
+                "allowed": True,
+                "bucket": bucket,
+                "current_count": 0,
+                "max_count": max_count,
+                "threshold_usdt": threshold,
+                "new_margin_usdt": float(new_margin),
+                "counts": counts,
+            }
+
+        symbol_up = str(symbol or "").upper()
+        try:
+            positions = self.client.get_all_positions() if hasattr(self.client, "get_all_positions") else []
+        except Exception as e:
+            return {
+                "allowed": True,
+                "bucket": bucket,
+                "current_count": 0,
+                "max_count": max_count,
+                "threshold_usdt": threshold,
+                "new_margin_usdt": float(new_margin),
+                "counts": counts,
+                "position_fetch_error": str(e),
+            }
+
+        seen_symbols = set()
+        for raw_position in positions or []:
+            if not isinstance(raw_position, dict):
+                continue
+            pos_symbol = str(raw_position.get("symbol") or "").upper()
+            if not pos_symbol or pos_symbol == symbol_up or pos_symbol in seen_symbols:
+                continue
+            amount = abs(self._to_float(raw_position.get("positionAmt"), 0.0))
+            if amount <= 0:
+                continue
+            margin = self._position_margin_usdt(raw_position)
+            if margin <= 0:
+                continue
+            seen_symbols.add(pos_symbol)
+            if margin < threshold:
+                counts["small"] += 1
+            else:
+                counts["large"] += 1
+
+        current_count = counts[bucket]
+        return {
+            "allowed": current_count < max_count,
+            "bucket": bucket,
+            "current_count": current_count,
+            "max_count": max_count,
+            "threshold_usdt": threshold,
+            "new_margin_usdt": float(new_margin),
+            "counts": counts,
+        }
+
+    def _check_min_entry_margin(
+        self,
+        *,
+        decision: FundFlowDecision,
+        margin: float,
+        available_balance: float,
+    ) -> Dict[str, Any]:
+        threshold = float(self.min_entry_margin_usdt)
+        meta = {
+            "enabled": threshold > 0.0,
+            "reason": "disabled",
+            "estimated_margin_usdt": max(0.0, float(margin or 0.0)),
+            "min_entry_margin_usdt": threshold,
+            "target_portion": self._to_float(getattr(decision, "target_portion_of_balance", 0.0), 0.0),
+            "available_balance": max(0.0, float(available_balance or 0.0)),
+            "leverage": max(1, int(self._to_float(getattr(decision, "leverage", 1), 1.0))),
+        }
+        if decision.operation not in (Operation.BUY, Operation.SELL):
+            meta["reason"] = "not_entry"
+            return {"allowed": True, **meta}
+        if threshold <= 0.0:
+            return {"allowed": True, **meta}
+        if meta["estimated_margin_usdt"] + 1e-12 < threshold:
+            meta["reason"] = "micro_margin_block"
+            return {"allowed": False, **meta}
+        meta["reason"] = "margin_check_passed"
+        return {"allowed": True, **meta}
+
     def _place_limit_order(
         self,
         *,
@@ -508,6 +647,96 @@ class FundFlowExecutionRouter:
                 "code": -1,
                 "message": f"place_market_order exception: {msg}",
             }
+
+    def _place_exit_guard_close_position_order(
+        self,
+        *,
+        symbol: str,
+        close_side: str,
+        position_side: str,
+        quantity: float,
+    ) -> Dict[str, Any]:
+        params: Dict[str, Any] = {
+            "symbol": symbol,
+            "type": "MARKET",
+            "quantity": quantity,
+            "closePosition": True,
+        }
+        try:
+            if bool(self.client.broker.get_hedge_mode()):
+                params["positionSide"] = position_side
+        except Exception:
+            params["positionSide"] = position_side
+
+        try:
+            return self.client._execute_order_v2(
+                params=params,
+                side=close_side,
+                reduce_only=False,
+            )
+        except Exception as e:
+            return {
+                "status": "error",
+                "code": -1,
+                "message": f"exit_guard_close_position exception: {e}",
+            }
+
+    def _retry_exit_guard_close_position_after_reduce_reject(
+        self,
+        *,
+        decision: FundFlowDecision,
+        position_side: str,
+        close_side: str,
+        close_qty: float,
+        filled_close_qty: float,
+    ) -> Optional[Dict[str, Any]]:
+        if "EXIT_SIGNAL_GUARD" not in str(decision.reason or ""):
+            return None
+        live = self._fetch_live_position_state(decision.symbol, preferred_side=position_side)
+        live_size = self._to_float(live.get("size"), 0.0)
+        live_side = str(live.get("side") or position_side).upper()
+        if live.get("ok") and live_size <= 0:
+            return {
+                "status": "success",
+                "operation": "close",
+                "message": "ExitGuard -2022 后实时仓位为0，按已平仓处理",
+                "quantity": close_qty,
+                "filled_quantity": filled_close_qty,
+                "remaining_quantity": 0.0,
+                "fallback": "exit_guard_reduce_only_recheck_flat",
+                "position_sync": live,
+            }
+        if not live.get("ok") or live_side not in ("LONG", "SHORT") or live_size <= 0:
+            return None
+
+        retry_side = "SELL" if live_side == "LONG" else "BUY"
+        retry_qty = live_size
+        try:
+            retry_qty = float(self.client.format_quantity(decision.symbol, retry_qty))
+        except Exception:
+            pass
+        if retry_qty <= 0:
+            return None
+
+        retry = self._place_exit_guard_close_position_order(
+            symbol=decision.symbol,
+            close_side=retry_side,
+            position_side=live_side,
+            quantity=retry_qty,
+        )
+        executed = min(self._to_float(retry.get("executedQty"), 0.0), retry_qty)
+        success = self._is_success(retry) or self._is_filled(retry)
+        return {
+            "status": "success" if success else "error",
+            "operation": "close",
+            "order": retry,
+            "quantity": close_qty,
+            "filled_quantity": filled_close_qty + executed,
+            "remaining_quantity": 0.0 if success else retry_qty,
+            "fallback": "exit_guard_close_position_retry",
+            "position_sync": live,
+            "message": "ExitGuard -2022 后使用 closePosition 重试" if success else self._extract_message(retry),
+        }
 
     @staticmethod
     def _with_degradation_path(result: Dict[str, Any], path: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -933,6 +1162,15 @@ class FundFlowExecutionRouter:
         trigger_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         trigger_context = trigger_context or {}
+        if decision.operation in (Operation.BUY, Operation.SELL):
+            metadata = dict(decision.metadata or {})
+            if "account_equity" not in metadata:
+                equity = self._to_float(account_state.get("equity"), 0.0)
+                if equity <= 0:
+                    equity = self._to_float(account_state.get("available_balance"), 0.0)
+                if equity > 0:
+                    metadata["account_equity"] = equity
+                    decision.metadata = metadata
         try:
             decision = self.risk.validate_decision(decision, position=position)
         except Exception as e:
@@ -953,7 +1191,60 @@ class FundFlowExecutionRouter:
                     self.attribution.log_execution(decision, result)
                     return result
 
+                margin = available_balance * decision.target_portion_of_balance
+                margin_gate = self._check_min_entry_margin(
+                    decision=decision,
+                    margin=margin,
+                    available_balance=available_balance,
+                )
+                if not bool(margin_gate.get("allowed", True)):
+                    if isinstance(decision.metadata, dict):
+                        decision.metadata["micro_margin_gate"] = margin_gate
+                    result = {
+                        "status": "noop",
+                        "message": "开仓保证金低于最小阈值，跳过开仓",
+                        "micro_margin_gate": margin_gate,
+                        "trigger_context": trigger_context,
+                    }
+                    self.attribution.log_execution(decision, result)
+                    return result
+                if isinstance(decision.metadata, dict):
+                    decision.metadata["micro_margin_gate"] = margin_gate
+                count_limit = self._check_position_count_limit_by_margin(
+                    symbol=decision.symbol,
+                    new_margin=margin,
+                    position=position,
+                )
+                if not bool(count_limit.get("allowed", True)):
+                    result = {
+                        "status": "noop",
+                        "message": "持仓数量限制，跳过开仓",
+                        "position_count_limit": count_limit,
+                        "trigger_context": trigger_context,
+                    }
+                    self.attribution.log_execution(decision, result)
+                    return result
+
                 leverage = self.risk.clamp_leverage(decision.leverage)
+                small_margin_leverage_override = None
+                strategy_mode = ""
+                if isinstance(decision.metadata, dict):
+                    strategy_mode = str(decision.metadata.get("strategy_mode") or "").strip().lower()
+                if (
+                    self.position_count_limit_by_margin_enabled
+                    and margin > 0
+                    and margin < self.position_count_small_margin_threshold_usdt
+                    and self.position_count_small_margin_leverage > leverage
+                ):
+                    original_leverage = leverage
+                    leverage = self.position_count_small_margin_leverage
+                    small_margin_leverage_override = {
+                        "enabled": True,
+                        "threshold_usdt": self.position_count_small_margin_threshold_usdt,
+                        "margin_usdt": margin,
+                        "original_leverage": original_leverage,
+                        "leverage": leverage,
+                    }
                 leverage_sync = self._sync_symbol_leverage(decision.symbol, leverage)
                 strict_sync = bool(
                     ((self.risk.config or {}).get("fund_flow", {}) or {}).get("strict_leverage_sync", True)
@@ -973,7 +1264,6 @@ class FundFlowExecutionRouter:
                     except Exception:
                         pass
 
-                margin = available_balance * decision.target_portion_of_balance
                 position_value = margin * leverage
                 qty_raw = round(position_value / current_price, 10) if current_price > 0 else 0.0
                 qty, qty_info = self._ensure_open_quantity(
@@ -1081,6 +1371,7 @@ class FundFlowExecutionRouter:
                             "margin": margin,
                             "position_value": position_value,
                             "leverage_sync": leverage_sync,
+                            "small_margin_leverage_override": small_margin_leverage_override,
                             "quantity_info": qty_info,
                             "trigger_context": trigger_context,
                         }
@@ -1105,6 +1396,7 @@ class FundFlowExecutionRouter:
                     "position_value": position_value,
                     "quantity_info": qty_info,
                     "leverage_sync": leverage_sync,
+                    "small_margin_leverage_override": small_margin_leverage_override,
                     "trigger_context": trigger_context,
                 }
                 self.attribution.log_execution(decision, result)
@@ -1408,35 +1700,48 @@ class FundFlowExecutionRouter:
                     bool(step.get("reduce_only_rejected")) for step in close_path
                 )
                 if final_result.get("status") == "error" and reduce_only_rejected:
-                    live_after_reject = self._fetch_live_position_state(decision.symbol, preferred_side=position_side)
-                    live_after_size = self._to_float(live_after_reject.get("size"), 0.0)
-                    if live_after_reject.get("ok") and live_after_size <= 0:
-                        final_result = {
-                            "status": "success",
-                            "operation": "close",
-                            "message": "ReduceOnly rejected，但交易所实时仓位已为0，按已平仓处理",
-                            "quantity": close_qty,
-                            "filled_quantity": filled_close_qty,
-                            "remaining_quantity": 0.0,
-                            "fallback": "reduce_only_reconciled_flat",
-                            "position_sync": {
+                    exit_guard_retry = self._retry_exit_guard_close_position_after_reduce_reject(
+                        decision=decision,
+                        position_side=position_side,
+                        close_side=close_side,
+                        close_qty=close_qty,
+                        filled_close_qty=filled_close_qty,
+                    )
+                    if exit_guard_retry is not None:
+                        final_result = exit_guard_retry
+                        if final_result.get("status") == "success":
+                            remaining_close_qty = 0.0
+                    else:
+                        live_after_reject = self._fetch_live_position_state(decision.symbol, preferred_side=position_side)
+                        live_after_size = self._to_float(live_after_reject.get("size"), 0.0)
+                        if live_after_reject.get("ok") and live_after_size <= 0:
+                            final_result = {
+                                "status": "success",
+                                "operation": "close",
+                                "message": "ReduceOnly rejected，但交易所实时仓位已为0，按已平仓处理",
+                                "quantity": close_qty,
+                                "filled_quantity": filled_close_qty,
+                                "remaining_quantity": 0.0,
+                                "fallback": "reduce_only_reconciled_flat",
+                                "position_sync": {
+                                    "snapshot_side": snapshot_side,
+                                    "snapshot_size": snapshot_size,
+                                    "live_side": live_after_reject.get("side"),
+                                    "live_size": live_after_size,
+                                    "source": live_after_reject.get("source"),
+                                },
+                            }
+                            remaining_close_qty = 0.0
+                        else:
+                            final_result["position_sync"] = {
                                 "snapshot_side": snapshot_side,
                                 "snapshot_size": snapshot_size,
                                 "live_side": live_after_reject.get("side"),
                                 "live_size": live_after_size,
+                                "live_ok": bool(live_after_reject.get("ok")),
                                 "source": live_after_reject.get("source"),
-                            },
-                        }
-                    else:
-                        final_result["position_sync"] = {
-                            "snapshot_side": snapshot_side,
-                            "snapshot_size": snapshot_size,
-                            "live_side": live_after_reject.get("side"),
-                            "live_size": live_after_size,
-                            "live_ok": bool(live_after_reject.get("ok")),
-                            "source": live_after_reject.get("source"),
-                            "error": live_after_reject.get("error"),
-                        }
+                                "error": live_after_reject.get("error"),
+                            }
 
                 if final_result.get("status") == "error" and not final_result.get("message"):
                     order_detail = final_result.get("order")

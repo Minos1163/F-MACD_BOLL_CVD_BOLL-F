@@ -11,6 +11,12 @@ from src.fund_flow.models import (
     Operation,
     TimeInForce,
 )
+from src.fund_flow.quadrant_resonance import (
+    Quadrant,
+    QuadrantResonanceConfig,
+    QuadrantResonanceEngine,
+    QuadrantSignal,
+)
 from src.fund_flow.risk_engine import FundFlowRiskEngine
 from src.fund_flow.trigger_engine import TriggerEngine
 from src.fund_flow.weight_router import (
@@ -41,6 +47,10 @@ __all__ = [
     "MarketIngestionService",
     "MarketStorage",
     "Operation",
+    "Quadrant",
+    "QuadrantResonanceConfig",
+    "QuadrantResonanceEngine",
+    "QuadrantSignal",
     "TimeInForce",
     "TriggerEngine",
     "WeightMap",

@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass, field, replace
 import warnings
 warnings.filterwarnings('ignore')
@@ -28,13 +28,233 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.config.config_loader import ConfigLoader
 from src.fund_flow.macd_strategy_v2 import MACDStrategyV2Engine, MACDStrategyV2Config, MACDSignalV2, VetoType
+from src.fund_flow.quadrant_resonance import QuadrantResonanceConfig, QuadrantResonanceEngine, QuadrantSignal
 from src.fund_flow.filters.symbol_signal_override import create_override_registry
 from src.fund_flow.filters.time_window_filter import TimeWindowFilter, TimeWindowFilterConfig
 from src.trading.risk_manager import RiskManager
 from src.utils.indicators import calculate_macd_histogram_series
+from src.fund_flow.market_breadth import MarketBreadthConfig, MarketBreadthDetector
 
 
 # ==================== 配置 ====================
+
+@dataclass
+class SlowBullRsiAblationConfig:
+    enabled: bool = False
+    rsi_extreme_mode: str = "hard_block"
+    rsi_extreme_max_portion: float = 0.02
+    rsi_extreme_trailing_stop_pct: float = 0.015
+
+
+@dataclass
+class SlowBull1hGateDowngradeConfig:
+    enabled: bool = False
+    mode: str = "keep"
+    momentum_threshold_30m: float = 0.003
+    momentum_threshold_60m: float = 0.005
+
+
+@dataclass
+class CapacityReplacementShadowConfig:
+    enabled: bool = False
+    replacement_enabled: bool = False
+    ranking_metric: str = "momentum_quality"
+    min_mfe_to_replace: float = 0.001
+    replacement_threshold: float = 0.05
+
+
+@dataclass
+class TieredBetaExitConfig:
+    enabled: bool = False
+    continuation_fast_fail_bars: int = 4
+    normal_fast_fail_bars: int = 2
+    require_btc_alt_reversal: bool = True
+    btc_reversal_threshold: float = -0.001
+    alt_reversal_threshold: float = -0.002
+
+
+@dataclass
+class FeeFragmentationControlConfig:
+    enabled: bool = False
+    min_holding_bars_for_exit: int = 2
+    cooldown_after_exit_bars: int = 6
+    min_probe_notional: float = 5.0
+
+
+@dataclass
+class BacktestExperimentConfig:
+    enabled: bool = False
+    source_path: str = ""
+    slow_bull_all_shadow: bool = False
+    slow_bull_rsi_ablation: SlowBullRsiAblationConfig = field(default_factory=SlowBullRsiAblationConfig)
+    slow_bull_1h_gate_downgrade: SlowBull1hGateDowngradeConfig = field(default_factory=SlowBull1hGateDowngradeConfig)
+    capacity_replacement_shadow: CapacityReplacementShadowConfig = field(default_factory=CapacityReplacementShadowConfig)
+    tiered_beta_exit: TieredBetaExitConfig = field(default_factory=TieredBetaExitConfig)
+    fee_fragmentation_control: FeeFragmentationControlConfig = field(default_factory=FeeFragmentationControlConfig)
+
+    @classmethod
+    def from_dict(cls, raw: Optional[Dict[str, Any]], *, source_path: str = "") -> "BacktestExperimentConfig":
+        data = raw if isinstance(raw, dict) else {}
+        rsi = data.get("slow_bull_rsi_ablation", {}) if isinstance(data.get("slow_bull_rsi_ablation"), dict) else {}
+        gate = data.get("slow_bull_1h_gate_downgrade", {}) if isinstance(data.get("slow_bull_1h_gate_downgrade"), dict) else {}
+        capacity = data.get("capacity_replacement_shadow", {}) if isinstance(data.get("capacity_replacement_shadow"), dict) else {}
+        beta = data.get("tiered_beta_exit", {}) if isinstance(data.get("tiered_beta_exit"), dict) else {}
+        fee = data.get("fee_fragmentation_control", {}) if isinstance(data.get("fee_fragmentation_control"), dict) else {}
+        cfg = cls(
+            source_path=str(source_path or ""),
+            slow_bull_all_shadow=bool(data.get("slow_bull_all_shadow", False)),
+            slow_bull_rsi_ablation=SlowBullRsiAblationConfig(
+                enabled=bool(rsi.get("enabled", False)),
+                rsi_extreme_mode=str(rsi.get("rsi_extreme_mode", "hard_block") or "hard_block"),
+                rsi_extreme_max_portion=float(rsi.get("rsi_extreme_max_portion", 0.02) or 0.02),
+                rsi_extreme_trailing_stop_pct=float(rsi.get("rsi_extreme_trailing_stop_pct", 0.015) or 0.015),
+            ),
+            slow_bull_1h_gate_downgrade=SlowBull1hGateDowngradeConfig(
+                enabled=bool(gate.get("enabled", False)),
+                mode=str(gate.get("mode", "keep") or "keep"),
+                momentum_threshold_30m=float(gate.get("momentum_threshold_30m", 0.003) or 0.003),
+                momentum_threshold_60m=float(gate.get("momentum_threshold_60m", 0.005) or 0.005),
+            ),
+            capacity_replacement_shadow=CapacityReplacementShadowConfig(
+                enabled=bool(capacity.get("enabled", False)),
+                replacement_enabled=bool(capacity.get("replacement_enabled", False)),
+                ranking_metric=str(capacity.get("ranking_metric", "momentum_quality") or "momentum_quality"),
+                min_mfe_to_replace=float(capacity.get("min_mfe_to_replace", 0.001) or 0.001),
+                replacement_threshold=float(capacity.get("replacement_threshold", 0.05) or 0.05),
+            ),
+            tiered_beta_exit=TieredBetaExitConfig(
+                enabled=bool(beta.get("enabled", False)),
+                continuation_fast_fail_bars=max(1, int(float(beta.get("continuation_fast_fail_bars", 4) or 4))),
+                normal_fast_fail_bars=max(1, int(float(beta.get("normal_fast_fail_bars", 2) or 2))),
+                require_btc_alt_reversal=bool(beta.get("require_btc_alt_reversal", True)),
+                btc_reversal_threshold=float(beta.get("btc_reversal_threshold", -0.001) or -0.001),
+                alt_reversal_threshold=float(beta.get("alt_reversal_threshold", -0.002) or -0.002),
+            ),
+            fee_fragmentation_control=FeeFragmentationControlConfig(
+                enabled=bool(fee.get("enabled", False)),
+                min_holding_bars_for_exit=max(0, int(float(fee.get("min_holding_bars_for_exit", 2) or 2))),
+                cooldown_after_exit_bars=max(0, int(float(fee.get("cooldown_after_exit_bars", 6) or 6))),
+                min_probe_notional=float(fee.get("min_probe_notional", 5.0) or 5.0),
+            ),
+        )
+        cfg.enabled = any(
+            (
+                cfg.slow_bull_all_shadow,
+                cfg.slow_bull_rsi_ablation.enabled,
+                cfg.slow_bull_1h_gate_downgrade.enabled,
+                cfg.capacity_replacement_shadow.enabled,
+                cfg.tiered_beta_exit.enabled,
+                cfg.fee_fragmentation_control.enabled,
+            )
+        )
+        return cfg
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "enabled": bool(self.enabled),
+            "source_path": self.source_path,
+            "slow_bull_all_shadow": bool(self.slow_bull_all_shadow),
+            "slow_bull_rsi_ablation": vars(self.slow_bull_rsi_ablation),
+            "slow_bull_1h_gate_downgrade": vars(self.slow_bull_1h_gate_downgrade),
+            "capacity_replacement_shadow": vars(self.capacity_replacement_shadow),
+            "tiered_beta_exit": vars(self.tiered_beta_exit),
+            "fee_fragmentation_control": vars(self.fee_fragmentation_control),
+        }
+
+
+def load_experiment_config(path: Optional[str]) -> BacktestExperimentConfig:
+    raw_path = str(path or "").strip()
+    if not raw_path:
+        return BacktestExperimentConfig()
+    cfg_path = Path(raw_path)
+    with cfg_path.open("r", encoding="utf-8") as f:
+        raw = json.load(f)
+    return BacktestExperimentConfig.from_dict(raw, source_path=str(cfg_path))
+
+
+class SlowBullHoldAuditor:
+    def __init__(self) -> None:
+        self.failure_log: List[dict] = []
+
+    def record_failure(self, *, symbol: str, timestamp: object, reason_code: str, details: Optional[Dict[str, Any]] = None) -> None:
+        self.failure_log.append(
+            {
+                "symbol": str(symbol or "").upper(),
+                "ts": str(timestamp),
+                "reason": str(reason_code or "UNKNOWN"),
+                "details": copy.deepcopy(details or {}),
+            }
+        )
+
+    def export_jsonl(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as f:
+            for row in self.failure_log:
+                f.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+
+class CapacityReplacementShadow:
+    def __init__(self, *, enabled: bool, min_mfe_to_replace: float = 0.001, replacement_threshold: float = 0.05) -> None:
+        self.enabled = bool(enabled)
+        self.min_mfe_to_replace = float(min_mfe_to_replace)
+        self.replacement_threshold = float(replacement_threshold)
+        self.replacement_log: List[dict] = []
+
+    @staticmethod
+    def _quality(item: Dict[str, Any]) -> float:
+        return float(item.get("continuation_quality_score_shadow", item.get("quality_score", 0.0)) or 0.0)
+
+    @staticmethod
+    def _age_bars(item: Dict[str, Any]) -> int:
+        return max(0, int(item.get("latest_bar_index_15m", 0) or 0) - int(item.get("entry_bar_index_15m", 0) or 0))
+
+    def evaluate_replacement(self, *, portfolio: Dict[str, Any], new_candidate: Dict[str, Any], current_ts: object) -> None:
+        if not self.enabled:
+            return
+        positions = portfolio.get("positions", {}) if isinstance(portfolio.get("positions"), dict) else {}
+        pending = portfolio.get("pending_orders", {}) if isinstance(portfolio.get("pending_orders"), dict) else {}
+        max_positions = int(portfolio.get("max_positions", 0) or 0)
+        if max_positions <= 0 or len(positions) + len(pending) < max_positions:
+            return
+        replaceable: List[dict] = []
+        for symbol, pos in positions.items():
+            if not isinstance(pos, dict) or self._age_bars(pos) < 2:
+                continue
+            mfe = float(pos.get("mfe_pct_full_hold", pos.get("mfe", 0.0)) or 0.0)
+            if mfe < self.min_mfe_to_replace:
+                replaceable.append(
+                    {
+                        "symbol": str(pos.get("symbol", symbol) or symbol).upper(),
+                        "mfe": mfe,
+                        "quality": self._quality(pos),
+                    }
+                )
+        if not replaceable:
+            return
+        replaceable.sort(key=lambda item: (item["mfe"], item["quality"]))
+        target = replaceable[0]
+        new_quality = self._quality(new_candidate)
+        if new_quality <= target["quality"] + self.replacement_threshold:
+            return
+        self.replacement_log.append(
+            {
+                "ts": str(current_ts),
+                "new_symbol": str(new_candidate.get("symbol", "") or "").upper(),
+                "new_quality": new_quality,
+                "new_estimated_notional": float(new_candidate.get("estimated_notional", 0.0) or 0.0),
+                "replaced_symbol": target["symbol"],
+                "replaced_mfe": target["mfe"],
+                "replaced_quality": target["quality"],
+                "action": "shadow_replacement",
+            }
+        )
+
+    def export_jsonl(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as f:
+            for row in self.replacement_log:
+                f.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+
 
 @dataclass
 class BacktestConfig:
@@ -193,6 +413,29 @@ def build_backtest_summary(
     loss_pnl = sum(float(t.get("pnl", 0.0)) for t in losses)
     win_rate = (len(wins) / len(trades) * 100.0) if trades else 0.0
     profit_factor = (win_pnl / abs(loss_pnl)) if loss_pnl < 0 else (float("inf") if win_pnl > 0 else 0.0)
+    pnl_values = [float(t.get("pnl", 0.0) or 0.0) for t in trades]
+    expectancy = (sum(pnl_values) / len(pnl_values)) if pnl_values else 0.0
+    worst_5 = sorted(pnl_values)[:5]
+    best_5 = sorted(pnl_values, reverse=True)[:5]
+    mfe_values = [float(t.get("mfe_pct_full_hold", 0.0) or 0.0) for t in trades]
+    mae_values = [float(t.get("mae_pct_full_hold", 0.0) or 0.0) for t in trades]
+    equity_curve = list(getattr(engine, "equity_curve", []) or [])
+    equity_values = [float(item.get("equity", 0.0) or 0.0) for item in equity_curve]
+    returns: List[float] = []
+    for prev, cur in zip(equity_values, equity_values[1:]):
+        if prev > 0:
+            returns.append((cur - prev) / prev)
+    if len(returns) > 1:
+        ret_mean = float(np.mean(returns))
+        ret_std = float(np.std(returns, ddof=1))
+        sharpe = (ret_mean / ret_std * float(np.sqrt(365 * 24 * 4))) if ret_std > 0 else 0.0
+    else:
+        sharpe = 0.0
+    exposure_pct = (
+        sum(1 for item in equity_curve if int(item.get("open_positions", 0) or 0) > 0)
+        / len(equity_curve)
+        * 100.0
+    ) if equity_curve else 0.0
 
     signal_type_breakdown: Dict[str, dict] = {}
     cvd_bonus_breakdown: Dict[str, dict] = {}
@@ -255,6 +498,23 @@ def build_backtest_summary(
         "losing_trades": len(losses),
         "win_rate_pct": win_rate,
         "profit_factor": profit_factor,
+        "expectancy": expectancy,
+        "sharpe": sharpe,
+        "exposure_pct": exposure_pct,
+        "tail_risk": {
+            "worst_5_pnl": worst_5,
+            "best_5_pnl": best_5,
+            "p05_pnl": float(np.percentile(pnl_values, 5)) if pnl_values else 0.0,
+            "p95_pnl": float(np.percentile(pnl_values, 95)) if pnl_values else 0.0,
+        },
+        "mfe_mae": {
+            "mfe_pct_full_hold_mean": float(np.mean(mfe_values)) if mfe_values else 0.0,
+            "mfe_pct_full_hold_p50": float(np.percentile(mfe_values, 50)) if mfe_values else 0.0,
+            "mfe_pct_full_hold_p75": float(np.percentile(mfe_values, 75)) if mfe_values else 0.0,
+            "mae_pct_full_hold_mean": float(np.mean(mae_values)) if mae_values else 0.0,
+            "mae_pct_full_hold_p50": float(np.percentile(mae_values, 50)) if mae_values else 0.0,
+            "mae_pct_full_hold_p25": float(np.percentile(mae_values, 25)) if mae_values else 0.0,
+        },
         "available_symbols": available_symbols,
         "missing_symbols": missing_symbols,
         "timeline_points": int(stats.get("timeline_points", 0)),
@@ -287,8 +547,36 @@ def build_backtest_summary(
             "count": len(getattr(engine, "pending_cancel_audit_rows", []) or []),
             "file": getattr(engine, "last_pending_cancel_audit_file", None),
         },
+        "exit_audit": {
+            "count": len(getattr(engine, "exit_audit_rows", []) or []),
+            "file": getattr(engine, "last_exit_audit_file", None),
+            "stopped_before_followthrough": sum(
+                1 for row in (getattr(engine, "exit_audit_rows", []) or [])
+                if bool(row.get("stopped_before_followthrough", False))
+            ),
+        },
         "simulated_live_close_layers": {
             **copy.deepcopy(getattr(engine, "live_close_audit", {}) or {}),
+        },
+        "experiment": {
+            "config": (
+                engine.experiment_config.to_dict()
+                if isinstance(getattr(engine, "experiment_config", None), BacktestExperimentConfig)
+                else BacktestExperimentConfig().to_dict()
+            ),
+            "audit": {
+                **copy.deepcopy(getattr(engine, "experiment_audit", {}) or {}),
+                "slow_bull_hold_failure_rows": len(getattr(getattr(engine, "slow_bull_hold_auditor", None), "failure_log", []) or []),
+                "capacity_shadow_rows": len(getattr(getattr(engine, "capacity_replacement_shadow", None), "replacement_log", []) or []),
+                "fee_to_gross_profit_ratio": (
+                    abs(sum(float(t.get("position_value", 0.0) or 0.0) * float(t.get("leverage", 0.0) or 0.0) * float(config.fee_rate) for t in trades))
+                    / max(1e-12, sum(float(t.get("pnl", 0.0) or 0.0) for t in wins))
+                ) if wins else 0.0,
+                "avg_bars_held": (
+                    sum(float(t.get("bars_held", 0.0) or 0.0) for t in trades) / len(trades)
+                    if trades else 0.0
+                ),
+            },
         },
         "strategy_config": {
             "min_signal_score": strategy_config.min_signal_score,
@@ -490,7 +778,9 @@ def build_strategy_config(runtime_cfg: dict) -> MACDStrategyV2Config:
         ema_strong_trend_leverage_mult=float(boll_cfg.get("strong_trend_leverage_mult", ema_cfg.get("ema_strong_trend_leverage_mult", 0.8))),
         vwap_deviation_optimal=float(vwap_cfg.get("vwap_deviation_optimal", 0.005)),
         vwap_deviation_warning=float(vwap_cfg.get("vwap_deviation_warning", 0.015)),
-        vwap_deviation_hard_block=float(vwap_cfg.get("vwap_deviation_hard_block", 0.030)),
+        vwap_deviation_hard_block=0.0,
+        vwap_deviation_gate_mode=str((vwap_cfg.get("vwap_deviation_gate", {}) or {}).get("mode", "fixed"))
+        if isinstance(vwap_cfg.get("vwap_deviation_gate"), dict) else "fixed",
         structural_vwap_mode=str(vwap_cfg.get("structural_vwap_mode", "anchored_weekly")),
         structural_vwap_rolling_window=int(float(vwap_cfg.get("structural_vwap_rolling_window", 20))),
         vwap_retest_tolerance=float(vwap_cfg.get("vwap_retest_tolerance", 0.003)),
@@ -498,7 +788,7 @@ def build_strategy_config(runtime_cfg: dict) -> MACDStrategyV2Config:
         weight_4h_direction=float(weights_cfg.get("weight_4h_direction", weights_cfg.get("weight_1h_direction", 0.55))),
         weight_4h_enhancement=float(weights_cfg.get("weight_4h_enhancement", 0.10)),
         weight_rsi_rhythm=float(weights_cfg.get("weight_rsi_rhythm", 0.30)),
-        weight_vwap=float(weights_cfg.get("weight_vwap", 0.05)),
+        weight_vwap=0.0,
         weight_15m_entry=float(weights_cfg.get("weight_15m_entry", 0.0)),
         weight_volume=float(weights_cfg.get("weight_volume", 0.10)),
         min_entry_score=float(thresholds_cfg.get("min_entry_score", 0.25)),
@@ -510,7 +800,7 @@ def build_strategy_config(runtime_cfg: dict) -> MACDStrategyV2Config:
         soft_long_min_signal_score=float(thresholds_cfg.get("soft_long_min_signal_score", 0.0)),
         enable_flip_bullish_strict_filter=bool(filter_cfg.get("enable_flip_bullish_strict_filter", True)),
         disable_flip_bullish_entries=bool(filter_cfg.get("disable_flip_bullish_entries", False)),
-        flip_bullish_min_vwap_score=float(filter_cfg.get("flip_bullish_min_vwap_score", 0.12)),
+        flip_bullish_min_vwap_score=0.0,
         flip_bullish_require_pullback_bounce=bool(filter_cfg.get("flip_bullish_require_pullback_bounce", True)),
         flip_bullish_require_15m_growing=bool(filter_cfg.get("flip_bullish_require_15m_growing", True)),
         enable_flip_bullish_cvd_context_filter=bool(filter_cfg.get("enable_flip_bullish_cvd_context_filter", False)),
@@ -648,10 +938,8 @@ def build_strategy_config(runtime_cfg: dict) -> MACDStrategyV2Config:
             float(filter_cfg.get("rsi_launch_sovereign_priority_expire_seconds", 30))
         ),
         rsi_launch_sovereign_allow_retry=bool(filter_cfg.get("rsi_launch_sovereign_allow_retry", True)),
-        short_min_vwap_score_for_entry=float(filter_cfg.get("short_min_vwap_score_for_entry", 0.06)),
-        flip_bearish_short_min_vwap_score_for_entry=float(
-            filter_cfg.get("flip_bearish_short_min_vwap_score_for_entry", 0.08)
-        ),
+        short_min_vwap_score_for_entry=0.0,
+        flip_bearish_short_min_vwap_score_for_entry=0.0,
         flip_bearish_require_enhancement_or_15m_confirmation=bool(
             filter_cfg.get("flip_bearish_require_enhancement_or_15m_confirmation", True)
         ),
@@ -699,12 +987,7 @@ def build_strategy_config(runtime_cfg: dict) -> MACDStrategyV2Config:
                 ),
             )
         ),
-        stable_bear_continuation_min_vwap_score=float(
-            filter_cfg.get(
-                "stable_bear_continuation_min_vwap_score",
-                common_stable_continuation_min_vwap_score if common_stable_continuation_min_vwap_score is not None else 0.10,
-            )
-        ),
+        stable_bear_continuation_min_vwap_score=0.0,
         stable_bear_continuation_min_adx_1h=float(
             filter_cfg.get(
                 "stable_bear_continuation_min_adx_1h",
@@ -729,12 +1012,7 @@ def build_strategy_config(runtime_cfg: dict) -> MACDStrategyV2Config:
                 ),
             )
         ),
-        stable_bull_continuation_min_vwap_score=float(
-            filter_cfg.get(
-                "stable_bull_continuation_min_vwap_score",
-                common_stable_continuation_min_vwap_score if common_stable_continuation_min_vwap_score is not None else 0.10,
-            )
-        ),
+        stable_bull_continuation_min_vwap_score=0.0,
         stable_bull_continuation_min_adx_1h=float(
             filter_cfg.get(
                 "stable_bull_continuation_min_adx_1h",
@@ -752,7 +1030,43 @@ def build_strategy_config(runtime_cfg: dict) -> MACDStrategyV2Config:
         overheat_growing_penalty=float(penalty_cfg.get("overheat_growing_penalty", 0.12)),
         overheat_ema_multiplier_threshold=float(penalty_cfg.get("overheat_boll_multiplier_threshold", penalty_cfg.get("overheat_ema_multiplier_threshold", 1.2))),
         overheat_vwap_score_threshold=float(penalty_cfg.get("overheat_vwap_score_threshold", 0.10)),
-        min_vwap_score_for_entry=float(filter_cfg.get("min_vwap_score_for_entry", penalty_cfg.get("min_vwap_score_for_entry", 0.12))),
+        min_vwap_score_for_entry=0.0,
+        enable_continuation_long=bool((v2_cfg.get("continuation_long", {}) or {}).get("enabled", False))
+        if isinstance(v2_cfg.get("continuation_long"), dict) else False,
+        continuation_long_min_conditions_met=int(float(((v2_cfg.get("continuation_long", {}) or {}).get("min_conditions_met", 4))))
+        if isinstance(v2_cfg.get("continuation_long"), dict) else 4,
+        continuation_long_ret_30m_threshold=float(((v2_cfg.get("continuation_long", {}) or {}).get("ret_30m_threshold", 0.003)))
+        if isinstance(v2_cfg.get("continuation_long"), dict) else 0.003,
+        continuation_long_ret_60m_threshold=float(((v2_cfg.get("continuation_long", {}) or {}).get("ret_60m_threshold", 0.006)))
+        if isinstance(v2_cfg.get("continuation_long"), dict) else 0.006,
+        continuation_long_rsi_min=float(((v2_cfg.get("continuation_long", {}) or {}).get("rsi_min", 50.0)))
+        if isinstance(v2_cfg.get("continuation_long"), dict) else 50.0,
+        continuation_long_rsi_max=float(((v2_cfg.get("continuation_long", {}) or {}).get("rsi_max", 72.0)))
+        if isinstance(v2_cfg.get("continuation_long"), dict) else 72.0,
+        continuation_long_leverage=int(float(((v2_cfg.get("continuation_long", {}) or {}).get("leverage", 3))))
+        if isinstance(v2_cfg.get("continuation_long"), dict) else 3,
+        continuation_long_max_portion_6of6=float(((v2_cfg.get("continuation_long", {}) or {}).get("max_portion_6of6", 0.042)))
+        if isinstance(v2_cfg.get("continuation_long"), dict) else 0.042,
+        continuation_long_max_portion_5of6=float(((v2_cfg.get("continuation_long", {}) or {}).get("max_portion_5of6", 0.030)))
+        if isinstance(v2_cfg.get("continuation_long"), dict) else 0.030,
+        continuation_long_max_portion_4of6=float(((v2_cfg.get("continuation_long", {}) or {}).get("max_portion_4of6", 0.020)))
+        if isinstance(v2_cfg.get("continuation_long"), dict) else 0.020,
+        continuation_long_low_corr_strict_mode=bool(((v2_cfg.get("continuation_long", {}) or {}).get("low_corr_strict_mode", True)))
+        if isinstance(v2_cfg.get("continuation_long"), dict) else True,
+        continuation_long_low_corr_threshold=float(((v2_cfg.get("continuation_long", {}) or {}).get("low_corr_threshold", 0.20)))
+        if isinstance(v2_cfg.get("continuation_long"), dict) else 0.20,
+        continuation_long_overheat_guard_enabled=bool(((v2_cfg.get("continuation_long", {}) or {}).get("overheat_guard_enabled", False)))
+        if isinstance(v2_cfg.get("continuation_long"), dict) else False,
+        continuation_long_overheat_ret_30m=float(((v2_cfg.get("continuation_long", {}) or {}).get("overheat_ret_30m", 0.008)))
+        if isinstance(v2_cfg.get("continuation_long"), dict) else 0.008,
+        continuation_long_overheat_ret_60m=float(((v2_cfg.get("continuation_long", {}) or {}).get("overheat_ret_60m", 0.018)))
+        if isinstance(v2_cfg.get("continuation_long"), dict) else 0.018,
+        continuation_long_strong_boll_portion_cap_enabled=bool(((v2_cfg.get("continuation_long", {}) or {}).get("strong_boll_portion_cap_enabled", False)))
+        if isinstance(v2_cfg.get("continuation_long"), dict) else False,
+        continuation_long_strong_boll_ema_multiplier_threshold=float(((v2_cfg.get("continuation_long", {}) or {}).get("strong_boll_ema_multiplier_threshold", 1.2)))
+        if isinstance(v2_cfg.get("continuation_long"), dict) else 1.2,
+        continuation_long_strong_boll_max_portion=float(((v2_cfg.get("continuation_long", {}) or {}).get("strong_boll_max_portion", 0.020)))
+        if isinstance(v2_cfg.get("continuation_long"), dict) else 0.020,
         use_dynamic_stop=bool(stop_cfg.get("use_dynamic_stop", True)),
         ema_stop_atr_multiplier=float(stop_cfg.get("boll_stop_atr_multiplier", stop_cfg.get("ema_stop_atr_multiplier", 0.5))),
         max_stop_loss_pct=float(stop_cfg.get("max_stop_loss_pct", 0.025)),
@@ -861,6 +1175,18 @@ def build_strategy_config(runtime_cfg: dict) -> MACDStrategyV2Config:
 def calculate_ema(series: pd.Series, period: int) -> pd.Series:
     """计算EMA"""
     return series.ewm(span=period, adjust=False).mean()
+
+
+def calculate_rsi_series(series: pd.Series, period: int = 14) -> pd.Series:
+    """计算 RSI 序列，用于四象限策略的已收盘K线特征。"""
+    delta = series.diff()
+    gain = delta.clip(lower=0.0).rolling(period, min_periods=period).mean()
+    loss = (-delta.clip(upper=0.0)).rolling(period, min_periods=period).mean()
+    rs = gain / loss.replace(0.0, pd.NA)
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+    rsi = rsi.mask((loss <= 0) & (gain > 0), 100.0)
+    rsi = rsi.mask((gain <= 0) & (loss > 0), 0.0)
+    return rsi.fillna(50.0)
 
 
 def calculate_bollinger_bands(
@@ -995,9 +1321,12 @@ def prepare_timeframe_data(
     df['macd_hist_prev'] = macd_hist.shift(1)
     
     # EMA
+    df['ema20'] = calculate_ema(df['close'], 20)
+    df['ema50'] = calculate_ema(df['close'], 50)
     df['ema21'] = calculate_ema(df['close'], 21)
     df['ema55'] = calculate_ema(df['close'], 55)
     df['ema200'] = calculate_ema(df['close'], 200)
+    df['rsi'] = calculate_rsi_series(df['close'], 14)
 
     # BOLL
     bb_middle, bb_upper, bb_lower = calculate_bollinger_bands(df['close'], boll_period, boll_std_dev)
@@ -1133,6 +1462,8 @@ def filter_market_data_by_time_range(
     market_data_map: Dict[str, Dict[str, pd.DataFrame]],
     start_time: Optional[str] = None,
     end_time: Optional[str] = None,
+    preserve_start_history: bool = False,
+    warmup_bars_15m: int = 60,
 ) -> Tuple[Dict[str, Dict[str, pd.DataFrame]], List[str]]:
     """按时间窗过滤多时间框架数据。"""
     if not start_time and not end_time:
@@ -1149,7 +1480,15 @@ def filter_market_data_by_time_range(
         for tf, df in tf_map.items():
             filtered_df = df
             if start_ts is not None:
-                filtered_df = filtered_df[filtered_df["timestamp"] >= start_ts]
+                if preserve_start_history:
+                    minutes_by_tf = {"15m": 15, "1h": 60, "4h": 240}
+                    tf_minutes = minutes_by_tf.get(str(tf).lower(), 15)
+                    warmup_minutes = max(0, int(warmup_bars_15m)) * 15
+                    warmup_tf_bars = max(1, int(np.ceil(warmup_minutes / tf_minutes)))
+                    warmup_start = start_ts - pd.Timedelta(minutes=warmup_tf_bars * tf_minutes)
+                    filtered_df = filtered_df[filtered_df["timestamp"] >= warmup_start]
+                else:
+                    filtered_df = filtered_df[filtered_df["timestamp"] >= start_ts]
             if end_ts is not None:
                 filtered_df = filtered_df[filtered_df["timestamp"] <= end_ts]
             filtered_df = filtered_df.reset_index(drop=True)
@@ -1170,9 +1509,37 @@ def filter_market_data_by_time_range(
 class BacktestEngine:
     """V2.0策略回测引擎"""
     
-    def __init__(self, config: BacktestConfig, strategy_config: MACDStrategyV2Config, runtime_config: Dict[str, object]):
+    def __init__(
+        self,
+        config: BacktestConfig,
+        strategy_config: MACDStrategyV2Config,
+        runtime_config: Dict[str, object],
+        experiment_config: Optional[BacktestExperimentConfig] = None,
+    ):
         self.config = config
         ff_cfg = runtime_config.get("fund_flow", {}) if isinstance(runtime_config.get("fund_flow"), dict) else {}
+        breadth_cfg = ff_cfg.get("market_breadth", {}) if isinstance(ff_cfg.get("market_breadth"), dict) else {}
+        self.market_breadth_detector = MarketBreadthDetector(
+            MarketBreadthConfig(
+                enabled=bool(breadth_cfg.get("enabled", False)),
+                slow_bull_breadth_ratio=float(breadth_cfg.get("slow_bull_breadth_ratio", 0.60)),
+                slow_bull_btc_ret_30m=float(breadth_cfg.get("slow_bull_btc_ret_30m", 0.003)),
+                slow_bull_btc_ret_60m=float(breadth_cfg.get("slow_bull_btc_ret_60m", 0.005)),
+                slow_bull_alt_median_60m=float(breadth_cfg.get("slow_bull_alt_median_60m", 0.004)),
+                mode_a_breadth_min=float(breadth_cfg.get("mode_a_breadth_min", 0.80)),
+                mode_a_alt_median_min=float(breadth_cfg.get("mode_a_alt_median_min", 0.0025)),
+                mode_a_btc_min=float(breadth_cfg.get("mode_a_btc_min", -0.001)),
+                mode_b_btc_30m_min=float(breadth_cfg.get("mode_b_btc_30m_min", 0.002)),
+                mode_b_breadth_min=float(breadth_cfg.get("mode_b_breadth_min", 0.60)),
+                mode_b_alt_median_min=float(breadth_cfg.get("mode_b_alt_median_min", 0.003)),
+                mode_c_breadth_min=float(breadth_cfg.get("mode_c_breadth_min", 0.90)),
+                mode_c_alt_median_min=float(breadth_cfg.get("mode_c_alt_median_min", 0.001)),
+                confirm_cycles=max(1, int(float(breadth_cfg.get("confirm_cycles", 2)))),
+                invalidate_cycles=max(1, int(float(breadth_cfg.get("invalidate_cycles", 2)))),
+            ),
+            config.symbols,
+        )
+        self._last_breadth_state: Dict[str, object] = {"is_slow_bull": False, "reason": "not_initialized"}
         competition_cfg = ff_cfg.get("competition_ranking", {}) if isinstance(ff_cfg.get("competition_ranking"), dict) else {}
         if competition_cfg:
             strategy_config = replace(
@@ -1181,12 +1548,38 @@ class BacktestEngine:
                 competition_cluster_bonus_map=copy.deepcopy(
                     competition_cfg.get("cluster_bonus_map", strategy_config.competition_cluster_bonus_map)
                 ),
-            )
+        )
         self.strategy_config = strategy_config
         self.strategy_engine = MACDStrategyV2Engine(strategy_config)
         self.runtime_config = runtime_config
+        self.strategy_mode = str(ff_cfg.get("strategy_mode", "macd_mtf_strategy_v2") or "macd_mtf_strategy_v2").strip().lower()
+        self.quadrant_engine = QuadrantResonanceEngine(
+            QuadrantResonanceConfig.from_dict(ff_cfg.get("quadrant_resonance", {}))
+        )
+        self.experiment_config = experiment_config or BacktestExperimentConfig()
+        self.slow_bull_hold_auditor = SlowBullHoldAuditor()
+        cap_shadow_cfg = self.experiment_config.capacity_replacement_shadow
+        self.capacity_replacement_shadow = CapacityReplacementShadow(
+            enabled=bool(cap_shadow_cfg.enabled),
+            min_mfe_to_replace=float(cap_shadow_cfg.min_mfe_to_replace),
+            replacement_threshold=float(cap_shadow_cfg.replacement_threshold),
+        )
+        self.experiment_audit = {
+            "enabled": bool(self.experiment_config.enabled),
+            "slow_bull_hold_failures": 0,
+            "rsi_cap_overrides": 0,
+            "one_hour_gate_overrides": 0,
+            "capacity_shadow_replacements": 0,
+            "tiered_beta_shadow_exits": 0,
+            "min_probe_notional_filtered": 0,
+            "min_holding_exit_skipped": 0,
+            "cooldown_entry_filtered": 0,
+        }
+        self._experiment_last_exit_bar_by_symbol: Dict[str, int] = {}
         execution_degradation_cfg = ff_cfg.get("execution_degradation", {}) if isinstance(ff_cfg.get("execution_degradation"), dict) else {}
         self.open_market_fallback_enabled = bool(execution_degradation_cfg.get("open_market_fallback_enabled", False))
+        self.min_entry_notional_usdt = float(ff_cfg.get("min_entry_notional_usdt", 0.10) or 0.10)
+        self.min_open_notional_usdt = float(ff_cfg.get("min_open_notional_usdt", 0.0) or 0.0)
         self.open_market_fallback_max_slippage_bps = int(
             execution_degradation_cfg.get("open_market_fallback_max_slippage_bps", 0) or 0
         )
@@ -1217,6 +1610,8 @@ class BacktestEngine:
         self._consecutive_losses: int = 0
         self._loss_streak_date_utc: str = ""
         self._entry_cooldown_until: Optional[pd.Timestamp] = None
+        self.execution_start_ts = pd.Timestamp(config.window_start_iso) if config.window_start_iso else None
+        self.execution_end_ts = pd.Timestamp(config.window_end_iso) if config.window_end_iso else None
         self.execution_audit = {
             "candidate_entries": 0,
             "blocked_existing_position": 0,
@@ -1248,7 +1643,9 @@ class BacktestEngine:
             "pending_cancel_examples": [],
         }
         self.pending_cancel_audit_rows: List[dict] = []
+        self.exit_audit_rows: List[dict] = []
         self.last_pending_cancel_audit_file: Optional[str] = None
+        self.last_exit_audit_file: Optional[str] = None
         self.live_close_audit = {
             "enabled": bool(config.simulate_live_close_layers),
             "light_take_profit_triggered": 0,
@@ -1258,6 +1655,105 @@ class BacktestEngine:
             "conflict_force_breakeven_applied": 0,
         }
         self.live_risk_manager = RiskManager(self.runtime_config) if bool(config.simulate_live_close_layers) else None
+
+    def _bump_experiment_audit(self, key: str, amount: int = 1) -> None:
+        self.experiment_audit[key] = int(self.experiment_audit.get(key, 0) or 0) + int(amount)
+
+    def _apply_experiment_slow_bull_entry_overrides(
+        self,
+        *,
+        symbol: str,
+        signal: MACDSignalV2,
+        breadth_state: Dict[str, Any],
+        failure_reason: str,
+    ) -> Dict[str, Any]:
+        if not bool(self.experiment_config.enabled) or not bool(breadth_state.get("is_slow_bull", False)):
+            return {"allowed": False, "reason": "experiment_disabled_or_not_slow_bull", "metadata": {}}
+        details = getattr(signal, "details", {}) if isinstance(getattr(signal, "details", None), dict) else {}
+        reason = str(failure_reason or "")
+        if reason == "RSI_BLOCK":
+            cfg = self.experiment_config.slow_bull_rsi_ablation
+            if cfg.enabled and str(cfg.rsi_extreme_mode) == "cap_not_block":
+                self._bump_experiment_audit("rsi_cap_overrides")
+                return {
+                    "allowed": True,
+                    "max_portion": float(cfg.rsi_extreme_max_portion),
+                    "metadata": {
+                        "rsi_override": "capped_extreme",
+                        "rsi_extreme_max_portion": float(cfg.rsi_extreme_max_portion),
+                        "rsi_extreme_trailing_stop_pct": float(cfg.rsi_extreme_trailing_stop_pct),
+                    },
+                }
+        if reason == "RSI_1H_DIRECTION":
+            cfg = self.experiment_config.slow_bull_1h_gate_downgrade
+            ret30 = float(details.get("entry_ret_30m", details.get("ret_30m", 0.0)) or 0.0)
+            ret60 = float(details.get("entry_ret_60m", details.get("ret_60m", 0.0)) or 0.0)
+            if cfg.enabled and str(cfg.mode) == "ignore_if_momentum_ok" and ret30 >= cfg.momentum_threshold_30m and ret60 >= cfg.momentum_threshold_60m:
+                self._bump_experiment_audit("one_hour_gate_overrides")
+                return {
+                    "allowed": True,
+                    "metadata": {
+                        "1h_gate_override": "ignored_by_momentum",
+                        "entry_ret_30m": ret30,
+                        "entry_ret_60m": ret60,
+                    },
+                }
+        return {"allowed": False, "reason": "no_experiment_override", "metadata": {}}
+
+    def _experiment_allows_entry_notional(self, symbol: str, estimated_notional: float, *, current_bar_index: Optional[int] = None) -> bool:
+        cfg = self.experiment_config.fee_fragmentation_control
+        if not (self.experiment_config.enabled and cfg.enabled):
+            return True
+        if float(estimated_notional or 0.0) + 1e-12 < float(cfg.min_probe_notional):
+            self._bump_experiment_audit("min_probe_notional_filtered")
+            return False
+        if current_bar_index is not None:
+            last_exit = self._experiment_last_exit_bar_by_symbol.get(str(symbol).upper())
+            if last_exit is not None and int(current_bar_index) - int(last_exit) < int(cfg.cooldown_after_exit_bars):
+                self._bump_experiment_audit("cooldown_entry_filtered")
+                return False
+        return True
+
+    def _experiment_allows_exit(self, pos: Dict[str, Any], *, reason: str) -> bool:
+        cfg = self.experiment_config.fee_fragmentation_control
+        if not (self.experiment_config.enabled and cfg.enabled):
+            return True
+        if str(reason or "").startswith("stop_loss"):
+            return True
+        age_bars = max(
+            0,
+            int(pos.get("latest_bar_index_15m", pos.get("entry_bar_index_15m", 0)) or 0)
+            - int(pos.get("entry_bar_index_15m", 0) or 0),
+        )
+        if age_bars < int(cfg.min_holding_bars_for_exit):
+            self._bump_experiment_audit("min_holding_exit_skipped")
+            return False
+        return True
+
+    def _experiment_tiered_beta_exit_reason(self, pos: Dict[str, Any]) -> str:
+        cfg = self.experiment_config.tiered_beta_exit
+        if not (self.experiment_config.enabled and cfg.enabled):
+            return ""
+        source = str(pos.get("entry_execution_policy", "") or pos.get("signal_type_1h", "") or "").lower()
+        if "continuation" not in source:
+            return ""
+        age_bars = max(
+            0,
+            int(pos.get("latest_bar_index_15m", pos.get("entry_bar_index_15m", 0)) or 0)
+            - int(pos.get("entry_bar_index_15m", 0) or 0),
+        )
+        if age_bars > int(cfg.continuation_fast_fail_bars):
+            return ""
+        mae = float(pos.get("mae_pct_full_hold", 0.0) or 0.0)
+        if mae > -0.005:
+            return ""
+        state = self._last_breadth_state if isinstance(self._last_breadth_state, dict) else {}
+        btc_down = float(state.get("btc_ret_15m", 0.0) or 0.0) < float(cfg.btc_reversal_threshold)
+        alt_down = float(state.get("alt_median_15m", 0.0) or 0.0) < float(cfg.alt_reversal_threshold)
+        if cfg.require_btc_alt_reversal and not (btc_down and alt_down):
+            return ""
+        self._bump_experiment_audit("tiered_beta_shadow_exits")
+        return "experiment_continuation_fast_fail_dual_reversal"
 
     def _bump_execution_audit(self, key: str, amount: int = 1) -> None:
         self.execution_audit[key] = int(self.execution_audit.get(key, 0) or 0) + int(amount)
@@ -1297,6 +1793,43 @@ class BacktestEngine:
             if signal_type == "flip_bullish":
                 self._bump_execution_audit("flip_bullish_seen")
             if signal.direction == 'neutral':
+                if self.experiment_config.enabled and bool((self._last_breadth_state or {}).get("is_slow_bull", False)):
+                    details = getattr(signal, "details", {}) or {}
+                    reason = self._classify_slow_bull_hold_reason(signal)
+                    self.slow_bull_hold_auditor.record_failure(
+                        symbol=symbol,
+                        timestamp=analysis.get("time", ""),
+                        reason_code=reason,
+                        details={
+                            "signal_type_1h": str(getattr(signal, "signal_type_1h", "") or ""),
+                            "entry_type_15m": str(getattr(signal, "entry_type_15m", "") or ""),
+                            "entry_ret_30m": float(details.get("entry_ret_30m", details.get("ret_30m", 0.0)) or 0.0),
+                            "entry_ret_60m": float(details.get("entry_ret_60m", details.get("ret_60m", 0.0)) or 0.0),
+                            "entry_rsi_15m": float(details.get("entry_rsi_15m", details.get("rsi_15m", 0.0)) or 0.0),
+                            "entry_ema_slope_15m": float(details.get("entry_ema_slope_15m", 0.0) or 0.0),
+                            "entry_btc_ret_30m": float(details.get("entry_btc_ret_30m", 0.0) or 0.0),
+                            "breadth_state": copy.deepcopy(self._last_breadth_state),
+                        },
+                    )
+                    self._bump_experiment_audit("slow_bull_hold_failures")
+                    override = self._apply_experiment_slow_bull_entry_overrides(
+                        symbol=symbol,
+                        signal=signal,
+                        breadth_state=dict(self._last_breadth_state or {}),
+                        failure_reason=reason,
+                    )
+                    if bool(override.get("allowed", False)):
+                        signal = self._build_experiment_continuation_signal(
+                            symbol=symbol,
+                            signal=signal,
+                            analysis=analysis,
+                            override=override,
+                        )
+                        analysis = dict(analysis)
+                        analysis["signal"] = signal
+                        self._bump_execution_audit("candidate_entries")
+                        candidates.append((symbol, analysis))
+                        continue
                 if signal_type == "flip_bullish":
                     if bool(details.get("flip_bullish_sniper_applies", False)) and not bool(
                         details.get("flip_bullish_sniper_passed", True)
@@ -1308,7 +1841,7 @@ class BacktestEngine:
                         self._bump_execution_audit("flip_bullish_blocked_by_cooling")
                 self._bump_execution_audit("blocked_neutral_signal")
                 continue
-            if signal.signal_score < self._signal_threshold(signal):
+            if not details.get("entry_execution_policy") and signal.signal_score < self._signal_threshold(signal):
                 self._bump_execution_audit("blocked_threshold")
                 continue
 
@@ -1317,6 +1850,59 @@ class BacktestEngine:
             self._bump_execution_audit("candidate_entries")
             candidates.append((symbol, analysis))
         return candidates
+
+    @staticmethod
+    def _classify_slow_bull_hold_reason(signal: MACDSignalV2) -> str:
+        details = getattr(signal, "details", {}) if isinstance(getattr(signal, "details", None), dict) else {}
+        entry_type = str(getattr(signal, "entry_type_15m", "") or "").lower()
+        veto_reason = str(details.get("veto_reason", "") or details.get("decision_reason", "") or "").lower()
+        if "rsi_extreme" in entry_type or "rsi_extreme" in veto_reason:
+            return "RSI_BLOCK"
+        if "rsi_1h_direction" in entry_type or "rsi_1h_direction" in veto_reason:
+            return "RSI_1H_DIRECTION"
+        if float(details.get("entry_ret_30m", details.get("ret_30m", 0.0)) or 0.0) < 0.003:
+            return "MOMENTUM_30M"
+        if float(details.get("entry_ret_60m", details.get("ret_60m", 0.0)) or 0.0) < 0.005:
+            return "MOMENTUM_60M"
+        if float(details.get("entry_ema_slope_15m", 0.0) or 0.0) <= 0.0:
+            return "EMA_BEARISH"
+        if float(details.get("entry_btc_ret_30m", 0.0) or 0.0) < -0.001:
+            return "BTC_DOWN"
+        return "UNKNOWN_HOLD"
+
+    def _build_experiment_continuation_signal(
+        self,
+        *,
+        symbol: str,
+        signal: MACDSignalV2,
+        analysis: dict,
+        override: Dict[str, Any],
+    ) -> MACDSignalV2:
+        details = dict(getattr(signal, "details", {}) or {})
+        details.update(copy.deepcopy(override.get("metadata", {}) or {}))
+        details["stage"] = "experiment_slow_bull_continuation"
+        details["entry_execution_policy"] = "experiment_slow_bull"
+        portion = float(override.get("max_portion", 0.020) or 0.020)
+        price = float(analysis.get("price", 0.0) or 0.0)
+        return MACDSignalV2(
+            direction="long",
+            signal_score=0.60,
+            signal_type_1h="experiment_continuation_long",
+            signal_strength_1h=0.60,
+            entry_type_15m="experiment_continuation_long",
+            entry_score_15m=0.60,
+            vwap_score=float(getattr(signal, "vwap_score", 0.0) or 0.0),
+            vwap_deviation=float(getattr(signal, "vwap_deviation", 0.0) or 0.0),
+            vwap_state=str(getattr(signal, "vwap_state", "") or ""),
+            vwap_location_score=float(getattr(signal, "vwap_location_score", 0.0) or 0.0),
+            ema_multiplier=float(getattr(signal, "ema_multiplier", 1.0) or 1.0),
+            ema_structure_status=str(getattr(signal, "ema_structure_status", "") or ""),
+            suggested_stop_price=price * (1.0 - self.config.default_stop_loss_pct) if price > 0 else 0.0,
+            stop_loss_pct=self.config.default_stop_loss_pct,
+            is_trial_entry=True,
+            entry_scale=portion / max(self.config.default_target_portion, 1e-9),
+            details=details,
+        )
 
     def _record_capacity_block(
         self,
@@ -1355,9 +1941,22 @@ class BacktestEngine:
                     "symbol": symbol,
                     "signal_score": float(getattr(signal, "signal_score", 0.0) or 0.0),
                     "competition_score": float(self._signal_competition_score(signal)),
+                    "continuation_ranking_score": float(
+                        ((getattr(signal, "details", {}) or {}).get("continuation_ranking_score", 0.0) or 0.0)
+                    ),
                     "signal_type_1h": str(getattr(signal, "signal_type_1h", "") or ""),
                     "entry_type_15m": str(getattr(signal, "entry_type_15m", "") or ""),
                     "vwap_score": float(getattr(signal, "vwap_score", 0.0) or 0.0),
+                    "continuation_quality_score_shadow": float(
+                        ((getattr(signal, "details", {}) or {}).get("continuation_quality_score_shadow", 0.0) or 0.0)
+                    ),
+                    "entry_ret_30m": float(((getattr(signal, "details", {}) or {}).get("entry_ret_30m", 0.0) or 0.0)),
+                    "entry_ret_60m": float(((getattr(signal, "details", {}) or {}).get("entry_ret_60m", 0.0) or 0.0)),
+                    "entry_rsi_15m": float(((getattr(signal, "details", {}) or {}).get("entry_rsi_15m", 0.0) or 0.0)),
+                    "entry_ema_slope_15m": float(((getattr(signal, "details", {}) or {}).get("entry_ema_slope_15m", 0.0) or 0.0)),
+                    "entry_breadth_mode": str(((getattr(signal, "details", {}) or {}).get("entry_breadth_mode", "")) or ""),
+                    "entry_breadth_ratio": float(((getattr(signal, "details", {}) or {}).get("entry_breadth_ratio", 0.0) or 0.0)),
+                    "entry_btc_ret_30m": float(((getattr(signal, "details", {}) or {}).get("entry_btc_ret_30m", 0.0) or 0.0)),
                     "rsi_launch_sovereign_active": bool(
                         ((getattr(signal, "details", {}) or {}).get("rsi_launch_sovereign_active", False))
                     ),
@@ -1387,6 +1986,150 @@ class BacktestEngine:
         return MACDStrategyV2Engine(replace(self.strategy_config, **updates))
 
     @staticmethod
+    def _series_return(values: pd.Series, bars: int) -> float:
+        if len(values) <= bars:
+            return 0.0
+        prev = float(values.iloc[-bars - 1])
+        cur = float(values.iloc[-1])
+        if prev <= 0:
+            return 0.0
+        return (cur - prev) / prev
+
+    @staticmethod
+    def _ema_slope(values: pd.Series, period: int = 8) -> float:
+        if len(values) < period + 2:
+            return 0.0
+        ema = values.ewm(span=period, adjust=False).mean()
+        prev = float(ema.iloc[-2])
+        cur = float(ema.iloc[-1])
+        if prev <= 0:
+            return 0.0
+        return (cur - prev) / prev
+
+    @staticmethod
+    def _rsi(values: pd.Series, period: int = 14) -> float:
+        if len(values) < period + 1:
+            return 50.0
+        delta = values.diff()
+        gain = delta.clip(lower=0.0).rolling(period, min_periods=period).mean()
+        loss = (-delta.clip(upper=0.0)).rolling(period, min_periods=period).mean()
+        last_loss = float(loss.iloc[-1] or 0.0)
+        if last_loss <= 0:
+            return 100.0
+        rs = float(gain.iloc[-1] or 0.0) / last_loss
+        return 100.0 - (100.0 / (1.0 + rs))
+
+    def _maybe_apply_continuation_long(
+        self,
+        symbol: str,
+        signal: MACDSignalV2,
+        tf_15m: pd.DataFrame,
+        idx_15m: int,
+    ) -> MACDSignalV2:
+        if str(signal.direction or "") != "neutral":
+            return signal
+        strategy_engine = self._strategy_engine_for_symbol(symbol)
+        closes = tf_15m.iloc[: idx_15m + 1]["close"]
+        if len(closes) < 16:
+            return signal
+        ema_fast = closes.ewm(span=8, adjust=False).mean()
+        breadth_state = dict(self._last_breadth_state or {})
+        symbol_ret_30m = self._series_return(closes, 2)
+        symbol_ret_60m = self._series_return(closes, 4)
+        rsi_15m = self._rsi(closes, int(getattr(self.strategy_config, "rsi_period", 14) or 14))
+        ema_slope_15m = self._ema_slope(closes, 8)
+        btc_ret_30m = float(breadth_state.get("btc_ret_30m", 0.0) or 0.0)
+        breadth_ratio = float(breadth_state.get("breadth_ratio", 0.0) or 0.0)
+        shadow_score = self._continuation_quality_score_shadow(
+            ret_30m=symbol_ret_30m,
+            ret_60m=symbol_ret_60m,
+            rsi_15m=rsi_15m,
+            ema_slope_15m=ema_slope_15m,
+            btc_ret_30m=btc_ret_30m,
+            breadth_ratio=breadth_ratio,
+        )
+        ranking_score = self._continuation_ranking_score(
+            ret_30m=symbol_ret_30m,
+            ret_60m=symbol_ret_60m,
+            rsi_15m=rsi_15m,
+            ema_slope_15m=ema_slope_15m,
+            btc_ret_30m=btc_ret_30m,
+            breadth_ratio=breadth_ratio,
+        )
+        result = strategy_engine._evaluate_continuation_long_candidate(
+            symbol=symbol,
+            symbol_ret_30m=symbol_ret_30m,
+            symbol_ret_60m=symbol_ret_60m,
+            rsi_15m=rsi_15m,
+            ema_slope_15m=ema_slope_15m,
+            close_15m=float(closes.iloc[-1]),
+            ema_fast_15m=float(ema_fast.iloc[-1]),
+            btc_ret_30m=btc_ret_30m,
+            breadth_state=breadth_state,
+            vwap_score=float(getattr(signal, "vwap_score", 0.0) or 0.0),
+            corr_btc_alt=0.40,
+        )
+        if not result.get("allowed"):
+            return signal
+        portion = float(result.get("max_portion", 0.020) or 0.020)
+        strong_boll_cap = {"applied": False}
+        if bool(getattr(strategy_engine.config, "continuation_long_strong_boll_portion_cap_enabled", False)):
+            ema_multiplier = float(getattr(signal, "ema_multiplier", 1.0) or 1.0)
+            threshold = float(getattr(strategy_engine.config, "continuation_long_strong_boll_ema_multiplier_threshold", 1.2) or 1.2)
+            cap = max(0.0, float(getattr(strategy_engine.config, "continuation_long_strong_boll_max_portion", 0.020) or 0.020))
+            if ema_multiplier >= threshold and cap > 0:
+                original_portion = portion
+                portion = min(portion, cap)
+                strong_boll_cap = {
+                    "applied": portion < original_portion,
+                    "ema_multiplier": ema_multiplier,
+                    "threshold": threshold,
+                    "cap": cap,
+                    "original_portion": original_portion,
+                    "final_portion": portion,
+                }
+        details = dict(signal.details or {})
+        details.update(
+            {
+                "stage": "continuation_long",
+                "signal_type_4h": details.get("signal_type_4h", ""),
+                "slow_bull_continuation": result,
+                "market_breadth": breadth_state,
+                "entry_execution_policy": "continuation_long",
+                "competition_score": ranking_score,
+                "continuation_ranking_score": ranking_score,
+                "continuation_quality_score_shadow": shadow_score,
+                "entry_ret_30m": symbol_ret_30m,
+                "entry_ret_60m": symbol_ret_60m,
+                "entry_rsi_15m": rsi_15m,
+                "entry_ema_slope_15m": ema_slope_15m,
+                "entry_breadth_mode": str(breadth_state.get("mode", "") or ""),
+                "entry_breadth_ratio": breadth_ratio,
+                "entry_btc_ret_30m": btc_ret_30m,
+                "continuation_strong_boll_portion_cap": strong_boll_cap,
+            }
+        )
+        return MACDSignalV2(
+            direction="long",
+            signal_score=0.60,
+            signal_type_1h="continuation_long",
+            signal_strength_1h=0.60,
+            entry_type_15m="continuation_long",
+            entry_score_15m=float(result.get("conditions_met", 0.0) or 0.0) / 6.0,
+            vwap_score=float(getattr(signal, "vwap_score", 0.0) or 0.0),
+            vwap_deviation=float(getattr(signal, "vwap_deviation", 0.0) or 0.0),
+            vwap_state=str(getattr(signal, "vwap_state", "") or ""),
+            vwap_location_score=float(getattr(signal, "vwap_location_score", 0.0) or 0.0),
+            ema_multiplier=float(getattr(signal, "ema_multiplier", 1.0) or 1.0),
+            ema_structure_status=str(getattr(signal, "ema_structure_status", "") or ""),
+            suggested_stop_price=float(closes.iloc[-1]) * (1.0 - self.config.default_stop_loss_pct),
+            stop_loss_pct=self.config.default_stop_loss_pct,
+            is_trial_entry=True,
+            entry_scale=portion / max(self.config.default_target_portion, 1e-9),
+            details=details,
+        )
+
+    @staticmethod
     def _timestamp_array(data: Dict[str, pd.DataFrame], tf: str) -> np.ndarray:
         cache_key = f"_ts_{tf}"
         if cache_key not in data:
@@ -1404,11 +2147,128 @@ class BacktestEngine:
             return int(pd.Timestamp(ts).value)
         return int(ts)
 
+    def _is_execution_window_open(self, ts: object) -> bool:
+        current = pd.Timestamp(ts)
+        if self.execution_start_ts is not None and current < self.execution_start_ts:
+            return False
+        if self.execution_end_ts is not None and current > self.execution_end_ts:
+            return False
+        return True
+
     def _find_tf_index(self, data: Dict[str, pd.DataFrame], tf: str, current_time: float) -> int:
         ts_array = self._timestamp_array(data, tf)
         current_key = self._timestamp_key(current_time)
         idx = int(np.searchsorted(ts_array, current_key, side='right') - 1)
         return idx if idx >= 0 else -1
+
+    @staticmethod
+    def _quadrant_tf_snapshot(df: pd.DataFrame, idx: int) -> Dict[str, Any]:
+        row = df.iloc[idx]
+        hist = df.iloc[: idx + 1]['macd_hist'].dropna().tolist() if 'macd_hist' in df.columns else []
+        return {
+            "open": float(row.get("open", row.get("close", 0.0)) or 0.0),
+            "high": float(row.get("high", row.get("close", 0.0)) or 0.0),
+            "low": float(row.get("low", row.get("close", 0.0)) or 0.0),
+            "close": float(row.get("close", 0.0) or 0.0),
+            "ema20": float(row.get("ema20", row.get("ema21", 0.0)) or 0.0),
+            "ema50": float(row.get("ema50", row.get("ema55", 0.0)) or 0.0),
+            "ema200": float(row.get("ema200", 0.0) or 0.0),
+            "macd_hist_series": [float(v or 0.0) for v in hist],
+            "rsi": float(row.get("rsi", 50.0) or 50.0),
+            "atr": float(row.get("atr", 0.0) or 0.0),
+        }
+
+    @staticmethod
+    def _quadrant_snapshot_from_row(row: pd.Series) -> Dict[str, Any]:
+        close = float(row.get("close", 0.0) or 0.0)
+        return {
+            "open": float(row.get("open", close) or close),
+            "high": float(row.get("high", close) or close),
+            "low": float(row.get("low", close) or close),
+            "close": close,
+            "ema20": float(row.get("ema20", row.get("ema21", 0.0)) or 0.0),
+            "ema50": float(row.get("ema50", row.get("ema55", 0.0)) or 0.0),
+            "ema200": float(row.get("ema200", 0.0) or 0.0),
+            "macd_hist_series": [float(row.get("macd_hist", 0.0) or 0.0)],
+            "rsi": float(row.get("rsi", 50.0) or 50.0),
+            "atr": float(row.get("atr", 0.0) or 0.0),
+        }
+
+    def _build_quadrant_timeframes(
+        self,
+        data: Dict[str, pd.DataFrame],
+        idx_15m: int,
+        idx_1h: int,
+        idx_4h: int,
+    ) -> Dict[str, Dict[str, Any]]:
+        return {
+            "15m": self._quadrant_tf_snapshot(data["15m"], idx_15m),
+            "1h": self._quadrant_tf_snapshot(data["1h"], idx_1h),
+            "4h": self._quadrant_tf_snapshot(data["4h"], idx_4h),
+        }
+
+    def _quadrant_exit_action(self, pos: dict, analysis: dict) -> Dict[str, Any]:
+        if str(pos.get("strategy_mode", "") or "").lower() != "quadrant_resonance":
+            return {"action": "hold", "ratio": 0.0, "reason": "NO_EXIT"}
+        timeframes = {
+            "15m": self._quadrant_snapshot_from_row(analysis.get("row_15m", pd.Series(dtype=float))),
+            "1h": self._quadrant_snapshot_from_row(analysis.get("row_1h", pd.Series(dtype=float))),
+            "4h": self._quadrant_snapshot_from_row(analysis.get("row_4h", pd.Series(dtype=float))),
+        }
+        return self.quadrant_engine.evaluate_exit(
+            direction=str(pos.get("side", "")),
+            entry_price=float(pos.get("entry_price", 0.0) or 0.0),
+            current_price=float(analysis.get("price", 0.0) or 0.0),
+            timeframes=timeframes,
+            position=pos,
+        )
+
+    def _quadrant_to_macd_signal(self, q_signal: QuadrantSignal) -> MACDSignalV2:
+        metadata = dict(q_signal.metadata or {})
+        metadata.update(
+            {
+                "strategy_mode": "quadrant_resonance",
+                "entry_execution_policy": "quadrant_resonance",
+                "quadrant_4h": q_signal.quadrant.value,
+                "resonance_score": float(q_signal.resonance_score),
+                "signal_score_threshold": float(q_signal.threshold),
+                "factor_scores": dict(q_signal.factor_scores),
+                "entry_reference_price": float(q_signal.entry_price_ref),
+                "target_portion": float(q_signal.target_portion),
+                "target_portion_of_balance": float(q_signal.target_portion),
+                "leverage": int(q_signal.leverage or 1),
+                "take_profit_levels": copy.deepcopy(q_signal.take_profit_levels),
+                "entry_atr_15m": float(metadata.get("entry_atr_15m", 0.0) or 0.0),
+                "blocked_reason": q_signal.reason if not q_signal.allowed else "",
+                "competition_score": float(q_signal.resonance_score),
+            }
+        )
+        stop_loss_pct = 0.02
+        if q_signal.entry_price_ref > 0 and q_signal.atr_stop_distance > 0:
+            stop_loss_pct = q_signal.atr_stop_distance / q_signal.entry_price_ref
+        return MACDSignalV2(
+            direction=q_signal.direction if q_signal.allowed else "neutral",
+            signal_score=float(q_signal.resonance_score),
+            signal_type_1h=f"quadrant_{q_signal.quadrant.value}",
+            signal_strength_1h=float(q_signal.resonance_score),
+            is_4h_enhanced=False,
+            enhancement_score=0.0,
+            entry_type_15m="quadrant_resonance",
+            entry_score_15m=float(q_signal.factor_scores.get("entry_15m", 0.0) or 0.0),
+            vwap_score=0.0,
+            vwap_deviation=0.0,
+            vwap_state="observation_only",
+            vwap_location_score=0.0,
+            ema_multiplier=1.0,
+            ema_structure_status=str(q_signal.quadrant.value),
+            veto_type=VetoType.NONE,
+            veto_reason="" if q_signal.allowed else str(q_signal.reason or ""),
+            suggested_stop_price=q_signal.stop_loss_price,
+            stop_loss_pct=stop_loss_pct,
+            is_trial_entry=False,
+            entry_scale=1.0,
+            details=metadata,
+        )
 
     def _cancel_pending_order(self, symbol: str, reason: str = "") -> None:
         order = self.pending_orders.pop(symbol, None)
@@ -1549,6 +2409,79 @@ class BacktestEngine:
             return max(0.0, (best_price - entry_price) / entry_price)
         best_price = float(row_15m.get("low", entry_price) or entry_price)
         return max(0.0, (entry_price - best_price) / entry_price)
+
+    @staticmethod
+    def _position_mae_ratio(pos: dict, row_15m: pd.Series) -> float:
+        entry_price = float(pos.get("entry_price", 0.0) or 0.0)
+        if entry_price <= 0:
+            return 0.0
+        if str(pos.get("side", "")).lower() == "long":
+            worst_price = float(row_15m.get("low", entry_price) or entry_price)
+            return min(0.0, (worst_price - entry_price) / entry_price)
+        worst_price = float(row_15m.get("high", entry_price) or entry_price)
+        return min(0.0, (entry_price - worst_price) / entry_price)
+
+    @staticmethod
+    def _rsi_health_score(rsi_value: float) -> float:
+        rsi = float(rsi_value or 0.0)
+        if 52.0 <= rsi <= 68.0:
+            return 1.0
+        if 50.0 <= rsi < 52.0:
+            return max(0.0, (rsi - 50.0) / 2.0)
+        if 68.0 < rsi <= 72.0:
+            return max(0.0, (72.0 - rsi) / 4.0)
+        return 0.0
+
+    @classmethod
+    def _continuation_quality_score_shadow(
+        cls,
+        *,
+        ret_30m: float,
+        ret_60m: float,
+        rsi_15m: float,
+        ema_slope_15m: float,
+        btc_ret_30m: float,
+        breadth_ratio: float,
+    ) -> float:
+        ret30_score = min(1.0, max(0.0, float(ret_30m or 0.0) / 0.012))
+        ret60_score = min(1.0, max(0.0, float(ret_60m or 0.0) / 0.024))
+        rsi_score = cls._rsi_health_score(rsi_15m)
+        ema_score = min(1.0, max(0.0, float(ema_slope_15m or 0.0) / 0.006))
+        btc_score = 0.0 if float(btc_ret_30m or 0.0) < -0.001 else min(1.0, max(0.0, (float(btc_ret_30m or 0.0) + 0.001) / 0.006))
+        breadth_score = min(1.0, max(0.0, (float(breadth_ratio or 0.0) - 0.60) / 0.35))
+        score = (
+            ret30_score * 0.25
+            + ret60_score * 0.20
+            + rsi_score * 0.20
+            + ema_score * 0.15
+            + btc_score * 0.10
+            + breadth_score * 0.10
+        )
+        return float(min(1.0, max(0.0, score)))
+
+    @staticmethod
+    def _continuation_ranking_score(
+        *,
+        ret_30m: float,
+        ret_60m: float,
+        rsi_15m: float,
+        ema_slope_15m: float,
+        breadth_ratio: float,
+        btc_ret_30m: float,
+    ) -> float:
+        ret30 = float(ret_30m or 0.0)
+        ret60 = float(ret_60m or 0.0)
+        rsi = float(rsi_15m or 50.0)
+        ema_slope = float(ema_slope_15m or 0.0)
+        breadth = float(breadth_ratio or 0.0)
+        btc30 = float(btc_ret_30m or 0.0)
+        early_bonus = max(0.0, min(0.12, (0.012 - max(ret30, 0.0)) / 0.012 * 0.12))
+        trend_bonus = max(0.0, min(0.08, max(ret60, 0.0) / 0.018 * 0.08))
+        rsi_bonus = 0.06 if 80.0 <= rsi <= 100.0 else (0.03 if 50.0 <= rsi < 80.0 else 0.0)
+        ema_bonus = max(0.0, min(0.05, ema_slope / 0.004 * 0.05))
+        breadth_bonus = max(0.0, min(0.05, (breadth - 0.60) / 0.35 * 0.05))
+        btc_penalty = 0.08 if btc30 < -0.001 else 0.0
+        return max(0.60, min(0.95, 0.60 + early_bonus + trend_bonus + rsi_bonus + ema_bonus + breadth_bonus - btc_penalty))
 
     @staticmethod
     def _position_hold_seconds(pos: dict, time_value: object) -> float:
@@ -1742,6 +2675,31 @@ class BacktestEngine:
         
         if idx_1h < 0 or idx_4h < 0:
             return None
+
+        if self.strategy_mode == "quadrant_resonance":
+            row_15m = tf_15m.iloc[idx_15m]
+            row_1h = tf_1h.iloc[idx_1h]
+            row_4h = tf_4h.iloc[idx_4h]
+            timeframes = self._build_quadrant_timeframes(data, idx_15m, idx_1h, idx_4h)
+            equity = self._mark_to_market_equity({symbol: float(row_15m['close'])})
+            q_signal = self.quadrant_engine.analyze(
+                symbol=symbol,
+                price=float(row_15m['close']),
+                timeframes=timeframes,
+                portfolio={"equity": equity, "positions": self.positions},
+            )
+            signal = self._quadrant_to_macd_signal(q_signal)
+            return {
+                'signal': signal,
+                'time': current_time,
+                'price': row_15m['close'],
+                'idx_15m': idx_15m,
+                'row_15m': row_15m,
+                'row_1h': row_1h,
+                'row_4h': row_4h,
+                'cvd_veto_context': {},
+                'cvd_context': {},
+            }
         
         # 获取MACD历史序列
         macd_hist_15m = self.get_macd_hist_series(tf_15m.iloc[:idx_15m+1])
@@ -1824,6 +2782,7 @@ class BacktestEngine:
             signal.details = dict(signal.details or {})
             signal.details.update(cvd_veto_context)
 
+        signal = self._maybe_apply_continuation_long(symbol, signal, tf_15m, idx_15m)
         cvd_context = self.build_cvd_bonus_context(signal, row_1h, row_15m)
         
         return {
@@ -1891,11 +2850,11 @@ class BacktestEngine:
         if vol_vwap_warn:
             scale = max(0.0, min(1.0, float(getattr(self.strategy_config, "vol_vwap_warn_position_scale", 0.50) or 0.50)))
             position_pct *= scale
-        if position_pct < self.config.min_open_portion:
-            return 0.0, leverage
-
         deployable_capital = self.capital * max(0.0, 1.0 - self.config.reserve_pct)
         position_value = deployable_capital * position_pct
+        notional_floor = max(float(getattr(self, "min_entry_notional_usdt", 0.10) or 0.10), float(getattr(self, "min_open_notional_usdt", 0.0) or 0.0))
+        if position_pct < self.config.min_open_portion and position_value < notional_floor:
+            return 0.0, leverage
 
         return position_value, leverage
 
@@ -2035,8 +2994,33 @@ class BacktestEngine:
             adx_1h=float(signal_details.get("adx_1h", 0.0) or 0.0),
             market_regime=str(signal_details.get("market_regime", "") or ""),
         )
+        if signal_details.get("strategy_mode") == "quadrant_resonance":
+            target_portion = max(0.0, float(signal_details.get("target_portion", 0.0) or 0.0))
+            equity = self._mark_to_market_equity({symbol: float(price)})
+            leverage = max(1, min(int(signal_details.get("leverage", leverage) or leverage), self.quadrant_engine.config.max_leverage))
+            if target_portion > 0 and equity > 0:
+                position_value = equity * target_portion
+            min_notional = float(self.quadrant_engine.config.min_entry_notional_usdt)
+            min_margin = float(self.quadrant_engine.config.min_entry_margin_usdt)
+            if position_value * leverage < min_notional:
+                position_value = min_notional / max(float(leverage), 1.0)
+            position_value = max(position_value, min_margin)
         if position_value <= 0:
             self._bump_execution_reason("execute_reject_reasons", "position_value_zero")
+            return False
+        if signal_details.get("strategy_mode") == "quadrant_resonance":
+            if float(position_value) * float(leverage) < float(self.quadrant_engine.config.min_entry_notional_usdt) - 1e-9:
+                self._bump_execution_reason("execute_reject_reasons", "quadrant_min_notional")
+                return False
+            if float(position_value) < float(self.quadrant_engine.config.min_entry_margin_usdt) - 1e-9:
+                self._bump_execution_reason("execute_reject_reasons", "quadrant_min_margin")
+                return False
+        if not self._experiment_allows_entry_notional(
+            symbol,
+            float(position_value) * float(leverage),
+            current_bar_index=int(analysis.get("idx_15m", 0) or 0),
+        ):
+            self._bump_execution_reason("execute_reject_reasons", "experiment_fee_fragmentation")
             return False
         
         # 计算止损价（使用V2.0动态止损）
@@ -2063,6 +3047,12 @@ class BacktestEngine:
             pct_levels=self.config.take_profit_pct_levels,
             reduce_levels=self.config.take_profit_reduce_pct_levels,
         )
+        if signal_details.get("strategy_mode") == "quadrant_resonance" and isinstance(signal_details.get("take_profit_levels"), list):
+            take_profit_levels = [
+                {**copy.deepcopy(level), "filled": bool(level.get("filled", False))}
+                for level in signal_details.get("take_profit_levels", [])
+                if isinstance(level, dict)
+            ]
 
         required_margin = position_value
         estimated_entry_fee = position_value * leverage * self.config.fee_rate
@@ -2072,8 +3062,14 @@ class BacktestEngine:
             position_value = min(position_value, max_affordable_margin)
             required_margin = position_value
             if required_margin < 100:
-                self._bump_execution_reason("execute_reject_reasons", "insufficient_margin")
-                return False
+                min_margin_required = (
+                    float(self.quadrant_engine.config.min_entry_margin_usdt)
+                    if signal_details.get("strategy_mode") == "quadrant_resonance"
+                    else 100.0
+                )
+                if required_margin < min_margin_required:
+                    self._bump_execution_reason("execute_reject_reasons", "insufficient_margin")
+                    return False
 
         if signal.direction == 'long':
             limit_price = price * (1.0 + self.config.entry_slippage)
@@ -2201,6 +3197,36 @@ class BacktestEngine:
             'execution_route': str(signal_details.get('execution_route') or ('priority_execution_vip' if vip_execution_applied else ('priority_execution' if priority_execution_applied else 'standard'))),
             'rsi_launch_sovereign_active': bool(signal_details.get('rsi_launch_sovereign_active', False)),
             'rsi_launch_sovereign_side': str(signal_details.get('rsi_launch_sovereign_side', '') or ''),
+            'entry_bar_index_15m': int(analysis.get('idx_15m', 0) or 0),
+            'latest_bar_index_15m': int(analysis.get('idx_15m', 0) or 0),
+            'mfe_pct_full_hold': 0.0,
+            'mae_pct_full_hold': 0.0,
+            'mfe_pct_2bar': 0.0,
+            'mae_pct_2bar': 0.0,
+            'mfe_pct_4bar': 0.0,
+            'mae_pct_4bar': 0.0,
+            'mfe_pct_8bar': 0.0,
+            'mae_pct_8bar': 0.0,
+            'same_bar_stop_and_tp_hit': False,
+            'exit_order_assumption': 'stop_first_conservative',
+            'continuation_quality_score_shadow': float(signal_details.get('continuation_quality_score_shadow', 0.0) or 0.0),
+            'continuation_ranking_score': float(signal_details.get('continuation_ranking_score', 0.0) or 0.0),
+            'entry_ret_30m': float(signal_details.get('entry_ret_30m', 0.0) or 0.0),
+            'entry_ret_60m': float(signal_details.get('entry_ret_60m', 0.0) or 0.0),
+            'entry_rsi_15m': float(signal_details.get('entry_rsi_15m', 0.0) or 0.0),
+            'entry_ema_slope_15m': float(signal_details.get('entry_ema_slope_15m', 0.0) or 0.0),
+            'entry_breadth_mode': str(signal_details.get('entry_breadth_mode', '') or ''),
+            'entry_breadth_ratio': float(signal_details.get('entry_breadth_ratio', 0.0) or 0.0),
+            'entry_btc_ret_30m': float(signal_details.get('entry_btc_ret_30m', 0.0) or 0.0),
+            'rsi_override': str(signal_details.get('rsi_override', '') or ''),
+            '1h_gate_override': str(signal_details.get('1h_gate_override', '') or ''),
+            'experiment_exit_reason': str(signal_details.get('experiment_exit_reason', '') or ''),
+            'fee_fragmentation_filter_reason': str(signal_details.get('fee_fragmentation_filter_reason', '') or ''),
+            'strategy_mode': str(signal_details.get('strategy_mode', '') or ''),
+            'quadrant_4h': str(signal_details.get('quadrant_4h', '') or ''),
+            'resonance_score': float(signal_details.get('resonance_score', signal.signal_score) or 0.0),
+            'factor_scores': copy.deepcopy(signal_details.get('factor_scores', {}) or {}),
+            'entry_atr_15m': float(signal_details.get('entry_atr_15m', 0.0) or 0.0),
         }
         self._bump_execution_audit("orders_submitted")
         return True
@@ -2217,6 +3243,9 @@ class BacktestEngine:
     ):
         """平仓/减仓"""
         if symbol not in self.positions:
+            return
+        if not self._experiment_allows_exit(self.positions[symbol], reason=reason):
+            self.positions[symbol]["fee_fragmentation_filter_reason"] = f"min_holding_skip_exit:{reason}"
             return
         
         pos = self.positions[symbol]
@@ -2307,11 +3336,63 @@ class BacktestEngine:
             'shrink_exit_ready': bool(pos.get('shrink_exit_ready', False)),
             'macd_4h_shrink_pct': float(pos.get('macd_4h_shrink_pct', 0.0)),
             'macd_4h_shrink_bars': int(pos.get('macd_4h_shrink_bars', 0) or 0),
+            'mfe_pct_full_hold': float(pos.get('mfe_pct_full_hold', 0.0) or 0.0),
+            'mae_pct_full_hold': float(pos.get('mae_pct_full_hold', 0.0) or 0.0),
+            'mfe_pct_2bar': float(pos.get('mfe_pct_2bar', 0.0) or 0.0),
+            'mae_pct_2bar': float(pos.get('mae_pct_2bar', 0.0) or 0.0),
+            'mfe_pct_4bar': float(pos.get('mfe_pct_4bar', 0.0) or 0.0),
+            'mae_pct_4bar': float(pos.get('mae_pct_4bar', 0.0) or 0.0),
+            'mfe_pct_8bar': float(pos.get('mfe_pct_8bar', 0.0) or 0.0),
+            'mae_pct_8bar': float(pos.get('mae_pct_8bar', 0.0) or 0.0),
+            'bars_held': max(
+                0,
+                int(pos.get('latest_bar_index_15m', pos.get('entry_bar_index_15m', 0)) or 0)
+                - int(pos.get('entry_bar_index_15m', 0) or 0),
+            ),
+            'minutes_held': self._position_hold_seconds(pos, time) / 60.0,
+            'same_bar_stop_and_tp_hit': bool(pos.get('same_bar_stop_and_tp_hit', False)),
+            'exit_order_assumption': str(pos.get('exit_order_assumption', 'stop_first_conservative') or 'stop_first_conservative'),
+            'continuation_quality_score_shadow': float(pos.get('continuation_quality_score_shadow', 0.0) or 0.0),
+            'continuation_ranking_score': float(pos.get('continuation_ranking_score', 0.0) or 0.0),
+            'entry_ret_30m': float(pos.get('entry_ret_30m', 0.0) or 0.0),
+            'entry_ret_60m': float(pos.get('entry_ret_60m', 0.0) or 0.0),
+            'entry_rsi_15m': float(pos.get('entry_rsi_15m', 0.0) or 0.0),
+            'entry_ema_slope_15m': float(pos.get('entry_ema_slope_15m', 0.0) or 0.0),
+            'entry_breadth_mode': str(pos.get('entry_breadth_mode', '') or ''),
+            'entry_breadth_ratio': float(pos.get('entry_breadth_ratio', 0.0) or 0.0),
+            'entry_btc_ret_30m': float(pos.get('entry_btc_ret_30m', 0.0) or 0.0),
+            'rsi_override': str(pos.get('rsi_override', '') or ''),
+            '1h_gate_override': str(pos.get('1h_gate_override', '') or ''),
+            'experiment_exit_reason': str(pos.get('experiment_exit_reason', '') or ''),
+            'fee_fragmentation_filter_reason': str(pos.get('fee_fragmentation_filter_reason', '') or ''),
             'remaining_margin_after': remaining_margin,
+            'strategy_mode': str(pos.get('strategy_mode', '') or ''),
+            'quadrant_4h': str(pos.get('quadrant_4h', '') or ''),
+            'resonance_score': float(pos.get('resonance_score', pos.get('signal_score', 0.0)) or 0.0),
+            'factor_scores': copy.deepcopy(pos.get('factor_scores', {}) or {}),
+            'entry_atr_15m': float(pos.get('entry_atr_15m', 0.0) or 0.0),
+            'exit_bar_index_15m': int(pos.get('latest_bar_index_15m', pos.get('entry_bar_index_15m', 0)) or 0),
+            'post_exit_high_4bars': 0.0,
+            'post_exit_low_4bars': 0.0,
+            'post_exit_high_8bars': 0.0,
+            'post_exit_low_8bars': 0.0,
+            'post_exit_high_12bars': 0.0,
+            'post_exit_low_12bars': 0.0,
+            'post_exit_best_followthrough_pct_4bars': 0.0,
+            'post_exit_best_followthrough_pct_8bars': 0.0,
+            'post_exit_best_followthrough_pct_12bars': 0.0,
+            'potential_extra_pnl': 0.0,
+            'stopped_before_followthrough': False,
         })
 
         total_trade_pnl = realized_pnl_accum + pnl
         if remaining_margin <= 1e-12:
+            try:
+                self._experiment_last_exit_bar_by_symbol[str(symbol).upper()] = int(
+                    pos.get('latest_bar_index_15m', pos.get('entry_bar_index_15m', 0)) or 0
+                )
+            except Exception:
+                pass
             self._update_loss_streak_after_trade_close(time, total_trade_pnl)
             del self.positions[symbol]
             return
@@ -2392,6 +3473,36 @@ class BacktestEngine:
             'entry_reference_price': float(order.get('entry_reference_price', fill_price) or fill_price),
             'rsi_launch_sovereign_active': bool(order.get('rsi_launch_sovereign_active', False)),
             'rsi_launch_sovereign_side': str(order.get('rsi_launch_sovereign_side', '') or ''),
+            'entry_bar_index_15m': int(order.get('entry_bar_index_15m', 0) or 0),
+            'latest_bar_index_15m': int(order.get('entry_bar_index_15m', 0) or 0),
+            'mfe_pct_full_hold': 0.0,
+            'mae_pct_full_hold': 0.0,
+            'mfe_pct_2bar': 0.0,
+            'mae_pct_2bar': 0.0,
+            'mfe_pct_4bar': 0.0,
+            'mae_pct_4bar': 0.0,
+            'mfe_pct_8bar': 0.0,
+            'mae_pct_8bar': 0.0,
+            'same_bar_stop_and_tp_hit': False,
+            'exit_order_assumption': 'stop_first_conservative',
+            'continuation_quality_score_shadow': float(order.get('continuation_quality_score_shadow', 0.0) or 0.0),
+            'continuation_ranking_score': float(order.get('continuation_ranking_score', 0.0) or 0.0),
+            'entry_ret_30m': float(order.get('entry_ret_30m', 0.0) or 0.0),
+            'entry_ret_60m': float(order.get('entry_ret_60m', 0.0) or 0.0),
+            'entry_rsi_15m': float(order.get('entry_rsi_15m', 0.0) or 0.0),
+            'entry_ema_slope_15m': float(order.get('entry_ema_slope_15m', 0.0) or 0.0),
+            'entry_breadth_mode': str(order.get('entry_breadth_mode', '') or ''),
+            'entry_breadth_ratio': float(order.get('entry_breadth_ratio', 0.0) or 0.0),
+            'entry_btc_ret_30m': float(order.get('entry_btc_ret_30m', 0.0) or 0.0),
+            'rsi_override': str(order.get('rsi_override', '') or ''),
+            '1h_gate_override': str(order.get('1h_gate_override', '') or ''),
+            'experiment_exit_reason': str(order.get('experiment_exit_reason', '') or ''),
+            'fee_fragmentation_filter_reason': str(order.get('fee_fragmentation_filter_reason', '') or ''),
+            'strategy_mode': str(order.get('strategy_mode', '') or ''),
+            'quadrant_4h': str(order.get('quadrant_4h', '') or ''),
+            'resonance_score': float(order.get('resonance_score', order.get('signal_score', 0.0)) or 0.0),
+            'factor_scores': copy.deepcopy(order.get('factor_scores', {}) or {}),
+            'entry_atr_15m': float(order.get('entry_atr_15m', 0.0) or 0.0),
             'realized_pnl_accum': 0.0,
             'light_take_profit_fired': False,
         }
@@ -2645,12 +3756,33 @@ class BacktestEngine:
         if (not light_tp_fired_before) and bool(pos.get("light_take_profit_fired", False)):
             return False
         return self._simulate_conflict_close_layers(symbol, pos, analysis)
+
+    def _update_position_diagnostics(self, symbol: str, analysis: dict) -> None:
+        pos = self.positions.get(symbol)
+        if not pos:
+            return
+        row = analysis.get("row_15m")
+        if not isinstance(row, pd.Series):
+            return
+        idx_15m = int(analysis.get("idx_15m", pos.get("latest_bar_index_15m", pos.get("entry_bar_index_15m", 0))) or 0)
+        entry_idx = int(pos.get("entry_bar_index_15m", idx_15m) or 0)
+        age_bars = max(0, idx_15m - entry_idx)
+        mfe = self._position_mfe_ratio(pos, row)
+        mae = self._position_mae_ratio(pos, row)
+        pos["latest_bar_index_15m"] = idx_15m
+        pos["mfe_pct_full_hold"] = max(float(pos.get("mfe_pct_full_hold", 0.0) or 0.0), mfe)
+        pos["mae_pct_full_hold"] = min(float(pos.get("mae_pct_full_hold", 0.0) or 0.0), mae)
+        for limit in (2, 4, 8):
+            if age_bars <= limit:
+                pos[f"mfe_pct_{limit}bar"] = max(float(pos.get(f"mfe_pct_{limit}bar", 0.0) or 0.0), mfe)
+                pos[f"mae_pct_{limit}bar"] = min(float(pos.get(f"mae_pct_{limit}bar", 0.0) or 0.0), mae)
     
     def check_stops(self, symbol: str, analysis: dict) -> bool:
         """用同一根15m的OHLC近似 intrabar 触发，返回是否已平仓"""
         if symbol not in self.positions:
             return False
         
+        self._update_position_diagnostics(symbol, analysis)
         pos = self.positions[symbol]
         signal = analysis['signal']
         row = analysis['row_15m']
@@ -2658,6 +3790,11 @@ class BacktestEngine:
         time = analysis['time']
         high_price = float(row['high'])
         low_price = float(row['low'])
+        is_quadrant_position = str(pos.get("strategy_mode", "") or "").lower() == "quadrant_resonance"
+        quadrant_close_confirm_stop = (
+            is_quadrant_position
+            and str(getattr(self.quadrant_engine.config, "stop_trigger", "intrabar") or "intrabar").strip().lower() == "close_confirm"
+        )
 
         # 计算当前盈亏比例
         if pos['side'] == 'long':
@@ -2684,7 +3821,10 @@ class BacktestEngine:
 
         stop_hit = False
         target_hit = False
-        if pos['side'] == 'long':
+        if quadrant_close_confirm_stop:
+            stop_hit = False
+            target_hit = False
+        elif pos['side'] == 'long':
             stop_hit = low_price <= pos['stop_price']
             target_hit = pos['take_profit'] is not None and high_price >= pos['take_profit']
         else:
@@ -2696,10 +3836,12 @@ class BacktestEngine:
             reason = "stop_loss_intrabar"
             if target_hit:
                 reason = "stop_loss_intrabar_both_hit"
+                pos["same_bar_stop_and_tp_hit"] = True
+                pos["exit_order_assumption"] = "stop_first_conservative"
             self.close_position(symbol, exit_price, time, reason)
             return True
 
-        tp_levels = pos.get('take_profit_levels') or []
+        tp_levels = [] if is_quadrant_position else (pos.get('take_profit_levels') or [])
         if tp_levels:
             hit_levels: List[dict] = []
             for level in tp_levels:
@@ -2739,6 +3881,36 @@ class BacktestEngine:
             exit_price = self._target_fill_price(pos, row, float(pos['take_profit']))
             self.close_position(symbol, exit_price, time, "take_profit_intrabar")
             return True
+
+        experiment_exit_reason = self._experiment_tiered_beta_exit_reason(pos)
+        if experiment_exit_reason:
+            pos["experiment_exit_reason"] = experiment_exit_reason
+            self.close_position(symbol, price, time, experiment_exit_reason)
+            return True
+
+        quadrant_exit = self._quadrant_exit_action(pos, analysis)
+        quadrant_action = str(quadrant_exit.get("action", "hold") or "hold").lower()
+        quadrant_reason = str(quadrant_exit.get("reason", "") or "")
+        if quadrant_action == "close":
+            self.close_position(symbol, price, time, quadrant_reason)
+            return True
+        if quadrant_action == "reduce" and not bool(pos.get(f"quadrant_{quadrant_reason.lower()}_fired", False)):
+            pos[f"quadrant_{quadrant_reason.lower()}_fired"] = True
+            if quadrant_reason == "MOMENTUM_REDUCE":
+                pos["quadrant_momentum_reduced"] = True
+            if quadrant_reason == "TREND_REDUCE":
+                pos["quadrant_trend_reduced"] = True
+            updates = quadrant_exit.get("updates")
+            self.close_position(
+                symbol,
+                price,
+                time,
+                quadrant_reason,
+                reduce_pct_original=max(0.0, min(1.0, float(quadrant_exit.get("ratio", 0.5) or 0.5))),
+            )
+            if symbol in self.positions and isinstance(updates, dict):
+                self.positions[symbol].update(copy.deepcopy(updates))
+            return symbol not in self.positions
 
         if self._apply_simulated_live_close_layers(symbol, analysis):
             return symbol not in self.positions
@@ -2897,6 +4069,77 @@ class BacktestEngine:
                 break
         self.max_drawdown_recovery_time = recovery_target_time
 
+    def _finalize_post_exit_audit(self, market_data_map: Dict[str, Dict[str, pd.DataFrame]]) -> None:
+        self.exit_audit_rows = []
+        for trade in self.trades:
+            symbol = str(trade.get("symbol", "") or "")
+            data = market_data_map.get(symbol)
+            if not data or "15m" not in data:
+                continue
+            bars = data["15m"]
+            if bars.empty:
+                continue
+            try:
+                exit_idx = int(trade.get("exit_bar_index_15m", -1) or -1)
+            except (TypeError, ValueError):
+                exit_idx = -1
+            if exit_idx < 0:
+                continue
+
+            entry_price = float(trade.get("entry_price", 0.0) or 0.0)
+            exit_price = float(trade.get("exit_price", 0.0) or 0.0)
+            if entry_price <= 0 or exit_price <= 0:
+                continue
+            side = str(trade.get("side", "") or "").lower()
+            best_12 = 0.0
+            for window in (4, 8, 12):
+                future = bars.iloc[exit_idx + 1 : exit_idx + 1 + window]
+                if future.empty:
+                    continue
+                high = float(future["high"].max())
+                low = float(future["low"].min())
+                trade[f"post_exit_high_{window}bars"] = high
+                trade[f"post_exit_low_{window}bars"] = low
+                if side == "long":
+                    followthrough = max(0.0, (high - exit_price) / entry_price)
+                else:
+                    followthrough = max(0.0, (exit_price - low) / entry_price)
+                trade[f"post_exit_best_followthrough_pct_{window}bars"] = followthrough
+                if window == 12:
+                    best_12 = followthrough
+
+            atr = float(trade.get("entry_atr_15m", 0.0) or 0.0)
+            followthrough_threshold = (0.5 * atr / entry_price) if atr > 0 else 0.005
+            trade["potential_extra_pnl"] = best_12 * float(trade.get("entry_notional", 0.0) or 0.0)
+            trade["stopped_before_followthrough"] = bool(best_12 >= followthrough_threshold and str(trade.get("reason", "")).lower() not in {"backtest_end"})
+            self.exit_audit_rows.append(
+                {
+                    "symbol": symbol,
+                    "side": side,
+                    "entry_time": str(trade.get("entry_time", "")),
+                    "exit_time": str(trade.get("exit_time", "")),
+                    "reason": str(trade.get("reason", "")),
+                    "pnl": float(trade.get("pnl", 0.0) or 0.0),
+                    "mfe_pct_full_hold": float(trade.get("mfe_pct_full_hold", 0.0) or 0.0),
+                    "mae_pct_full_hold": float(trade.get("mae_pct_full_hold", 0.0) or 0.0),
+                    "bars_held": int(trade.get("bars_held", 0) or 0),
+                    "post_exit_high_4bars": float(trade.get("post_exit_high_4bars", 0.0) or 0.0),
+                    "post_exit_low_4bars": float(trade.get("post_exit_low_4bars", 0.0) or 0.0),
+                    "post_exit_high_8bars": float(trade.get("post_exit_high_8bars", 0.0) or 0.0),
+                    "post_exit_low_8bars": float(trade.get("post_exit_low_8bars", 0.0) or 0.0),
+                    "post_exit_high_12bars": float(trade.get("post_exit_high_12bars", 0.0) or 0.0),
+                    "post_exit_low_12bars": float(trade.get("post_exit_low_12bars", 0.0) or 0.0),
+                    "post_exit_best_followthrough_pct_12bars": float(
+                        trade.get("post_exit_best_followthrough_pct_12bars", 0.0) or 0.0
+                    ),
+                    "potential_extra_pnl": float(trade.get("potential_extra_pnl", 0.0) or 0.0),
+                    "stopped_before_followthrough": bool(trade.get("stopped_before_followthrough", False)),
+                    "strategy_mode": str(trade.get("strategy_mode", "") or ""),
+                    "quadrant_4h": str(trade.get("quadrant_4h", "") or ""),
+                    "resonance_score": float(trade.get("resonance_score", 0.0) or 0.0),
+                }
+            )
+
     def run_backtest(self, market_data_map: Dict[str, Dict[str, pd.DataFrame]]) -> dict:
         """运行统一时间轴多币种回放"""
         if not market_data_map:
@@ -2920,6 +4163,29 @@ class BacktestEngine:
 
         for current_ts in ordered_timeline:
             analyses: Dict[str, dict] = {}
+            breadth_alt_rets: Dict[str, float] = {}
+            btc_ret_15m = 0.0
+            current_time = pd.Timestamp(current_ts)
+            execution_window_open = self._is_execution_window_open(current_time)
+            for symbol, data in market_data_map.items():
+                idx_15m = idx_maps[symbol].get(current_ts)
+                if idx_15m is None or idx_15m < 1:
+                    continue
+                closes = data["15m"].iloc[: idx_15m + 1]["close"]
+                ret_15m = self._series_return(closes, 1)
+                if symbol.upper() == "BTCUSDT":
+                    btc_ret_15m = ret_15m
+                else:
+                    breadth_alt_rets[symbol.upper()] = ret_15m
+            self.market_breadth_detector.update(btc_ret_15m, breadth_alt_rets)
+            self._last_breadth_state = self.market_breadth_detector.detect()
+            if breadth_alt_rets:
+                sorted_alt_15m = sorted(float(v or 0.0) for v in breadth_alt_rets.values())
+                alt_median_15m = sorted_alt_15m[len(sorted_alt_15m) // 2]
+            else:
+                alt_median_15m = 0.0
+            self._last_breadth_state["btc_ret_15m"] = float(btc_ret_15m)
+            self._last_breadth_state["alt_median_15m"] = float(alt_median_15m)
             for symbol, data in market_data_map.items():
                 idx_15m = idx_maps[symbol].get(current_ts)
                 if idx_15m is None or idx_15m < 50:
@@ -2932,8 +4198,11 @@ class BacktestEngine:
                 signal = analysis['signal']
                 if signal.veto_type and signal.veto_type != VetoType.NONE:
                     vetoes[signal.veto_type] += 1
-                if signal.direction != 'neutral':
+                if execution_window_open and signal.direction != 'neutral':
                     signals_generated += 1
+
+            if not execution_window_open:
+                continue
 
             if not analyses and not self.positions:
                 continue
@@ -2958,6 +4227,22 @@ class BacktestEngine:
             candidates.sort(key=self._candidate_sort_key, reverse=True)
 
             if (len(self.positions) + len(self.pending_orders)) >= self.config.max_positions:
+                for blocked_symbol, blocked_analysis in candidates:
+                    blocked_signal = blocked_analysis.get("signal")
+                    blocked_details = getattr(blocked_signal, "details", {}) if blocked_signal is not None else {}
+                    self.capacity_replacement_shadow.evaluate_replacement(
+                        portfolio={
+                            "positions": self.positions,
+                            "pending_orders": self.pending_orders,
+                            "max_positions": self.config.max_positions,
+                        },
+                        new_candidate={
+                            "symbol": blocked_symbol,
+                            "continuation_quality_score_shadow": float((blocked_details or {}).get("continuation_quality_score_shadow", 0.0) or 0.0),
+                            "estimated_notional": 0.0,
+                        },
+                        current_ts=current_time,
+                    )
                 self._record_capacity_block(
                     current_ts=current_ts,
                     blocked=candidates,
@@ -2969,6 +4254,22 @@ class BacktestEngine:
 
             for idx, (symbol, analysis) in enumerate(candidates):
                 if (len(self.positions) + len(self.pending_orders)) >= self.config.max_positions:
+                    for blocked_symbol, blocked_analysis in candidates[idx:]:
+                        blocked_signal = blocked_analysis.get("signal")
+                        blocked_details = getattr(blocked_signal, "details", {}) if blocked_signal is not None else {}
+                        self.capacity_replacement_shadow.evaluate_replacement(
+                            portfolio={
+                                "positions": self.positions,
+                                "pending_orders": self.pending_orders,
+                                "max_positions": self.config.max_positions,
+                            },
+                            new_candidate={
+                                "symbol": blocked_symbol,
+                                "continuation_quality_score_shadow": float((blocked_details or {}).get("continuation_quality_score_shadow", 0.0) or 0.0),
+                                "estimated_notional": 0.0,
+                            },
+                            current_ts=current_time,
+                        )
                     self._record_capacity_block(
                         current_ts=current_ts,
                         blocked=candidates[idx:],
@@ -2980,7 +4281,6 @@ class BacktestEngine:
                 self.execute_trade(symbol, analysis, market_data_map[symbol])
 
             if analyses or self.positions or self.pending_orders:
-                current_time = pd.Timestamp(current_ts)
                 self._record_equity_snapshot(current_time, last_price_map)
 
         for symbol in list(self.pending_orders.keys()):
@@ -2996,6 +4296,7 @@ class BacktestEngine:
         if ordered_timeline:
             final_timestamp = pd.Timestamp(ordered_timeline[-1])
             self._record_equity_snapshot(final_timestamp, last_price_map)
+        self._finalize_post_exit_audit(market_data_map)
         self._finalize_drawdown_recovery()
 
         return {
@@ -3019,6 +4320,8 @@ def run_backtest(
     strict_live_mode: bool = False,
     simulate_live_close_layers: bool = False,
     output_prefix: Optional[str] = None,
+    experiment_config_path: Optional[str] = None,
+    strategy_mode: Optional[str] = None,
 ):
     """运行完整回测"""
     print("=" * 70)
@@ -3032,6 +4335,10 @@ def run_backtest(
         profile_name=profile_name,
         strict_live_mode=strict_live_mode,
     )
+    if strategy_mode:
+        fund_flow_cfg = runtime_cfg.setdefault("fund_flow", {})
+        if isinstance(fund_flow_cfg, dict):
+            fund_flow_cfg["strategy_mode"] = str(strategy_mode)
 
     # 加载配置
     config = build_backtest_config(
@@ -3050,6 +4357,7 @@ def run_backtest(
         output_prefix=str(output_prefix or ""),
     )
     strategy_config = build_strategy_config(runtime_cfg)
+    experiment_config = load_experiment_config(experiment_config_path)
     
     print(f"\n策略配置:")
     print(f"  min_signal_score: {strategy_config.min_signal_score}")
@@ -3104,6 +4412,7 @@ def run_backtest(
     print(f"  boll_strong_trend_leverage_mult: {strategy_config.ema_strong_trend_leverage_mult}")
     print(f"\n运行配置:")
     print(f"  config_path: {config.config_path}")
+    print(f"  strategy_mode: {runtime_cfg.get('fund_flow', {}).get('strategy_mode', 'macd_mtf_strategy_v2') if isinstance(runtime_cfg.get('fund_flow'), dict) else 'macd_mtf_strategy_v2'}")
     print(f"  backtest_profile: {config.profile_name or '(none)'}")
     if config.window_start_iso or config.window_end_iso:
         print(f"  time_window: {config.window_start_iso or '(open)'} -> {config.window_end_iso or '(open)'}")
@@ -3126,9 +4435,11 @@ def run_backtest(
     print(f"  breakeven: enabled={int(config.breakeven_enabled)} trigger={config.breakeven_trigger_pnl_ratio:.2%} lock={config.breakeven_lock_ratio:.2%}")
     print(f"  entry_slippage: {config.entry_slippage:.2%}")
     print(f"  entry_tif: {config.entry_time_in_force}")
+    if experiment_config.enabled:
+        print(f"  experiment_config: {experiment_config.source_path or '(inline)'}")
     
     # 初始化回测引擎
-    engine = BacktestEngine(config, strategy_config, runtime_cfg)
+    engine = BacktestEngine(config, strategy_config, runtime_cfg, experiment_config=experiment_config)
     
     # 加载数据并回测
     available_symbols = []
@@ -3152,6 +4463,7 @@ def run_backtest(
             market_data_map,
             start_time=start_time,
             end_time=end_time,
+            preserve_start_history=bool(start_time),
         )
         available_symbols = list(market_data_map.keys())
         if dropped_by_window:
@@ -3419,6 +4731,21 @@ def run_backtest(
         engine.last_equity_curve_file = None
         engine.last_pending_cancel_audit_file = None
 
+    exit_audit_file = output_dir / f"{output_stem}_exit_audit.jsonl"
+    with exit_audit_file.open("w", encoding="utf-8") as f:
+        for row in getattr(engine, "exit_audit_rows", []) or []:
+            f.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+    engine.last_exit_audit_file = str(exit_audit_file)
+    print(f"出场审计已保存: {exit_audit_file}")
+
+    slow_bull_hold_file = output_dir / f"{output_stem}_slow_bull_hold_failures.jsonl"
+    engine.slow_bull_hold_auditor.export_jsonl(slow_bull_hold_file)
+    engine.last_slow_bull_hold_failures_file = str(slow_bull_hold_file)
+    capacity_shadow_file = output_dir / f"{output_stem}_capacity_replacement_shadow.jsonl"
+    engine.capacity_replacement_shadow.export_jsonl(capacity_shadow_file)
+    engine.experiment_audit["capacity_shadow_replacements"] = len(engine.capacity_replacement_shadow.replacement_log)
+    engine.last_capacity_replacement_shadow_file = str(capacity_shadow_file)
+
     summary = build_backtest_summary(
         config=config,
         strategy_config=strategy_config,
@@ -3448,9 +4775,11 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser.add_argument("--max-positions", type=int, default=None, help="override max concurrent positions")
     parser.add_argument("--fixed-leverage", type=int, default=None, help="force a fixed leverage for all entries")
     parser.add_argument("--profile", default=None, help="optional backtest profile name from fund_flow.backtest.profiles")
+    parser.add_argument("--strategy", default=None, help="override fund_flow.strategy_mode, e.g. quadrant_resonance")
     parser.add_argument("--strict-live-mode", action="store_true", help="skip backtest profile application and use raw config as-is")
     parser.add_argument("--simulate-live-close-layers", action="store_true", help="approximate live-only close layers in backtest")
     parser.add_argument("--output-prefix", default=None, help="optional output file prefix; defaults under output/backtest")
+    parser.add_argument("--experiment-config", default=None, help="optional slow-bull hypothesis experiment config JSON")
     parser.add_argument("--start", default=None, help="optional inclusive backtest window start, e.g. 2026-02-20 or 2026-02-20T00:00:00")
     parser.add_argument("--end", default=None, help="optional inclusive backtest window end, e.g. 2026-02-27 or 2026-02-27T23:59:59")
     args = parser.parse_args(argv)
@@ -3468,6 +4797,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         strict_live_mode=bool(args.strict_live_mode),
         simulate_live_close_layers=bool(args.simulate_live_close_layers),
         output_prefix=args.output_prefix,
+        experiment_config_path=args.experiment_config,
+        strategy_mode=args.strategy,
     )
 
 

@@ -278,26 +278,157 @@ def test_ema_multiplier_strong_requires_price_15m_and_adx_alignment() -> None:
     assert allowed == pytest.approx(1.2)
 
 
-def test_vwap_score_hard_block_blocks_extremely_low_entry_score() -> None:
+def test_vwap_score_gate_passes_extremely_low_entry_score() -> None:
     engine = MACDStrategyV2Engine(
         MACDStrategyV2Config(entry_quality_vwap_score_hard_block_enabled=True)
     )
 
     result = engine._apply_vwap_score_entry_gate(vwap_score=0.10, current_portion=0.18)
 
-    assert result["action"] == "BLOCK"
-    assert "vwap_score" in result["reason"]
+    assert result["action"] == "PASS"
+    assert result["max_portion"] == pytest.approx(0.18)
+    assert result["reason"] == "vwap_fully_ablated_observation_only"
 
 
-def test_vwap_score_hard_block_caps_low_entry_score_to_probe() -> None:
+def test_vwap_score_gate_does_not_cap_low_entry_score_to_probe() -> None:
     engine = MACDStrategyV2Engine(
         MACDStrategyV2Config(entry_quality_vwap_score_hard_block_enabled=True)
     )
 
     result = engine._apply_vwap_score_entry_gate(vwap_score=0.25, current_portion=0.18)
 
-    assert result["action"] == "PROBE"
+    assert result["action"] == "PASS"
+    assert result["max_portion"] == pytest.approx(0.18)
+
+
+def test_slow_bull_vwap_override_no_longer_caps_long() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            entry_quality_vwap_score_hard_block_enabled=True,
+            vwap_score_slow_bull_override_enabled=True,
+        )
+    )
+
+    result = engine._apply_vwap_score_entry_gate(
+        vwap_score=0.10,
+        current_portion=0.18,
+        direction="long",
+        is_slow_bull=True,
+    )
+
+    assert result["action"] == "PASS"
+    assert result["max_portion"] == pytest.approx(0.18)
+
+
+def test_slow_bull_vwap_override_no_longer_blocks_extreme_low_score() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            entry_quality_vwap_score_hard_block_enabled=True,
+            vwap_score_slow_bull_override_enabled=True,
+        )
+    )
+
+    result = engine._apply_vwap_score_entry_gate(
+        vwap_score=0.03,
+        current_portion=0.18,
+        direction="long",
+        is_slow_bull=True,
+    )
+
+    assert result["action"] == "PASS"
+    assert result["max_portion"] == pytest.approx(0.18)
+
+
+def test_continuation_long_candidate_allows_small_probe_when_momentum_confirms() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(enable_continuation_long=True)
+    )
+
+    result = engine._evaluate_continuation_long_candidate(
+        symbol="WLDUSDT",
+        symbol_ret_30m=0.004,
+        symbol_ret_60m=0.010,
+        rsi_15m=63.0,
+        ema_slope_15m=0.001,
+        close_15m=1.03,
+        ema_fast_15m=1.02,
+        btc_ret_30m=0.003,
+        breadth_state={"is_slow_bull": True},
+        vwap_score=0.10,
+        corr_btc_alt=0.65,
+    )
+
+    assert result["allowed"] is True
     assert result["max_portion"] == pytest.approx(0.042)
+    assert result["conditions_met"] == 6
+
+
+def test_continuation_long_candidate_blocks_overheated_chase_after_fast_extension() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(
+            enable_continuation_long=True,
+            continuation_long_overheat_guard_enabled=True,
+            continuation_long_overheat_ret_30m=0.008,
+            continuation_long_overheat_ret_60m=0.018,
+        )
+    )
+
+    result = engine._evaluate_continuation_long_candidate(
+        symbol="FETUSDT",
+        symbol_ret_30m=0.0182,
+        symbol_ret_60m=0.0200,
+        rsi_15m=71.0,
+        ema_slope_15m=0.001,
+        close_15m=1.03,
+        ema_fast_15m=1.02,
+        btc_ret_30m=0.003,
+        breadth_state={"is_slow_bull": True},
+        vwap_score=0.10,
+        corr_btc_alt=0.65,
+    )
+
+    assert result["allowed"] is False
+    assert result["reason"].startswith("continuation_overheat_chase_block")
+
+
+def test_continuation_long_candidate_requires_strict_checks_for_low_corr_symbol() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(enable_continuation_long=True)
+    )
+
+    result = engine._evaluate_continuation_long_candidate(
+        symbol="DOGEUSDT",
+        symbol_ret_30m=0.004,
+        symbol_ret_60m=0.010,
+        rsi_15m=63.0,
+        ema_slope_15m=0.001,
+        close_15m=1.01,
+        ema_fast_15m=1.02,
+        btc_ret_30m=0.003,
+        breadth_state={"is_slow_bull": True},
+        vwap_score=0.40,
+        corr_btc_alt=0.05,
+    )
+
+    assert result["allowed"] is False
+    assert "low_corr" in result["reason"]
+
+
+def test_slow_bull_short_guard_blocks_low_vwap_short_when_breadth_is_high() -> None:
+    engine = MACDStrategyV2Engine(
+        MACDStrategyV2Config(enable_slow_bull_short_guard=True)
+    )
+
+    result = engine._apply_slow_bull_short_guard(
+        direction="short",
+        signal_1h="green_bar_shrinking",
+        vwap_score=0.25,
+        breadth_ratio=0.72,
+        is_slow_bull=True,
+    )
+
+    assert result["action"] == "BLOCK"
+    assert "slow_bull" in result["reason"]
 
 
 def test_regime_entry_block_blocks_low_score_no_trade_and_caps_high_score_range() -> None:
@@ -591,15 +722,15 @@ def test_vol_vwap_warn_scale_skips_dust_position_below_min_notional() -> None:
     assert metadata["vol_vwap_warn_position_scale_skipped_below_min_notional"] is True
 
 
-def test_live_fixed_vwap_gate_uses_configured_fallback_hard_block_pct() -> None:
+def test_live_config_keeps_vwap_observation_only() -> None:
     cfg = json.loads(Path("config/trading_config_fund_flow.json").read_text(encoding="utf-8"))
 
     engine = FundFlowDecisionEngine(cfg)
     strategy_cfg = engine.macd_v2_config
     macd_engine = MACDStrategyV2Engine(strategy_cfg)
 
-    assert strategy_cfg.vwap_deviation_gate_mode == "directional_ablation"
-    assert strategy_cfg.vwap_same_dir_trend_aligned_pass_dev_pct == pytest.approx(0.05)
+    assert strategy_cfg.vwap_deviation_gate_mode == "observation_only"
+    assert strategy_cfg.weight_vwap == pytest.approx(0.0)
 
     score, veto, details = macd_engine.calculate_vwap_score(
         price=92.0,
@@ -612,7 +743,7 @@ def test_live_fixed_vwap_gate_uses_configured_fallback_hard_block_pct() -> None:
 
     assert veto is VetoType.NONE
     assert score > 0
-    assert details["vwap_gate_action"] == "same_dir_trend_aligned_penalty"
+    assert details["vwap_gate_action"] != "BLOCK"
 
 
 def test_partial_confirm_shadow_scores_shrink_confirm_candidate() -> None:

@@ -56,3 +56,14 @@ user/skills/
 
 # Backtest output
 output/
+
+# Codex hook runtime state
+.codex/hook_state/
+
+# Local assistant/tool runtime state
+.claude/settings.local.json
+.manual_router_tmp/
+.pytest_basetemp_macd_impl/
+.pytest_router_run/
+.pytest_router_tmp/
+.pytest_tmp/

@@ -245,6 +245,10 @@ class MACDStrategyV2Config:
     rsi_adaptive_soft_rsi_against_mult: float = 0.88
     rsi_adaptive_soft_rsi_against_max_portion: float = 0.06
     rsi_adaptive_soft_rsi_flat_mult: float = 0.93
+    enable_slow_bull_1h_gate_downgrade: bool = False
+    slow_bull_1h_gate_mode: str = "keep"
+    slow_bull_1h_momentum_threshold_30m: float = 0.003
+    slow_bull_1h_momentum_threshold_60m: float = 0.005
     rsi_1h_direction_flat_threshold: float = 0.3
     enable_leading_rsi_conflict_pass: bool = True
     leading_rsi_slope_threshold: float = 2.0
@@ -433,12 +437,38 @@ class MACDStrategyV2Config:
     entry_quality_vwap_score_below_block: float = 0.12
     entry_quality_vwap_score_below_probe: float = 0.30
     entry_quality_vwap_score_probe_max: float = 0.042
+    vwap_score_slow_bull_override_enabled: bool = False
+    vwap_score_slow_bull_min_block: float = 0.050
+    vwap_score_slow_bull_cap_0_12: float = 0.020
+    vwap_score_slow_bull_cap_0_30: float = 0.030
     entry_quality_no_trade_gate_enabled: bool = False
     entry_quality_no_trade_block_below_score: float = 0.85
     entry_quality_no_trade_probe_max: float = 0.042
     entry_quality_range_gate_enabled: bool = False
     entry_quality_range_block_below_score: float = 0.80
     entry_quality_range_probe_max: float = 0.060
+    enable_continuation_long: bool = False
+    continuation_long_min_conditions_met: int = 4
+    continuation_long_ret_30m_threshold: float = 0.003
+    continuation_long_ret_60m_threshold: float = 0.006
+    continuation_long_rsi_min: float = 50.0
+    continuation_long_rsi_max: float = 72.0
+    continuation_long_leverage: int = 3
+    continuation_long_max_portion_6of6: float = 0.042
+    continuation_long_max_portion_5of6: float = 0.030
+    continuation_long_max_portion_4of6: float = 0.020
+    continuation_long_low_corr_strict_mode: bool = True
+    continuation_long_low_corr_threshold: float = 0.20
+    continuation_long_overheat_guard_enabled: bool = False
+    continuation_long_overheat_ret_30m: float = 0.008
+    continuation_long_overheat_ret_60m: float = 0.018
+    continuation_long_strong_boll_portion_cap_enabled: bool = False
+    continuation_long_strong_boll_ema_multiplier_threshold: float = 1.2
+    continuation_long_strong_boll_max_portion: float = 0.020
+    enable_slow_bull_short_guard: bool = False
+    slow_bull_short_breadth_70_block_vwap: float = 0.50
+    slow_bull_short_breadth_60_block_vwap: float = 0.35
+    slow_bull_short_probe_max_portion: float = 0.042
     enable_meaningful_short_entry_cap: bool = False
     meaningful_short_micro_target_portion: float = 0.009
     enable_no_trade_meaningful_entry_cap: bool = False
@@ -712,6 +742,10 @@ class MACDStrategyV2Engine:
             "vwap_deviation_in_atr": 0.0,
             "vwap_atr_pct": float(atr_pct or 0.0),
         }
+        if mode in {"observation_only", "disabled"}:
+            details["vwap_gate_action"] = "vwap_observation_only"
+            details["vwap_hard_block_threshold"] = float("inf")
+            return float("inf"), details
         if mode == "directional_ablation":
             return self._resolve_directional_vwap_ablation_gate(
                 extension=extension,
@@ -955,6 +989,8 @@ class MACDStrategyV2Engine:
     @staticmethod
     def _vwap_gate_is_block(gate_details: Dict[str, Any], directional_extension: float, hard_block: float) -> bool:
         action = str((gate_details or {}).get("vwap_gate_action") or "").strip().lower()
+        if action in {"vwap_observation_only", "disabled"}:
+            return False
         if action.endswith("_block") or action == "vwap_hard_block":
             return True
         return float(directional_extension or 0.0) > float(hard_block or 0.0)
@@ -1710,19 +1746,131 @@ class MACDStrategyV2Engine:
         *,
         vwap_score: float,
         current_portion: float,
+        direction: str = "",
+        is_slow_bull: bool = False,
     ) -> Dict[str, Any]:
-        if not bool(self.config.entry_quality_vwap_score_hard_block_enabled):
-            return {"action": "PASS", "max_portion": current_portion, "reason": "disabled"}
-        score = float(vwap_score or 0.0)
-        if score < float(self.config.entry_quality_vwap_score_below_block):
-            return {"action": "BLOCK", "reason": f"vwap_score_hard_block({score:.3f})"}
-        if score < float(self.config.entry_quality_vwap_score_below_probe):
+        return {
+            "action": "PASS",
+            "max_portion": current_portion,
+            "reason": "vwap_fully_ablated_observation_only",
+        }
+
+    def _evaluate_continuation_long_candidate(
+        self,
+        *,
+        symbol: str,
+        symbol_ret_30m: float,
+        symbol_ret_60m: float,
+        rsi_15m: float,
+        ema_slope_15m: float,
+        close_15m: float,
+        ema_fast_15m: float,
+        btc_ret_30m: float,
+        breadth_state: Dict[str, Any],
+        vwap_score: float,
+        corr_btc_alt: float,
+    ) -> Dict[str, Any]:
+        if not bool(self.config.enable_continuation_long):
+            return {"allowed": False, "reason": "continuation_long_disabled"}
+        if not bool((breadth_state or {}).get("is_slow_bull", False)):
+            return {"allowed": False, "reason": "not_slow_bull"}
+
+        conditions = {
+            "ret_30m": float(symbol_ret_30m or 0.0) >= float(self.config.continuation_long_ret_30m_threshold),
+            "ret_60m": float(symbol_ret_60m or 0.0) >= float(self.config.continuation_long_ret_60m_threshold),
+            "rsi_range": float(self.config.continuation_long_rsi_min) <= float(rsi_15m or 0.0) <= float(self.config.continuation_long_rsi_max),
+            "ema_slope": float(ema_slope_15m or 0.0) > 0.0,
+            "above_ema": float(close_15m or 0.0) > float(ema_fast_15m or 0.0) > 0.0,
+            "btc_not_down": float(btc_ret_30m or 0.0) >= -0.001,
+        }
+        met = sum(1 for value in conditions.values() if value)
+        failed = [key for key, value in conditions.items() if not value]
+        min_met = int(self.config.continuation_long_min_conditions_met)
+        if met < min_met:
             return {
-                "action": "PROBE",
-                "max_portion": float(self.config.entry_quality_vwap_score_probe_max),
-                "reason": f"vwap_score_probe({score:.3f})",
+                "allowed": False,
+                "conditions_met": met,
+                "reason": f"momentum_insufficient({met}/6) failed={failed}",
             }
-        return {"action": "PASS", "max_portion": current_portion, "reason": "vwap_score_pass"}
+
+        if (
+            bool(self.config.continuation_long_overheat_guard_enabled)
+            and float(symbol_ret_30m or 0.0) > float(self.config.continuation_long_overheat_ret_30m)
+            and float(symbol_ret_60m or 0.0) > float(self.config.continuation_long_overheat_ret_60m)
+        ):
+            return {
+                "allowed": False,
+                "conditions_met": met,
+                "reason": (
+                    "continuation_overheat_chase_block "
+                    f"ret30={float(symbol_ret_30m or 0.0):.2%} "
+                    f"ret60={float(symbol_ret_60m or 0.0):.2%}"
+                ),
+            }
+
+        corr = float(corr_btc_alt or 0.0)
+        if (
+            bool(self.config.continuation_long_low_corr_strict_mode)
+            and corr < float(self.config.continuation_long_low_corr_threshold)
+            and met < 6
+        ):
+            return {
+                "allowed": False,
+                "conditions_met": met,
+                "reason": f"low_corr_symbol strict_check({met}/6) failed={failed}",
+            }
+
+        if met >= 6:
+            max_portion = float(self.config.continuation_long_max_portion_6of6)
+        elif met == 5:
+            max_portion = float(self.config.continuation_long_max_portion_5of6)
+        else:
+            max_portion = float(self.config.continuation_long_max_portion_4of6)
+
+        score = float(vwap_score or 0.0)
+
+        return {
+            "allowed": True,
+            "max_portion": max_portion,
+            "conditions_met": met,
+            "reason": (
+                f"slow_bull_continuation {met}/6 "
+                f"ret30={float(symbol_ret_30m or 0.0):.2%} "
+                f"ret60={float(symbol_ret_60m or 0.0):.2%} "
+                f"rsi={float(rsi_15m or 0.0):.1f} "
+                f"vwap={score:.3f} portion={max_portion:.3f}"
+            ),
+        }
+
+    def _apply_slow_bull_short_guard(
+        self,
+        *,
+        direction: str,
+        signal_1h: str,
+        vwap_score: float,
+        breadth_ratio: float,
+        is_slow_bull: bool,
+    ) -> Dict[str, Any]:
+        if (
+            not bool(self.config.enable_slow_bull_short_guard)
+            or str(direction or "").strip().lower() != "short"
+            or not bool(is_slow_bull)
+        ):
+            return {"action": "PASS", "reason": "slow_bull_short_guard_pass"}
+
+        breadth = float(breadth_ratio or 0.0)
+        if breadth >= 0.70:
+            return {
+                "action": "BLOCK",
+                "reason": f"slow_bull_breadth_70pct_short_block breadth={breadth:.2f}",
+            }
+        if breadth >= 0.60:
+            return {
+                "action": "PROBE_CAP",
+                "max_portion": float(self.config.slow_bull_short_probe_max_portion),
+                "reason": f"slow_bull_short_probe breadth={breadth:.2f}",
+            }
+        return {"action": "PASS", "reason": "slow_bull_short_guard_pass"}
 
     def _check_regime_entry_block(
         self,
@@ -2833,6 +2981,53 @@ class MACDStrategyV2Engine:
             )
         return adjusted
 
+    def _apply_slow_bull_1h_direction_gate_downgrade(
+        self,
+        *,
+        rsi_rhythm: Dict[str, Any],
+        direction: str,
+        is_slow_bull: bool,
+        symbol_ret_30m: float,
+        symbol_ret_60m: float,
+    ) -> Dict[str, Any]:
+        adjusted = dict(rsi_rhythm or {})
+        if not bool(self.config.enable_slow_bull_1h_gate_downgrade):
+            return adjusted
+        if not bool(is_slow_bull) or not bool(adjusted.get("hard_veto", False)):
+            return adjusted
+        if str(adjusted.get("veto_reason") or "") not in {
+            "rsi_1h_direction_against_veto",
+            "rsi_1h_direction_flat_veto",
+        }:
+            return adjusted
+        if str(direction or "").strip().lower() != "long":
+            return adjusted
+        mode = str(self.config.slow_bull_1h_gate_mode or "keep").strip().lower()
+        if mode == "always_ignore":
+            momentum_ok = True
+        elif mode == "ignore_if_momentum_ok":
+            momentum_ok = (
+                float(symbol_ret_30m or 0.0) >= float(self.config.slow_bull_1h_momentum_threshold_30m)
+                and float(symbol_ret_60m or 0.0) >= float(self.config.slow_bull_1h_momentum_threshold_60m)
+            )
+        else:
+            momentum_ok = False
+        if not momentum_ok:
+            return adjusted
+        adjusted.update(
+            hard_veto=False,
+            veto_reason="",
+            entry_type="rsi_1h_direction_momentum_override",
+            exposure_mult=max(float(adjusted.get("exposure_mult", 1.0) or 1.0), 0.60),
+            probe_mode=True,
+            rsi_1h_direction_gate_passed=True,
+            rsi_soft_gate_applied=True,
+            rsi_soft_gate_action="SLOW_BULL_MOMENTUM_OVERRIDE",
+            rsi_soft_gate_reason="slow_bull_1h_direction_ignored_by_momentum",
+            **{"1h_gate_override": "ignored_by_momentum"},
+        )
+        return adjusted
+
     def _resolve_rsi_entry_refinement(
         self,
         *,
@@ -3299,13 +3494,6 @@ class MACDStrategyV2Engine:
         if float(adx_1h) < min_adx_1h:
             result["stable_continuation_reason"] = "adx_1h_too_low"
             return result
-        if float(vwap_score) < min_vwap_score:
-            result["stable_continuation_reason"] = "vwap_score_too_low"
-            return result
-        if state not in allowed_states:
-            result["stable_continuation_reason"] = "vwap_state_not_supported"
-            return result
-
         result.update(
             stable_continuation_active=True,
             stable_continuation_reason="stable_continuation_active",
@@ -5172,6 +5360,15 @@ class MACDStrategyV2Engine:
             signal_type_1h=str(details_1h.get("signal_type") or ""),
             direction=trade_direction,
         )
+        rsi_rhythm = self._apply_slow_bull_1h_direction_gate_downgrade(
+            rsi_rhythm=rsi_rhythm,
+            direction=trade_direction,
+            is_slow_bull=bool(debug_details.get("market_breadth", {}).get("is_slow_bull", False))
+            if isinstance(debug_details.get("market_breadth"), dict)
+            else False,
+            symbol_ret_30m=float(debug_details.get("entry_ret_30m", 0.0) or 0.0),
+            symbol_ret_60m=float(debug_details.get("entry_ret_60m", 0.0) or 0.0),
+        )
         if bool(rsi_rhythm.get("rsi_soft_gate_applied", False)):
             logger.info(
                 "[RSI_SOFT] direction=%s combo=%s+%s action=%s reason=%s mult=%.4f max_portion=%.4f",
@@ -5638,38 +5835,7 @@ class MACDStrategyV2Engine:
                 flip_bearish_structure_skipped=True,
             )
 
-        min_vwap_score_for_entry = max(
-            0.0,
-            self._resolve_min_vwap_score_for_entry(
-                trade_direction=trade_direction,
-                signal_type_1h=signal_type_1h,
-                is_trial_entry=is_trial_entry,
-            ),
-        )
-        if min_vwap_score_for_entry > 0 and vwap_score < min_vwap_score_for_entry:
-            debug_details = self._set_stage(
-                debug_details,
-                "vwap_score_filter",
-                min_vwap_score_for_entry=min_vwap_score_for_entry,
-            )
-            return self._neutral_signal(
-                reason=f'vwap_score_filter({vwap_score:.4f}<{min_vwap_score_for_entry:.4f})',
-                score=0.0,
-                veto_type=VetoType.VWAP_SCORE_FILTER,
-                veto_reason="VWAP评分低于入场阈值",
-                signal_type_1h=signal_type_1h,
-                entry_type_15m=entry_type_15m,
-                entry_score_15m=entry_score_15m,
-                vwap_score=vwap_score,
-                vwap_deviation=vwap_deviation,
-                ema_multiplier=ema_multiplier,
-                ema_structure_status=ema_status,
-                enhancement_score=enhancement_score,
-                is_4h_enhanced=is_4h_enhanced,
-                details=self._build_debug_details(
-                    **debug_details,
-                ),
-            )
+        min_vwap_score_for_entry = 0.0
 
         if strict_1h_filters_enabled and signal_type_1h == 'red_bar_growing' and trade_direction == 'long':
             if ema_status == 'against':

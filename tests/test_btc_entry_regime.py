@@ -16,7 +16,7 @@ def test_detect_btc_regime_from_four_closed_15m_returns() -> None:
     assert gate.detect_btc_regime([0.0002, -0.0001, 0.0001, -0.0002]) == BtcRegime.CHOPPY
 
 
-def test_falling_btc_blocks_low_vwap_long() -> None:
+def test_falling_btc_does_not_block_low_vwap_long() -> None:
     gate = BtcEntryRegimeGate({})
 
     result = gate.check_entry(
@@ -28,11 +28,11 @@ def test_falling_btc_blocks_low_vwap_long() -> None:
         btc_cumret_4bar=-0.006,
     )
 
-    assert result["action"] == "BLOCK"
-    assert "btc_falling" in result["reason"]
+    assert result["action"] == "PASS"
+    assert result["reason"] == "btc_falling_vwap_ablated_no_entry_block"
 
 
-def test_falling_btc_caps_below_vwap_long_with_medium_vwap_score() -> None:
+def test_falling_btc_does_not_cap_below_vwap_long_with_medium_vwap_score() -> None:
     gate = BtcEntryRegimeGate({})
 
     result = gate.check_entry(
@@ -44,11 +44,11 @@ def test_falling_btc_caps_below_vwap_long_with_medium_vwap_score() -> None:
         btc_cumret_4bar=-0.006,
     )
 
-    assert result["action"] == "PROBE_CAP"
-    assert result["max_portion"] == 0.042
+    assert result["action"] == "PASS"
+    assert result["reason"] == "btc_falling_vwap_ablated_no_entry_block"
 
 
-def test_btc_chase_short_blocks_after_large_four_bar_drop_with_weak_vwap() -> None:
+def test_btc_chase_short_probe_caps_after_large_four_bar_drop_without_vwap_block() -> None:
     gate = BtcEntryRegimeGate({})
 
     result = gate.check_entry(
@@ -60,11 +60,12 @@ def test_btc_chase_short_blocks_after_large_four_bar_drop_with_weak_vwap() -> No
         btc_cumret_4bar=-0.016,
     )
 
-    assert result["action"] == "BLOCK"
+    assert result["action"] == "PROBE_CAP"
+    assert result["max_portion"] == 0.042
     assert "chase_short" in result["reason"]
 
 
-def test_rising_btc_blocks_low_vwap_short() -> None:
+def test_rising_btc_probe_caps_short_without_vwap_block() -> None:
     gate = BtcEntryRegimeGate({})
 
     result = gate.check_entry(
@@ -76,5 +77,6 @@ def test_rising_btc_blocks_low_vwap_short() -> None:
         btc_cumret_4bar=0.006,
     )
 
-    assert result["action"] == "BLOCK"
+    assert result["action"] == "PROBE_CAP"
+    assert result["max_portion"] == 0.042
     assert "btc_rising" in result["reason"]

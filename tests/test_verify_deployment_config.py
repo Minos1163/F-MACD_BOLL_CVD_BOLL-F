@@ -71,9 +71,7 @@ def test_verify_deployment_rejects_legacy_vwap_hard_block_field(tmp_path: Path) 
 
 def test_verify_deployment_rejects_ineffective_directional_vwap_ablation(tmp_path: Path) -> None:
     cfg = json.loads(Path("config/trading_config_fund_flow.json").read_text(encoding="utf-8"))
-    cfg["fund_flow"]["macd_mtf_strategy_v2"]["vwap_config"]["vwap_deviation_gate"][
-        "same_dir_trend_aligned"
-    ]["pass_dev_pct"] = 0.03
+    cfg["fund_flow"]["macd_mtf_strategy_v2"]["scoring_weights"]["weight_vwap"] = 0.05
     bad_cfg = tmp_path / "bad_config.json"
     bad_cfg.write_text(json.dumps(cfg), encoding="utf-8")
 
@@ -85,7 +83,7 @@ def test_verify_deployment_rejects_ineffective_directional_vwap_ablation(tmp_pat
     )
 
     assert result.returncode == 1
-    assert "same_dir_trend_aligned.pass_dev_pct" in result.stdout
+    assert "weight_vwap" in result.stdout
 
 
 def test_verify_deployment_rejects_disabled_partial_confirm_shadow(tmp_path: Path) -> None:
@@ -151,10 +149,10 @@ def test_verify_deployment_rejects_unsafe_ioc_execution_settings(tmp_path: Path)
     assert "entry_market_fallback_min_score" in result.stdout
 
 
-def test_verify_deployment_rejects_bucket_total_cap_below_nine(tmp_path: Path) -> None:
+def test_verify_deployment_rejects_quadrant_bucket_total_cap_below_five(tmp_path: Path) -> None:
     cfg = json.loads(Path("config/trading_config_fund_flow.json").read_text(encoding="utf-8"))
-    cfg["fund_flow"]["max_active_symbols"] = 5
-    cfg["fund_flow"]["dynamic_max_active_symbols"]["max_active_symbols"] = 5
+    cfg["fund_flow"]["max_active_symbols"] = 4
+    cfg["fund_flow"]["dynamic_max_active_symbols"]["max_active_symbols"] = 4
     bad_cfg = tmp_path / "bad_config.json"
     bad_cfg.write_text(json.dumps(cfg), encoding="utf-8")
 
@@ -169,10 +167,9 @@ def test_verify_deployment_rejects_bucket_total_cap_below_nine(tmp_path: Path) -
     assert "max_active_symbols" in result.stdout
 
 
-def test_verify_deployment_rejects_missing_small_margin_nine_x_leverage(tmp_path: Path) -> None:
+def test_verify_deployment_rejects_missing_quadrant_small_margin_nine_x_leverage(tmp_path: Path) -> None:
     cfg = json.loads(Path("config/trading_config_fund_flow.json").read_text(encoding="utf-8"))
     cfg["fund_flow"]["position_count_limit_by_margin"]["small_margin_leverage"] = 5
-    cfg["fund_flow"]["max_leverage"] = 5
     bad_cfg = tmp_path / "bad_config.json"
     bad_cfg.write_text(json.dumps(cfg), encoding="utf-8")
 
@@ -185,7 +182,6 @@ def test_verify_deployment_rejects_missing_small_margin_nine_x_leverage(tmp_path
 
     assert result.returncode == 1
     assert "small_margin_leverage" in result.stdout
-    assert "max_leverage" in result.stdout
 
 
 def test_verify_deployment_rejects_two_x_leverage_caps(tmp_path: Path) -> None:
@@ -263,7 +259,7 @@ def test_verify_deployment_rejects_missing_btc_warmup_and_entry_gate(tmp_path: P
     cfg["fund_flow"]["btc_beta_risk"]["warmup_on_start"] = False
     cfg["fund_flow"]["btc_beta_risk"]["warmup_kline_limit"] = 20
     cfg["fund_flow"]["btc_entry_regime_gate"]["enabled"] = False
-    cfg["fund_flow"]["macd_mtf_strategy_v2"]["entry_quality_gates"]["vwap_score_hard_block"]["enabled"] = False
+    cfg["fund_flow"]["macd_mtf_strategy_v2"]["entry_quality_gates"]["vwap_score_hard_block"]["enabled"] = True
     cfg["fund_flow"]["macd_mtf_strategy_v2"]["entry_quality_gates"]["no_trade_gate"]["enabled"] = False
     cfg["fund_flow"]["macd_mtf_strategy_v2"]["entry_quality_gates"]["range_gate"]["enabled"] = False
     bad_cfg = tmp_path / "bad_config.json"
@@ -282,3 +278,28 @@ def test_verify_deployment_rejects_missing_btc_warmup_and_entry_gate(tmp_path: P
     assert "vwap_score_hard_block.enabled" in result.stdout
     assert "no_trade_gate.enabled" in result.stdout
     assert "range_gate.enabled" in result.stdout
+
+
+def test_verify_deployment_rejects_unsafe_slow_bull_live_switches(tmp_path: Path) -> None:
+    cfg = json.loads(Path("config/trading_config_fund_flow.json").read_text(encoding="utf-8"))
+    cfg["fund_flow"]["slow_bull_live_test"]["enabled"] = False
+    cfg["fund_flow"]["slow_bull_live_test"]["rsi_extreme_max_portion"] = 0.05
+    cfg["fund_flow"]["slow_bull_live_test"]["slow_bull_1h_gate_downgrade"]["mode"] = "keep"
+    cfg["fund_flow"]["slow_bull_live_test"]["fee_fragmentation_control"]["min_probe_notional"] = 0.5
+    cfg["fund_flow"]["slow_bull_live_test"]["capacity_replacement_shadow"]["replacement_enabled"] = True
+    bad_cfg = tmp_path / "bad_slow_bull_live_switches.json"
+    bad_cfg.write_text(json.dumps(cfg), encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, "scripts/verify_deployment.py", "--config", str(bad_cfg)],
+        cwd=Path(__file__).resolve().parents[1],
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 1
+    assert "slow_bull_live_test.enabled" in result.stdout
+    assert "rsi_extreme_max_portion" in result.stdout
+    assert "slow_bull_1h_gate_downgrade.mode" in result.stdout
+    assert "fee_fragmentation_control.min_probe_notional" in result.stdout
+    assert "capacity_replacement_shadow.replacement_enabled" in result.stdout

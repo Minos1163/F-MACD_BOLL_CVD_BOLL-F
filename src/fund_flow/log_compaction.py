@@ -40,6 +40,10 @@ _METADATA_SCALAR_KEYS = (
     "vol_vwap_warn_adjusted_portion",
     "score_volume",
     "vwap_score",
+    "signal_score",
+    "signal_type_1h",
+    "signal_type_15m",
+    "entry_score_15m",
 )
 
 _METADATA_OBJECT_KEYS = ("risk_plan", "stop_trigger", "pretrade_risk_gate", "leverage_model")
@@ -118,6 +122,32 @@ def compact_decision_payload(decision: Any) -> Dict[str, Any]:
     if compact_metadata:
         payload["metadata"] = compact_metadata
     return _drop_empty(payload)
+
+
+def compact_minimal_decision_payload(decision: Any) -> Dict[str, Any]:
+    raw = _as_mapping(decision)
+    payload: Dict[str, Any] = {
+        "operation": raw.get("operation"),
+        "symbol": raw.get("symbol"),
+        "target_portion_of_balance": _compact_value(raw.get("target_portion_of_balance")),
+        "leverage": _compact_value(raw.get("leverage")),
+        "reason": _compact_string(raw.get("reason"), 160),
+    }
+    metadata = compact_decision_metadata(raw.get("metadata"))
+    if metadata:
+        metadata.pop("_omitted_keys", None)
+        payload["metadata"] = metadata
+    return _drop_empty(payload)
+
+
+def compact_minimal_attribution_context(context: Any) -> Dict[str, Any]:
+    raw = _as_mapping(context)
+    return _drop_empty(
+        {
+            "symbol": raw.get("symbol"),
+            "price": _compact_value(raw.get("price")),
+        }
+    )
 
 
 def compact_decision_metadata(metadata: Any) -> Dict[str, Any]:

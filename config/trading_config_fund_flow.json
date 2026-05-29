@@ -207,6 +207,8 @@
   },
   "fund_flow": {
     "default_target_portion": 0.35,
+    "min_entry_notional_usdt": 0.1,
+    "min_entry_margin_usdt": 1.0,
     "log_compaction": {
       "attribution_mode": "minimal",
       "attribution_raw_keep_days": 1,
@@ -215,12 +217,12 @@
     },
     "add_position_portion": 0.6,
     "max_symbol_position_portion": 0.35,
-    "max_active_symbols": 9,
+    "max_active_symbols": 5,
     "position_count_limit_by_margin": {
       "enabled": true,
       "small_margin_threshold_usdt": 5.0,
       "max_small_margin_positions": 5,
-      "max_large_margin_positions": 4,
+      "max_large_margin_positions": 0,
       "small_margin_leverage": 9
     },
     "min_open_notional": {
@@ -283,7 +285,7 @@
     },
     "dynamic_max_active_symbols": {
       "enabled": false,
-      "max_active_symbols": 9,
+      "max_active_symbols": 5,
       "min_signal_score": 0.9,
       "min_vwap_score": 0.1,
       "min_regime_adx": 18.0,
@@ -366,12 +368,15 @@
       "alt_against_15m_pct": -0.001,
       "alt_against_30m_pct": -0.0015,
       "corr_window_bars": 48,
-      "fast_fail_window_bars": 2,
-      "fast_fail_mae_threshold": -0.002,
+      "fast_fail_min_age_bars": 4,
+      "fast_fail_window_bars": 4,
+      "fast_fail_mae_threshold": -0.0035,
       "fast_fail_mfe_threshold": 0.002,
       "risk_score_reduce_threshold": 2,
       "risk_score_close_threshold": 4,
-      "small_notional_close_threshold": 10.0,
+      "small_notional_close_threshold": 5.0,
+      "small_notional_close_equity_pct": 0.02,
+      "tiny_notional_skip_threshold": 1.0,
       "comment": "BTC 15M beta risk accelerates exits only; low-correlation symbols ignore BTC weight"
     },
     "btc_entry_regime_gate": {
@@ -380,9 +385,44 @@
       "rising_avg_ret": 0.001,
       "chase_short_block_bars": 4,
       "chase_short_ret_threshold": -0.015,
-      "chase_short_block_vwap": 0.5,
-      "btc_falling_low_vwap_block": 0.3,
       "btc_falling_below_vwap_probe_max": 0.042
+    },
+    "market_breadth": {
+      "enabled": true,
+      "slow_bull_breadth_ratio": 0.6,
+      "slow_bull_btc_ret_30m": 0.003,
+      "slow_bull_btc_ret_60m": 0.005,
+      "slow_bull_alt_median_60m": 0.004,
+      "mode_a_breadth_min": 0.8,
+      "mode_a_alt_median_min": 0.0025,
+      "mode_a_btc_min": -0.001,
+      "mode_b_btc_30m_min": 0.002,
+      "mode_b_breadth_min": 0.6,
+      "mode_b_alt_median_min": 0.003,
+      "mode_c_breadth_min": 0.9,
+      "mode_c_alt_median_min": 0.001,
+      "confirm_cycles": 2,
+      "invalidate_cycles": 2
+    },
+    "slow_bull_live_test": {
+      "enabled": true,
+      "rsi_extreme_mode": "cap_not_block",
+      "rsi_extreme_threshold": 72.0,
+      "rsi_extreme_max_portion": 0.02,
+      "slow_bull_1h_gate_downgrade": {
+        "enabled": true,
+        "mode": "ignore_if_momentum_ok",
+        "momentum_threshold_30m": 0.003,
+        "momentum_threshold_60m": 0.005
+      },
+      "fee_fragmentation_control": {
+        "enabled": true,
+        "min_probe_notional": 1.0
+      },
+      "capacity_replacement_shadow": {
+        "enabled": true,
+        "replacement_enabled": false
+      }
     },
     "exit_cooldown": {
       "enabled": true,
@@ -502,7 +542,83 @@
       "4h"
     ],
     "decision_timeframe": "15m",
-    "strategy_mode": "macd_mtf_strategy_v2",
+    "strategy_mode": "quadrant_resonance",
+    "quadrant_resonance": {
+      "indicators": {
+        "ema_fast": 20,
+        "ema_mid": 50,
+        "ema_slow": 200,
+        "macd_fast": 12,
+        "macd_slow": 26,
+        "macd_signal": 9,
+        "rsi_period": 14,
+        "atr_period": 14
+      },
+      "entry": {
+        "standard_threshold": 0.85,
+        "transition_threshold": 0.85,
+        "long_rsi_min": 40,
+        "long_rsi_max": 68,
+        "q2_long_rsi_min": 35,
+        "short_rsi_min": 40,
+        "short_rsi_max": 62,
+        "q4_short_rsi_max": 65,
+        "long_1h_rsi_hard_max": 75,
+        "short_1h_rsi_hard_min": 25,
+        "ema20_distance_atr_mult": 2.5,
+        "require_15m_entry_pattern": true,
+        "high_score_15m_override": true,
+        "high_score_15m_override_threshold": 0.9,
+        "high_score_probe_portion": 0.042,
+        "mid_score_requires_3bar_macd": true,
+        "mid_score_upper_bound": 0.9,
+        "extreme_4h_rsi_penalty": 0.05,
+        "long_4h_rsi_penalty_above": 70,
+        "short_4h_rsi_penalty_below": 30,
+        "cooldown_after_exit_seconds": 1800
+      },
+      "exit": {
+        "hard_stop_atr_mult": 1.5,
+        "stop_trigger": "close_confirm",
+        "tp1_atr_mult": 1.2,
+        "tp1_reduce_pct": 0.3,
+        "tp2_atr_mult": 3.0,
+        "tp2_reduce_pct": 0.4,
+        "tp3_atr_mult": 4.0,
+        "ema20_trailing_enabled": true,
+        "momentum_reduce_pct_first": 0.25,
+        "momentum_reduce_pct_second": 0.5,
+        "trend_reduce_pct": 0.5
+      },
+      "risk": {
+        "risk_per_trade_pct": 0.01,
+        "min_entry_notional_usdt": 8.0,
+        "min_entry_margin_usdt": 1.0,
+        "max_leverage": 3,
+        "max_total_exposure_pct": 0.75,
+        "daily_loss_pct": 0.05,
+        "weekly_loss_pct": 0.12,
+        "drawdown_halve_at_pct": 0.1,
+        "drawdown_restore_at_pct": 0.05
+      },
+      "capacity": {
+        "max_active_symbols": 5,
+        "replacement_min_new_score": 0.85,
+        "replacement_score_gap": 0.15,
+        "quality_weights": {
+          "pnl": 0.3,
+          "resonance_alignment": 0.25,
+          "macd_strength": 0.15,
+          "time_decay": 0.1,
+          "ema20_distance": 0.2
+        }
+      },
+      "audit": {
+        "entry_decision_path": "logs/fund_flow_entry_decision.jsonl",
+        "exit_audit_path": "logs/fund_flow_exit_audit.jsonl",
+        "capacity_replacement_path": "logs/fund_flow_capacity_replacement.jsonl"
+      }
+    },
     "macd_mtf_strategy_v2": {
       "macd_config": {
         "macd_1h_fast": 12,
@@ -533,7 +649,8 @@
         "vwap_deviation_optimal": 0.005,
         "vwap_deviation_warning": 0.015,
         "vwap_deviation_gate": {
-          "mode": "directional_ablation",
+          "enabled": false,
+          "mode": "observation_only",
           "same_dir_trend_aligned": {
             "pass_dev_pct": 0.05,
             "penalty_dev_pct": 0.1,
@@ -563,7 +680,7 @@
         "weight_4h_direction": 0.4,
         "weight_4h_enhancement": 0.1,
         "weight_rsi_rhythm": 0.3,
-        "weight_vwap": 0.05,
+        "weight_vwap": 0.0,
         "weight_15m_entry": 0.05,
         "weight_volume": 0.1
       },
@@ -685,8 +802,8 @@
         "trial_short_below_structure_promotion_min_adx_1h": 30.0,
         "trial_short_below_structure_promotion_min_4h_shrink_pct": 0.8,
         "trial_short_below_structure_promotion_min_4h_shrink_bars": 6,
-        "short_min_vwap_score_for_entry": 0.06,
-        "flip_bearish_short_min_vwap_score_for_entry": 0.08,
+        "short_min_vwap_score_for_entry": 0.0,
+        "flip_bearish_short_min_vwap_score_for_entry": 0.0,
         "flip_bearish_require_enhancement_or_15m_confirmation": true,
         "enable_short_regime_guard": true,
         "flip_bearish_block_trend_regime": true,
@@ -735,7 +852,7 @@
         "flip_bearish_normal_boll_min_signal_score": 0.0,
         "flip_bearish_normal_boll_max_leverage": 3,
         "flip_bearish_min_adx_1h": 30.0,
-        "flip_bearish_retest_reject_min_vwap_score": 0.25,
+        "flip_bearish_retest_reject_min_vwap_score": 0.0,
         "flip_bearish_max_bb_middle_slope_1h": 0.0,
         "flip_bearish_max_bb_middle_slope_4h": 0.0005,
         "bb_slope_lookback_1h": 3,
@@ -745,9 +862,9 @@
         "disable_green_bar_shrinking_short_dual_pressure_entries": false,
         "disable_red_bar_shrinking_long_dual_support_entries": false,
         "vol_vwap_warn_min_score_vol": 0.05,
-        "vol_vwap_warn_min_vwap_score": 0.1,
+        "vol_vwap_warn_min_vwap_score": 0.0,
         "min_signal_score": 0.68,
-        "min_vwap_score_for_entry": 0.12,
+        "min_vwap_score_for_entry": 0.0,
         "symbol_signal_overrides": []
       },
       "rsi_config": {
@@ -837,15 +954,19 @@
           "enabled": true,
           "strong_mult": 1.2,
           "fallback_mult": 1.0,
-          "require_price_vwap_aligned": true,
+          "require_price_vwap_aligned": false,
           "require_15m_raw_min": 0.25,
           "require_adx_min": 20.0
         },
         "vwap_score_hard_block": {
-          "enabled": true,
+          "enabled": false,
           "below_block": 0.12,
           "below_probe": 0.3,
-          "probe_max": 0.042
+          "probe_max": 0.042,
+          "slow_bull_override": true,
+          "slow_bull_min_block": 0.05,
+          "slow_bull_cap_0_12": 0.02,
+          "slow_bull_cap_0_30": 0.03
         },
         "no_trade_gate": {
           "enabled": true,
@@ -872,6 +993,32 @@
           "enabled": true
         }
       },
+      "continuation_long": {
+        "enabled": true,
+        "min_conditions_met": 4,
+        "ret_30m_threshold": 0.003,
+        "ret_60m_threshold": 0.006,
+        "rsi_min": 50,
+        "rsi_max": 72,
+        "leverage": 3,
+        "max_portion_6of6": 0.042,
+        "max_portion_5of6": 0.03,
+        "max_portion_4of6": 0.02,
+        "low_corr_strict_mode": true,
+        "low_corr_threshold": 0.2,
+        "overheat_guard_enabled": false,
+        "overheat_ret_30m": 0.008,
+        "overheat_ret_60m": 0.018,
+        "strong_boll_portion_cap_enabled": true,
+        "strong_boll_ema_multiplier_threshold": 1.2,
+        "strong_boll_max_portion": 0.015
+      },
+      "slow_bull_short_guard": {
+        "enabled": true,
+        "breadth_70_block_vwap": 0.5,
+        "breadth_60_block_vwap": 0.35,
+        "probe_max_portion": 0.042
+      },
       "exit_management": {
         "enable_priority_signal_shrink_exit": true,
         "priority_signal_shrink_exit_required_bars": 3,
@@ -886,7 +1033,7 @@
         "overheat_growing_penalty": 0.12,
         "overheat_boll_multiplier_threshold": 1.2,
         "overheat_vwap_score_threshold": 0.1,
-        "min_vwap_score_for_entry": 0.1
+        "min_vwap_score_for_entry": 0.0
       },
       "dynamic_position_sizing": {
         "enabled": true,
@@ -2214,7 +2361,7 @@
             "fund_flow": {
               "macd_mtf_strategy_v2": {
                 "scoring_weights": {
-                  "weight_vwap": 0.05
+                  "weight_vwap": 0.0
                 },
                 "entry_filters": {
                   "min_vwap_score_for_entry": 0.0,
@@ -2435,7 +2582,7 @@
             "fund_flow": {
               "macd_mtf_strategy_v2": {
                 "entry_filters": {
-                  "min_vwap_score_for_entry": 0.03
+                  "min_vwap_score_for_entry": 0.0
                 },
                 "position_management": {
                   "enable_red_bar_growing_probe_overlay": true,

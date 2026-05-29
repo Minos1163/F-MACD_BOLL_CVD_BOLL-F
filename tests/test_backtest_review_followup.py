@@ -11,15 +11,23 @@ import pytest
 from scripts.backtest_macd_v2 import (
     BacktestConfig,
     BacktestEngine,
+    BacktestExperimentConfig,
+    CapacityReplacementShadow,
     MACDSignalV2,
     MACDStrategyV2Config,
+    SlowBullHoldAuditor,
     apply_backtest_profile,
+    build_backtest_summary,
     build_strategy_config,
+    filter_market_data_by_time_range,
+    load_experiment_config,
     main as backtest_main,
+    prepare_timeframe_data,
     resolve_runtime_config_for_backtest,
 )
 from src.fund_flow.macd_strategy_v2 import MACDStrategyV2Engine
 from scripts.analyze_backtest_trades import build_cancel_quality_summary
+from scripts.analyze_backtest_trades import build_post_mortem_summary
 from scripts.diagnose_ioc_fallback import diagnose_ioc_fallback
 from scripts.diagnose_macd_v2_mdd_round1 import diagnose_mdd_round1
 from scripts.validate_live_backtest_alignment import (
@@ -66,6 +74,221 @@ def test_macd_v2_score_line_prints_vwap_quality_and_alpha_separately() -> None:
     assert "VWAPq=0.8500" in line
     assert "VWAPa=0.0425" in line
     assert "VWAP=0.0425" not in line
+
+
+def test_load_experiment_config_defaults_disabled() -> None:
+    cfg = load_experiment_config(None)
+
+    assert isinstance(cfg, BacktestExperimentConfig)
+    assert cfg.enabled is False
+    assert cfg.slow_bull_rsi_ablation.enabled is False
+    assert cfg.slow_bull_1h_gate_downgrade.enabled is False
+    assert cfg.capacity_replacement_shadow.enabled is False
+    assert cfg.tiered_beta_exit.enabled is False
+    assert cfg.fee_fragmentation_control.enabled is False
+
+
+def test_load_experiment_config_parses_slow_bull_options(tmp_path: Path) -> None:
+    path = tmp_path / "experiment.json"
+    path.write_text(
+        json.dumps(
+            {
+                "slow_bull_rsi_ablation": {
+                    "enabled": True,
+                    "rsi_extreme_mode": "cap_not_block",
+                    "rsi_extreme_max_portion": 0.02,
+                },
+                "slow_bull_1h_gate_downgrade": {
+                    "enabled": True,
+                    "mode": "ignore_if_momentum_ok",
+                    "momentum_threshold_30m": 0.003,
+                    "momentum_threshold_60m": 0.005,
+                },
+                "capacity_replacement_shadow": {"enabled": True},
+                "tiered_beta_exit": {"enabled": True, "continuation_fast_fail_bars": 4},
+                "fee_fragmentation_control": {"enabled": True, "min_probe_notional": 5.0},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = load_experiment_config(str(path))
+
+    assert cfg.enabled is True
+    assert cfg.slow_bull_rsi_ablation.enabled is True
+    assert cfg.slow_bull_rsi_ablation.rsi_extreme_mode == "cap_not_block"
+    assert cfg.slow_bull_1h_gate_downgrade.mode == "ignore_if_momentum_ok"
+    assert cfg.capacity_replacement_shadow.enabled is True
+    assert cfg.tiered_beta_exit.continuation_fast_fail_bars == 4
+    assert cfg.fee_fragmentation_control.min_probe_notional == pytest.approx(5.0)
+
+
+def test_slow_bull_hold_auditor_exports_jsonl(tmp_path: Path) -> None:
+    auditor = SlowBullHoldAuditor()
+    auditor.record_failure(
+        symbol="ICPUSDT",
+        timestamp="2026-05-23T09:15:00",
+        reason_code="RSI_BLOCK",
+        details={"rsi_15m": 76.2},
+    )
+
+    out = tmp_path / "holds.jsonl"
+    auditor.export_jsonl(out)
+
+    row = json.loads(out.read_text(encoding="utf-8").strip())
+    assert row["symbol"] == "ICPUSDT"
+    assert row["reason"] == "RSI_BLOCK"
+    assert row["details"]["rsi_15m"] == pytest.approx(76.2)
+
+
+def test_experiment_rsi_and_1h_overrides_only_in_slow_bull() -> None:
+    cfg = BacktestExperimentConfig.from_dict(
+        {
+            "slow_bull_rsi_ablation": {
+                "enabled": True,
+                "rsi_extreme_mode": "cap_not_block",
+                "rsi_extreme_max_portion": 0.02,
+            },
+            "slow_bull_1h_gate_downgrade": {
+                "enabled": True,
+                "mode": "ignore_if_momentum_ok",
+                "momentum_threshold_30m": 0.003,
+                "momentum_threshold_60m": 0.005,
+            },
+        },
+        source_path="inline",
+    )
+    signal = MACDSignalV2(
+        direction="neutral",
+        signal_score=0.0,
+        details={"entry_ret_30m": 0.004, "entry_ret_60m": 0.006},
+    )
+    engine = BacktestEngine(BacktestConfig(symbols=["ICPUSDT"]), MACDStrategyV2Config(), {"fund_flow": {}})
+    engine.experiment_config = cfg
+
+    capped = engine._apply_experiment_slow_bull_entry_overrides(
+        symbol="ICPUSDT",
+        signal=signal,
+        breadth_state={"is_slow_bull": True},
+        failure_reason="RSI_BLOCK",
+    )
+    ignored = engine._apply_experiment_slow_bull_entry_overrides(
+        symbol="ICPUSDT",
+        signal=signal,
+        breadth_state={"is_slow_bull": True},
+        failure_reason="RSI_1H_DIRECTION",
+    )
+    off = engine._apply_experiment_slow_bull_entry_overrides(
+        symbol="ICPUSDT",
+        signal=signal,
+        breadth_state={"is_slow_bull": False},
+        failure_reason="RSI_BLOCK",
+    )
+
+    assert capped["allowed"] is True
+    assert capped["max_portion"] == pytest.approx(0.02)
+    assert capped["metadata"]["rsi_override"] == "capped_extreme"
+    assert ignored["allowed"] is True
+    assert ignored["metadata"]["1h_gate_override"] == "ignored_by_momentum"
+    assert off["allowed"] is False
+
+
+def test_capacity_replacement_shadow_records_without_mutating_portfolio() -> None:
+    shadow = CapacityReplacementShadow(enabled=True, min_mfe_to_replace=0.001, replacement_threshold=0.05)
+    portfolio = {
+        "positions": {
+            "OLDUSDT": {
+                "symbol": "OLDUSDT",
+                "mfe_pct_full_hold": 0.0005,
+                "continuation_quality_score_shadow": 0.20,
+                "entry_bar_index_15m": 10,
+                "latest_bar_index_15m": 13,
+            }
+        },
+        "pending_orders": {},
+        "max_positions": 1,
+    }
+
+    shadow.evaluate_replacement(
+        portfolio=portfolio,
+        new_candidate={"symbol": "ICPUSDT", "continuation_quality_score_shadow": 0.40, "estimated_notional": 8.0},
+        current_ts="2026-05-23T09:30:00",
+    )
+
+    assert list(portfolio["positions"].keys()) == ["OLDUSDT"]
+    assert len(shadow.replacement_log) == 1
+    assert shadow.replacement_log[0]["new_symbol"] == "ICPUSDT"
+    assert shadow.replacement_log[0]["replaced_symbol"] == "OLDUSDT"
+
+
+def test_fee_fragmentation_filter_blocks_probe_but_not_hard_stop_exit() -> None:
+    cfg = BacktestExperimentConfig.from_dict(
+        {"fee_fragmentation_control": {"enabled": True, "min_probe_notional": 5.0, "min_holding_bars_for_exit": 2}},
+        source_path="inline",
+    )
+    engine = BacktestEngine(BacktestConfig(symbols=["ICPUSDT"]), MACDStrategyV2Config(), {"fund_flow": {}})
+    engine.experiment_config = cfg
+
+    assert engine._experiment_allows_entry_notional("ICPUSDT", 4.99) is False
+    assert engine._experiment_allows_entry_notional("ICPUSDT", 5.00) is True
+    assert engine._experiment_allows_exit(
+        {"symbol": "ICPUSDT", "entry_bar_index_15m": 10, "latest_bar_index_15m": 11},
+        reason="sim_conflict_exit",
+    ) is False
+    assert engine._experiment_allows_exit(
+        {"symbol": "ICPUSDT", "entry_bar_index_15m": 10, "latest_bar_index_15m": 11},
+        reason="stop_loss_intrabar",
+    ) is True
+
+
+def test_tiered_beta_exit_requires_continuation_dual_reversal() -> None:
+    cfg = BacktestExperimentConfig.from_dict(
+        {
+            "tiered_beta_exit": {
+                "enabled": True,
+                "continuation_fast_fail_bars": 4,
+                "require_btc_alt_reversal": True,
+                "btc_reversal_threshold": -0.001,
+                "alt_reversal_threshold": -0.002,
+            }
+        },
+        source_path="inline",
+    )
+    engine = BacktestEngine(BacktestConfig(symbols=["ICPUSDT"]), MACDStrategyV2Config(), {"fund_flow": {}})
+    engine.experiment_config = cfg
+    engine._last_breadth_state = {"btc_ret_15m": -0.002, "alt_median_15m": -0.003}
+
+    reason = engine._experiment_tiered_beta_exit_reason(
+        {
+            "symbol": "ICPUSDT",
+            "entry_execution_policy": "continuation_long",
+            "entry_bar_index_15m": 10,
+            "latest_bar_index_15m": 13,
+            "mae_pct_full_hold": -0.006,
+        }
+    )
+    no_reason = engine._experiment_tiered_beta_exit_reason(
+        {
+            "symbol": "ICPUSDT",
+            "entry_execution_policy": "continuation_long",
+            "entry_bar_index_15m": 10,
+            "latest_bar_index_15m": 13,
+            "mae_pct_full_hold": -0.006,
+        }
+    )
+
+    assert reason == "experiment_continuation_fast_fail_dual_reversal"
+    engine._last_breadth_state = {"btc_ret_15m": 0.0, "alt_median_15m": -0.003}
+    assert no_reason == "experiment_continuation_fast_fail_dual_reversal"
+    assert engine._experiment_tiered_beta_exit_reason(
+        {
+            "symbol": "ICPUSDT",
+            "entry_execution_policy": "continuation_long",
+            "entry_bar_index_15m": 10,
+            "latest_bar_index_15m": 13,
+            "mae_pct_full_hold": -0.006,
+        }
+    ) == ""
 
 
 def _rsi_direction_gate_engine() -> MACDStrategyV2Engine:
@@ -372,7 +595,7 @@ def test_signal_type_position_cap_defaults_to_legacy_4h_only() -> None:
     assert portion > 0.10
 
 
-def test_live_config_enables_shrink_caps_and_low_vwap_floor() -> None:
+def test_live_config_enables_shrink_caps_and_ablates_vwap_floor() -> None:
     runtime_cfg = json.loads(Path("config/trading_config_fund_flow.json").read_text(encoding="utf-8"))
 
     strategy_config = build_strategy_config(runtime_cfg)
@@ -382,7 +605,7 @@ def test_live_config_enables_shrink_caps_and_low_vwap_floor() -> None:
     assert strategy_config.dynamic_signal_type_position_caps["green_bar_shrinking"]["max_target_portion"] == pytest.approx(0.10)
     assert strategy_config.dynamic_signal_type_position_caps["red_bar_shrinking"]["apply_to"] == ["signal_1h", "signal_4h"]
     assert strategy_config.dynamic_signal_type_position_caps["green_bar_shrinking"]["apply_to"] == ["signal_1h", "signal_4h"]
-    assert strategy_config.min_vwap_score_for_entry == pytest.approx(0.12)
+    assert strategy_config.min_vwap_score_for_entry == pytest.approx(0.0)
 
 
 def test_live_config_marks_btc_eth_bnb_context_only_not_tradable() -> None:
@@ -398,7 +621,7 @@ def test_live_config_marks_btc_eth_bnb_context_only_not_tradable() -> None:
     assert context_symbols["BNBUSDT"]["tradable"] is False
 
 
-def test_low_vwap_long_entry_is_blocked_by_live_floor() -> None:
+def test_low_vwap_long_entry_is_not_blocked_after_vwap_ablation() -> None:
     engine = MACDStrategyV2Engine(
         MACDStrategyV2Config(
             min_signal_score=0.0,
@@ -439,8 +662,8 @@ def test_low_vwap_long_entry_is_blocked_by_live_floor() -> None:
         adx_1h=20.0,
     )
 
-    assert signal.direction == "neutral"
-    assert signal.details["reject_reason_code"] == "vwap_score_filter"
+    assert signal.direction == "long"
+    assert signal.details.get("reject_reason_code") != "vwap_score_filter"
 
 
 def test_no_trade_meaningful_cap_can_force_micro_ablation_portion() -> None:
@@ -885,6 +1108,74 @@ def test_backtest_cli_rejects_profile_with_strict_live_mode() -> None:
     assert exc.value.code == 2
 
 
+def test_backtest_cli_forwards_experiment_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    captured = {}
+
+    def fake_run_backtest(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr("scripts.backtest_macd_v2.run_backtest", fake_run_backtest)
+    experiment_path = tmp_path / "experiment.json"
+    experiment_path.write_text("{}", encoding="utf-8")
+
+    backtest_main(
+        [
+            "--config",
+            "config/trading_config_fund_flow.json",
+            "--experiment-config",
+            str(experiment_path),
+            "--output-prefix",
+            "output/backtest/cli_experiment_test",
+        ]
+    )
+
+    assert captured["experiment_config_path"] == str(experiment_path)
+    assert captured["output_prefix"] == "output/backtest/cli_experiment_test"
+
+
+def test_backtest_cli_forwards_strategy_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = {}
+
+    def fake_run_backtest(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr("scripts.backtest_macd_v2.run_backtest", fake_run_backtest)
+
+    backtest_main(
+        [
+            "--config",
+            "config/trading_config_fund_flow.json",
+            "--strategy",
+            "quadrant_resonance",
+        ]
+    )
+
+    assert captured["strategy_mode"] == "quadrant_resonance"
+
+
+def test_prepare_timeframe_data_adds_quadrant_indicators_without_vwap_dependency() -> None:
+    rows = []
+    base_ts = pd.Timestamp("2026-05-01 00:00:00")
+    for idx in range(80):
+        close = 100.0 + idx * 0.2
+        rows.append(
+            {
+                "timestamp": base_ts + pd.Timedelta(minutes=15 * idx),
+                "open": close - 0.1,
+                "high": close + 0.3,
+                "low": close - 0.3,
+                "close": close,
+                "volume": 1000.0 + idx,
+                "taker_buy_base": 520.0,
+            }
+        )
+    df = prepare_timeframe_data(pd.DataFrame(rows))
+
+    assert {"ema20", "ema50", "ema200", "rsi"}.issubset(df.columns)
+    assert float(df["ema20"].iloc[-1]) > float(df["ema50"].iloc[-1])
+    assert 0.0 <= float(df["rsi"].iloc[-1]) <= 100.0
+
+
 def test_compare_live_backtest_alignment_detects_threshold_and_portion_drift() -> None:
     runtime_cfg = {
         "fund_flow": {
@@ -1038,6 +1329,443 @@ def test_cancel_pending_order_tracks_full_cancel_audit_row() -> None:
     assert row["signal_type_1h"] == "red_bar_growing"
     assert row["reason"] == "ioc_no_fill"
     assert row["bars_waited"] == 2
+
+
+def test_time_range_filter_can_preserve_start_history_for_strict_live_warmup() -> None:
+    timestamps = pd.date_range("2026-05-23 00:00:00", periods=8, freq="15min")
+    frame = pd.DataFrame({"timestamp": timestamps, "close": np.arange(8, dtype=float)})
+    market_data = {"SOLUSDT": {"15m": frame.copy(), "1h": frame.copy(), "4h": frame.copy()}}
+
+    filtered, dropped = filter_market_data_by_time_range(
+        market_data,
+        start_time="2026-05-23T01:00:00",
+        end_time="2026-05-23T01:30:00",
+        preserve_start_history=True,
+    )
+
+    assert dropped == []
+    kept = filtered["SOLUSDT"]["15m"]
+    assert kept["timestamp"].iloc[0] == pd.Timestamp("2026-05-23 00:00:00")
+    assert kept["timestamp"].iloc[-1] == pd.Timestamp("2026-05-23 01:30:00")
+
+
+def test_close_position_writes_mfe_mae_and_entry_diagnostics() -> None:
+    engine = BacktestEngine(
+        BacktestConfig(symbols=["SOLUSDT"], breakeven_enabled=False),
+        MACDStrategyV2Config(enable_4h_shrink_exit=False),
+        runtime_config={},
+    )
+    _base_position(engine)
+    engine.positions["SOLUSDT"].update(
+        {
+            "entry_bar_index_15m": 10,
+            "latest_bar_index_15m": 14,
+            "mfe_pct_full_hold": 0.045,
+            "mae_pct_full_hold": -0.018,
+            "mfe_pct_2bar": 0.015,
+            "mae_pct_2bar": -0.008,
+            "mfe_pct_4bar": 0.032,
+            "mae_pct_4bar": -0.012,
+            "mfe_pct_8bar": 0.045,
+            "mae_pct_8bar": -0.018,
+            "entry_ret_30m": 0.004,
+            "entry_ret_60m": 0.009,
+            "entry_rsi_15m": 61.5,
+            "entry_ema_slope_15m": 0.0018,
+            "entry_breadth_mode": "alt_breadth_led",
+            "entry_breadth_ratio": 0.86,
+            "entry_btc_ret_30m": 0.001,
+            "continuation_quality_score_shadow": 0.742,
+            "same_bar_stop_and_tp_hit": True,
+            "exit_order_assumption": "stop_first_conservative",
+        }
+    )
+
+    engine.close_position(
+        "SOLUSDT",
+        price=101.0,
+        time=pd.Timestamp("2026-04-25 15:00:00"),
+        reason="take_profit_intrabar",
+    )
+
+    trade = engine.trades[-1]
+    assert trade["mfe_pct_full_hold"] == pytest.approx(0.045, rel=1e-6)
+    assert trade["mae_pct_full_hold"] == pytest.approx(-0.018, rel=1e-6)
+    assert trade["mfe_pct_2bar"] == pytest.approx(0.015, rel=1e-6)
+    assert trade["mae_pct_8bar"] == pytest.approx(-0.018, rel=1e-6)
+    assert trade["bars_held"] == 4
+    assert trade["minutes_held"] == pytest.approx(60.0, rel=1e-6)
+    assert trade["same_bar_stop_and_tp_hit"] is True
+    assert trade["exit_order_assumption"] == "stop_first_conservative"
+    assert trade["entry_ret_30m"] == pytest.approx(0.004, rel=1e-6)
+    assert trade["entry_breadth_mode"] == "alt_breadth_led"
+    assert trade["continuation_quality_score_shadow"] == pytest.approx(0.742, rel=1e-6)
+
+
+def test_finalize_post_exit_audit_writes_followthrough_windows() -> None:
+    engine = BacktestEngine(
+        BacktestConfig(symbols=["SOLUSDT"], breakeven_enabled=False),
+        MACDStrategyV2Config(enable_4h_shrink_exit=False),
+        runtime_config={},
+    )
+    _base_position(engine)
+    engine.positions["SOLUSDT"].update(
+        {
+            "entry_bar_index_15m": 10,
+            "latest_bar_index_15m": 12,
+            "entry_atr_15m": 1.0,
+        }
+    )
+
+    engine.close_position(
+        "SOLUSDT",
+        price=101.0,
+        time=pd.Timestamp("2026-04-25 15:00:00"),
+        reason="HARD_STOP_LOSS",
+    )
+    bars = []
+    base_ts = pd.Timestamp("2026-04-25 12:00:00")
+    for idx in range(30):
+        bars.append(
+            {
+                "timestamp": base_ts + pd.Timedelta(minutes=15 * idx),
+                "open": 100.0,
+                "high": 101.0 + idx * 0.1,
+                "low": 99.0 - idx * 0.05,
+                "close": 100.0,
+            }
+        )
+    bars[13]["high"] = 102.0
+    bars[17]["high"] = 103.0
+    bars[22]["high"] = 104.0
+
+    engine._finalize_post_exit_audit({"SOLUSDT": {"15m": pd.DataFrame(bars)}})
+
+    trade = engine.trades[-1]
+    assert trade["post_exit_high_4bars"] == pytest.approx(102.6, rel=1e-6)
+    assert trade["post_exit_high_8bars"] == pytest.approx(103.0, rel=1e-6)
+    assert trade["post_exit_high_12bars"] == pytest.approx(104.0, rel=1e-6)
+    assert trade["post_exit_best_followthrough_pct_12bars"] == pytest.approx((104.0 - 101.0) / 100.0, rel=1e-6)
+    assert trade["stopped_before_followthrough"] is True
+    assert len(engine.exit_audit_rows) == 1
+
+
+def test_quadrant_backtest_momentum_exit_reduces_position_once() -> None:
+    engine = BacktestEngine(
+        BacktestConfig(symbols=["SOLUSDT"], breakeven_enabled=False),
+        MACDStrategyV2Config(enable_4h_shrink_exit=False),
+        runtime_config={"fund_flow": {"strategy_mode": "quadrant_resonance"}},
+    )
+    _base_position(engine)
+    engine.positions["SOLUSDT"].update(
+        {
+            "strategy_mode": "quadrant_resonance",
+            "entry_execution_policy": "quadrant_resonance",
+            "quadrant_4h": "Q1",
+            "entry_bar_index_15m": 10,
+            "latest_bar_index_15m": 11,
+        }
+    )
+    signal = MACDSignalV2(
+        direction="neutral",
+        signal_score=0.50,
+        signal_type_1h="quadrant_Q1",
+        details={"strategy_mode": "quadrant_resonance", "quadrant_4h": "Q1"},
+    )
+    analysis = _analysis(signal=signal, price=100.0, high=100.2, low=99.8, close=100.0)
+    analysis["row_1h"]["macd_hist"] = -0.01
+    analysis["row_1h"]["ema20"] = 101.0
+    analysis["row_1h"]["ema50"] = 100.0
+    analysis["row_4h"] = pd.Series({"macd_hist": 0.03})
+    analysis["idx_15m"] = 12
+
+    closed = engine.check_stops("SOLUSDT", analysis)
+
+    assert closed is False
+    assert engine.positions["SOLUSDT"]["margin"] == pytest.approx(500.0, rel=1e-6)
+    assert engine.positions["SOLUSDT"]["quadrant_momentum_reduced"] is True
+    assert engine.trades[-1]["reason"] == "MOMENTUM_REDUCE"
+
+
+def test_quadrant_backtest_applies_exit_updates_after_tp1_reduce() -> None:
+    engine = BacktestEngine(
+        BacktestConfig(symbols=["SOLUSDT"], breakeven_enabled=False),
+        MACDStrategyV2Config(enable_4h_shrink_exit=False),
+        runtime_config={
+            "fund_flow": {
+                "strategy_mode": "quadrant_resonance",
+                "quadrant_resonance": {"exit": {"tp1_atr_mult": 1.2, "tp1_reduce_pct": 0.30}},
+            }
+        },
+    )
+    _base_position(engine)
+    engine.positions["SOLUSDT"].update(
+        {
+            "strategy_mode": "quadrant_resonance",
+            "entry_execution_policy": "quadrant_resonance",
+            "entry_bar_index_15m": 10,
+            "latest_bar_index_15m": 11,
+        }
+    )
+    signal = MACDSignalV2(
+        direction="neutral",
+        signal_score=0.50,
+        signal_type_1h="quadrant_Q1",
+        details={"strategy_mode": "quadrant_resonance", "quadrant_4h": "Q1"},
+    )
+    analysis = _analysis(signal=signal, price=102.5, high=102.5, low=101.5, close=102.5)
+    analysis["row_15m"]["atr"] = 2.0
+    analysis["row_15m"]["ema20"] = 101.0
+    analysis["row_1h"]["macd_hist"] = 0.03
+    analysis["row_1h"]["ema20"] = 101.0
+    analysis["row_1h"]["ema50"] = 100.0
+    analysis["row_1h"]["ema200"] = 90.0
+    analysis["row_4h"] = pd.Series({"macd_hist": 0.03, "ema20": 110.0, "ema50": 100.0, "ema200": 90.0})
+    analysis["idx_15m"] = 12
+
+    closed = engine.check_stops("SOLUSDT", analysis)
+
+    assert closed is False
+    assert engine.positions["SOLUSDT"]["margin"] == pytest.approx(700.0, rel=1e-6)
+    assert engine.positions["SOLUSDT"]["tp1_done"] is True
+    assert engine.positions["SOLUSDT"]["stage"] == "trend"
+    assert engine.positions["SOLUSDT"]["stop_price"] == pytest.approx(100.0, rel=1e-6)
+    assert engine.trades[-1]["reason"] == "TP1_REDUCE_TO_EMA_TRAIL"
+
+
+def test_quadrant_backtest_close_confirm_ignores_intrabar_stop_wick() -> None:
+    engine = BacktestEngine(
+        BacktestConfig(symbols=["SOLUSDT"], breakeven_enabled=False),
+        MACDStrategyV2Config(enable_4h_shrink_exit=False),
+        runtime_config={
+            "fund_flow": {
+                "strategy_mode": "quadrant_resonance",
+                "quadrant_resonance": {"exit": {"stop_trigger": "close_confirm", "hard_stop_atr_mult": 1.5}},
+            }
+        },
+    )
+    _base_position(engine, stop_price=97.0)
+    engine.positions["SOLUSDT"].update(
+        {
+            "strategy_mode": "quadrant_resonance",
+            "entry_execution_policy": "quadrant_resonance",
+            "entry_bar_index_15m": 10,
+            "latest_bar_index_15m": 11,
+        }
+    )
+    signal = MACDSignalV2(direction="neutral", signal_score=0.50, signal_type_1h="quadrant_Q1")
+    analysis = _analysis(signal=signal, price=99.2, high=100.2, low=96.8, close=99.2)
+    analysis["row_15m"]["atr"] = 2.0
+    analysis["row_1h"]["macd_hist"] = 0.03
+    analysis["row_1h"]["ema20"] = 101.0
+    analysis["row_1h"]["ema50"] = 100.0
+    analysis["row_1h"]["ema200"] = 90.0
+    analysis["row_4h"] = pd.Series({"macd_hist": 0.03, "ema20": 110.0, "ema50": 100.0, "ema200": 90.0})
+    analysis["idx_15m"] = 12
+
+    closed = engine.check_stops("SOLUSDT", analysis)
+
+    assert closed is False
+    assert "SOLUSDT" in engine.positions
+    assert engine.trades == []
+
+
+def test_continuation_ranking_score_drives_competition_score_without_using_shadow_score() -> None:
+    engine = BacktestEngine(
+        BacktestConfig(symbols=["SOLUSDT"], breakeven_enabled=False),
+        MACDStrategyV2Config(
+            enable_continuation_long=True,
+            continuation_long_min_conditions_met=4,
+            continuation_long_ret_30m_threshold=0.003,
+            continuation_long_ret_60m_threshold=0.006,
+        ),
+        runtime_config={},
+    )
+    engine._last_breadth_state = {
+        "is_slow_bull": True,
+        "mode": "alt_breadth_led",
+        "breadth_ratio": 0.95,
+        "btc_ret_30m": 0.002,
+        "alt_median_60m": 0.006,
+    }
+    base_signal = MACDSignalV2(direction="neutral", signal_score=0.0, signal_type_1h="")
+    strong_tf = pd.DataFrame(
+        {
+            "close": [
+                100.0,
+                100.1,
+                100.2,
+                100.35,
+                100.6,
+                100.9,
+                101.2,
+                101.6,
+                102.0,
+                102.4,
+                102.9,
+                103.4,
+                104.0,
+                104.6,
+                105.2,
+                105.9,
+            ]
+        }
+    )
+
+    signal = engine._maybe_apply_continuation_long("SOLUSDT", base_signal, strong_tf, len(strong_tf) - 1)
+
+    assert signal.direction == "long"
+    assert signal.signal_score == pytest.approx(0.60, rel=1e-6)
+    assert signal.details["competition_score"] == pytest.approx(signal.details["continuation_ranking_score"], rel=1e-6)
+    assert signal.details["competition_score"] > 0.60
+    assert signal.details["continuation_quality_score_shadow"] > 0.0
+    assert signal.details["continuation_quality_score_shadow"] != pytest.approx(signal.details["competition_score"], rel=1e-6)
+
+
+def test_backtest_continuation_strong_boll_cap_reduces_entry_scale_only_for_continuation() -> None:
+    engine = BacktestEngine(
+        BacktestConfig(symbols=["SOLUSDT"], breakeven_enabled=False),
+        MACDStrategyV2Config(
+            enable_continuation_long=True,
+            continuation_long_min_conditions_met=4,
+            continuation_long_ret_30m_threshold=0.003,
+            continuation_long_ret_60m_threshold=0.006,
+            continuation_long_max_portion_6of6=0.042,
+            continuation_long_strong_boll_portion_cap_enabled=True,
+            continuation_long_strong_boll_ema_multiplier_threshold=1.2,
+            continuation_long_strong_boll_max_portion=0.02,
+        ),
+        runtime_config={},
+    )
+    engine._last_breadth_state = {
+        "is_slow_bull": True,
+        "mode": "alt_breadth_led",
+        "breadth_ratio": 0.95,
+        "btc_ret_30m": 0.002,
+        "alt_median_60m": 0.006,
+    }
+    base_signal = MACDSignalV2(
+        direction="neutral",
+        signal_score=0.0,
+        signal_type_1h="",
+        ema_multiplier=1.2,
+    )
+    strong_tf = pd.DataFrame(
+        {
+            "close": [
+                100.0,
+                100.1,
+                100.2,
+                100.35,
+                100.6,
+                100.9,
+                101.2,
+                101.6,
+                102.0,
+                102.4,
+                102.9,
+                103.4,
+                104.0,
+                104.6,
+                105.2,
+                105.9,
+            ]
+        }
+    )
+
+    signal = engine._maybe_apply_continuation_long("SOLUSDT", base_signal, strong_tf, len(strong_tf) - 1)
+
+    assert signal.direction == "long"
+    assert signal.entry_scale == pytest.approx(0.02 / engine.config.default_target_portion, rel=1e-6)
+    assert signal.details["continuation_strong_boll_portion_cap"]["applied"] is True
+    assert signal.details["continuation_strong_boll_portion_cap"]["final_portion"] == pytest.approx(0.02, rel=1e-6)
+
+
+def test_post_mortem_summary_reports_mfe_mae_and_tail_risk() -> None:
+    trades_df = pd.DataFrame(
+        [
+            {
+                "symbol": "SOLUSDT",
+                "side": "long",
+                "pnl": 2.0,
+                "reason": "take_profit_intrabar",
+                "mfe_pct_full_hold": 0.03,
+                "mae_pct_full_hold": -0.004,
+                "minutes_held": 45,
+                "continuation_quality_score_shadow": 0.82,
+            },
+            {
+                "symbol": "FETUSDT",
+                "side": "long",
+                "pnl": -3.0,
+                "reason": "stop_loss_intrabar",
+                "mfe_pct_full_hold": 0.001,
+                "mae_pct_full_hold": -0.012,
+                "minutes_held": 15,
+                "continuation_quality_score_shadow": 0.44,
+            },
+        ]
+    )
+    equity_df = pd.DataFrame(
+        [
+            {"timestamp": "2026-05-23 09:00:00", "equity": 10000.0, "open_positions": 0, "pending_orders": 0},
+            {"timestamp": "2026-05-23 09:15:00", "equity": 10002.0, "open_positions": 1, "pending_orders": 0},
+            {"timestamp": "2026-05-23 09:30:00", "equity": 9999.0, "open_positions": 0, "pending_orders": 0},
+        ]
+    )
+
+    summary = build_post_mortem_summary(trades_df, equity_df, pd.DataFrame())
+
+    assert summary["trade_count"] == 2
+    assert summary["profit_factor"] == pytest.approx(2.0 / 3.0, rel=1e-6)
+    assert summary["expectancy"] == pytest.approx(-0.5, rel=1e-6)
+    assert summary["exposure_pct"] == pytest.approx(100.0 / 3.0, rel=1e-6)
+    assert summary["tail_risk"]["worst_5_pnl"] == [-3.0, 2.0]
+    assert summary["loss_classification"]["never_worked"] == 1
+    assert "0.75-1.00" in summary["shadow_score_buckets"]
+
+
+def test_backtest_summary_reports_core_review_metrics() -> None:
+    engine = SimpleNamespace(
+        capital=101.0,
+        trades=[
+            {"pnl": 2.0, "mfe_pct_full_hold": 0.03, "mae_pct_full_hold": -0.004},
+            {"pnl": -1.0, "mfe_pct_full_hold": 0.01, "mae_pct_full_hold": -0.02},
+        ],
+        equity_curve=[
+            {"timestamp": "2026-05-01 00:00:00", "equity": 100.0, "open_positions": 0},
+            {"timestamp": "2026-05-01 00:15:00", "equity": 102.0, "open_positions": 1},
+            {"timestamp": "2026-05-01 00:30:00", "equity": 101.0, "open_positions": 1},
+        ],
+        max_drawdown_value=1.0,
+        max_drawdown_pct=0.98,
+        max_drawdown_start_time="2026-05-01 00:15:00",
+        max_drawdown_trough_time="2026-05-01 00:30:00",
+        max_drawdown_recovery_time="",
+        execution_audit={},
+        pending_cancel_audit_rows=[],
+        exit_audit_rows=[],
+        live_close_audit={},
+        experiment_config=BacktestExperimentConfig(),
+        experiment_audit={},
+        slow_bull_hold_auditor=SimpleNamespace(failure_log=[]),
+        capacity_replacement_shadow=SimpleNamespace(replacement_log=[]),
+    )
+
+    summary = build_backtest_summary(
+        BacktestConfig(symbols=["SOLUSDT"], initial_capital=100.0),
+        MACDStrategyV2Config(),
+        engine,
+        ["SOLUSDT"],
+        [],
+        {"signals": 2, "timeline_points": 3},
+    )
+
+    assert summary["expectancy"] == pytest.approx(0.5, rel=1e-6)
+    assert summary["exposure_pct"] == pytest.approx(100.0 * 2 / 3, rel=1e-6)
+    assert "sharpe" in summary
+    assert summary["tail_risk"]["worst_5_pnl"] == [-1.0, 2.0]
+    assert summary["mfe_mae"]["mfe_pct_full_hold_mean"] == pytest.approx(0.02, rel=1e-6)
 
 
 def test_build_cancel_quality_summary_compares_canceled_vs_filled_scores() -> None:

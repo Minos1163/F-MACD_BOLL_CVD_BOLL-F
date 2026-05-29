@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import copy
+import json
 from collections import deque
 from dataclasses import replace
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Deque, Dict, Optional, Sequence, Tuple
 import pandas as pd
 
@@ -15,7 +17,12 @@ from src.fund_flow.weight_router import WeightRouter
 from src.fund_flow.macd_strategy import MACDStrategyEngine, MACDStrategyConfig, MACDSignal
 # MACD多时间框架策略 V2.0 (VWAP + BOLL 增强版)
 from src.fund_flow.macd_strategy_v2 import MACDStrategyV2Engine, MACDStrategyV2Config, MACDSignalV2, VetoType
+from src.fund_flow.quadrant_resonance import (
+    QuadrantResonanceConfig,
+    QuadrantResonanceEngine,
+)
 from src.fund_flow.btc_entry_regime import BtcEntryRegimeGate
+from src.fund_flow.market_breadth import MarketBreadthConfig
 from src.fund_flow.filters.symbol_signal_override import SymbolSignalOverrideRegistry
 from src.fund_flow.filters.time_window_filter import TimeWindowFilter, TimeWindowFilterConfig
 from src.fund_flow.v3_filter_integration import V3FilterManager
@@ -36,6 +43,22 @@ class FundFlowDecisionEngine:
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config or {}
         ff = self.config.get("fund_flow", {}) or {}
+        slow_bull_live_cfg = ff.get("slow_bull_live_test", {}) if isinstance(ff.get("slow_bull_live_test"), dict) else {}
+        self.slow_bull_live_test_enabled = bool(slow_bull_live_cfg.get("enabled", False))
+        self.slow_bull_rsi_extreme_mode = str(slow_bull_live_cfg.get("rsi_extreme_mode", "hard_block") or "hard_block")
+        self.slow_bull_rsi_extreme_max_portion = self._to_float(
+            slow_bull_live_cfg.get("rsi_extreme_max_portion"),
+            0.02,
+        )
+        self.slow_bull_rsi_extreme_threshold = self._to_float(
+            slow_bull_live_cfg.get("rsi_extreme_threshold"),
+            72.0,
+        )
+        slow_bull_1h_cfg = (
+            slow_bull_live_cfg.get("slow_bull_1h_gate_downgrade", {})
+            if isinstance(slow_bull_live_cfg.get("slow_bull_1h_gate_downgrade"), dict)
+            else {}
+        )
         risk = self.config.get("risk", {}) or {}
         leverage_cfg = ConfigLoader.get_leverage_settings(self.config, scope="fund_flow")
 
@@ -71,6 +94,24 @@ class FundFlowDecisionEngine:
         self.engine_params_cfg = ff.get("engine_params", {}) if isinstance(ff.get("engine_params"), dict) else {}
         self.btc_entry_regime_gate = BtcEntryRegimeGate(
             ff.get("btc_entry_regime_gate", {}) if isinstance(ff.get("btc_entry_regime_gate"), dict) else {}
+        )
+        market_breadth_cfg = ff.get("market_breadth", {}) if isinstance(ff.get("market_breadth"), dict) else {}
+        self.market_breadth_config = MarketBreadthConfig(
+            enabled=bool(market_breadth_cfg.get("enabled", False)),
+            slow_bull_breadth_ratio=self._to_float(market_breadth_cfg.get("slow_bull_breadth_ratio"), 0.60),
+            slow_bull_btc_ret_30m=self._to_float(market_breadth_cfg.get("slow_bull_btc_ret_30m"), 0.003),
+            slow_bull_btc_ret_60m=self._to_float(market_breadth_cfg.get("slow_bull_btc_ret_60m"), 0.005),
+            slow_bull_alt_median_60m=self._to_float(market_breadth_cfg.get("slow_bull_alt_median_60m"), 0.004),
+            mode_a_breadth_min=self._to_float(market_breadth_cfg.get("mode_a_breadth_min"), 0.80),
+            mode_a_alt_median_min=self._to_float(market_breadth_cfg.get("mode_a_alt_median_min"), 0.0025),
+            mode_a_btc_min=self._to_float(market_breadth_cfg.get("mode_a_btc_min"), -0.001),
+            mode_b_btc_30m_min=self._to_float(market_breadth_cfg.get("mode_b_btc_30m_min"), 0.002),
+            mode_b_breadth_min=self._to_float(market_breadth_cfg.get("mode_b_breadth_min"), 0.60),
+            mode_b_alt_median_min=self._to_float(market_breadth_cfg.get("mode_b_alt_median_min"), 0.003),
+            mode_c_breadth_min=self._to_float(market_breadth_cfg.get("mode_c_breadth_min"), 0.90),
+            mode_c_alt_median_min=self._to_float(market_breadth_cfg.get("mode_c_alt_median_min"), 0.001),
+            confirm_cycles=max(1, int(self._to_float(market_breadth_cfg.get("confirm_cycles"), 2))),
+            invalidate_cycles=max(1, int(self._to_float(market_breadth_cfg.get("invalidate_cycles"), 2))),
         )
         self.active_signal_pool_id = str(ff.get("active_signal_pool_id", "default_pool") or "default_pool")
         notional_cfg = ff.get("min_open_notional", {}) if isinstance(ff.get("min_open_notional"), dict) else {}
@@ -387,6 +428,12 @@ class FundFlowDecisionEngine:
         self.symbol_signal_overrides: Dict[str, Dict[str, Any]] = {}
 
         self.strategy_mode = str(ff.get("strategy_mode", "legacy_score_fusion") or "legacy_score_fusion").strip().lower()
+        quadrant_cfg = ff.get("quadrant_resonance", {}) if isinstance(ff.get("quadrant_resonance"), dict) else {}
+        self.quadrant_resonance_enabled = self.strategy_mode == "quadrant_resonance"
+        self.quadrant_resonance_config = QuadrantResonanceConfig.from_dict(quadrant_cfg)
+        self.quadrant_resonance_engine = QuadrantResonanceEngine(self.quadrant_resonance_config)
+        quadrant_audit_cfg = quadrant_cfg.get("audit", {}) if isinstance(quadrant_cfg.get("audit"), dict) else {}
+        self.quadrant_entry_audit_path = str(quadrant_audit_cfg.get("entry_decision_path") or "").strip()
         rule_cfg = ff.get("rule_strategy", {}) if isinstance(ff.get("rule_strategy"), dict) else {}
         self.rule_strategy_enabled = bool(
             rule_cfg.get("enabled", self.strategy_mode == "ema10_ema30_1h_15m_rule")
@@ -476,7 +523,7 @@ class FundFlowDecisionEngine:
         # ========== MACD V2.0策略（VWAP + BOLL 增强版） ==========
         self.macd_v2_enabled = self.strategy_mode == "macd_mtf_strategy_v2"
         
-        if self.macd_v2_enabled:
+        if self.macd_v2_enabled or self.quadrant_resonance_enabled:
             v2_cfg = ff.get("macd_mtf_strategy_v2", {}) if isinstance(ff.get("macd_mtf_strategy_v2"), dict) else {}
             boll_cfg = v2_cfg.get("boll_config", {}) if isinstance(v2_cfg.get("boll_config"), dict) else {}
             ema_cfg = v2_cfg.get("ema_config", {})
@@ -521,6 +568,16 @@ class FundFlowDecisionEngine:
             entry_quality_vwap_score_cfg = (
                 entry_quality_cfg.get("vwap_score_hard_block", {})
                 if isinstance(entry_quality_cfg.get("vwap_score_hard_block"), dict)
+                else {}
+            )
+            continuation_long_cfg = (
+                v2_cfg.get("continuation_long", {})
+                if isinstance(v2_cfg.get("continuation_long"), dict)
+                else {}
+            )
+            slow_bull_short_cfg = (
+                v2_cfg.get("slow_bull_short_guard", {})
+                if isinstance(v2_cfg.get("slow_bull_short_guard"), dict)
                 else {}
             )
             entry_quality_no_trade_cfg = (
@@ -645,7 +702,7 @@ class FundFlowDecisionEngine:
                         if isinstance(vwap_cfg.get("vwap_deviation_gate"), dict)
                         else None,
                     ),
-                    0.030,
+                    0.0,
                 ),
                 vwap_deviation_gate_mode=str((vwap_cfg.get("vwap_deviation_gate", {}) or {}).get("mode", "fixed"))
                 if isinstance(vwap_cfg.get("vwap_deviation_gate"), dict)
@@ -734,7 +791,7 @@ class FundFlowDecisionEngine:
                 weight_4h_direction=self._to_float(weights_cfg.get("weight_4h_direction", weights_cfg.get("weight_1h_direction")), 0.40),
                 weight_4h_enhancement=self._to_float(weights_cfg.get("weight_4h_enhancement"), 0.10),
                 weight_rsi_rhythm=self._to_float(weights_cfg.get("weight_rsi_rhythm"), 0.30),
-                weight_vwap=self._to_float(weights_cfg.get("weight_vwap"), 0.05),
+                weight_vwap=0.0,
                 weight_15m_entry=self._to_float(weights_cfg.get("weight_15m_entry"), 0.05),
                 weight_volume=self._to_float(weights_cfg.get("weight_volume"), 0.10),
                 # 入场阈值
@@ -869,6 +926,18 @@ class FundFlowDecisionEngine:
                     ((rsi_rhythm_cfg.get("adaptive_direction_gate", {}) or {}).get("soft_rsi_flat_mult")),
                     0.93,
                 ),
+                enable_slow_bull_1h_gate_downgrade=bool(
+                    self.slow_bull_live_test_enabled and slow_bull_1h_cfg.get("enabled", False)
+                ),
+                slow_bull_1h_gate_mode=str(slow_bull_1h_cfg.get("mode", "keep") or "keep"),
+                slow_bull_1h_momentum_threshold_30m=self._to_float(
+                    slow_bull_1h_cfg.get("momentum_threshold_30m"),
+                    0.003,
+                ),
+                slow_bull_1h_momentum_threshold_60m=self._to_float(
+                    slow_bull_1h_cfg.get("momentum_threshold_60m"),
+                    0.005,
+                ),
                 rsi_1h_direction_flat_threshold=self._to_float(
                     rsi_rhythm_cfg.get("direction_flat_threshold"),
                     0.3,
@@ -889,14 +958,8 @@ class FundFlowDecisionEngine:
                 spring_override_score_bonus=self._to_float(filter_cfg.get("spring_override_score_bonus"), 0.10),
                 enable_priority_allocation=bool(filter_cfg.get("enable_priority_allocation", True)),
                 priority_allocation_overdraft_pct=self._to_float(filter_cfg.get("priority_allocation_overdraft_pct"), 0.08),
-                short_min_vwap_score_for_entry=self._to_float(
-                    filter_cfg.get("short_min_vwap_score_for_entry"),
-                    0.06,
-                ),
-                flip_bearish_short_min_vwap_score_for_entry=self._to_float(
-                    filter_cfg.get("flip_bearish_short_min_vwap_score_for_entry"),
-                    0.08,
-                ),
+                short_min_vwap_score_for_entry=0.0,
+                flip_bearish_short_min_vwap_score_for_entry=0.0,
                 flip_bearish_require_enhancement_or_15m_confirmation=bool(
                     filter_cfg.get("flip_bearish_require_enhancement_or_15m_confirmation", True)
                 ),
@@ -1090,13 +1153,7 @@ class FundFlowDecisionEngine:
                     ),
                     0.82,
                 ),
-                stable_bear_continuation_min_vwap_score=self._to_float(
-                    filter_cfg.get(
-                        "stable_bear_continuation_min_vwap_score",
-                        common_stable_continuation_min_vwap_score,
-                    ),
-                    0.10,
-                ),
+                stable_bear_continuation_min_vwap_score=0.0,
                 stable_bear_continuation_min_adx_1h=self._to_float(
                     filter_cfg.get(
                         "stable_bear_continuation_min_adx_1h",
@@ -1127,13 +1184,7 @@ class FundFlowDecisionEngine:
                     ),
                     0.82,
                 ),
-                stable_bull_continuation_min_vwap_score=self._to_float(
-                    filter_cfg.get(
-                        "stable_bull_continuation_min_vwap_score",
-                        common_stable_continuation_min_vwap_score,
-                    ),
-                    0.10,
-                ),
+                stable_bull_continuation_min_vwap_score=0.0,
                 stable_bull_continuation_min_adx_1h=self._to_float(
                     filter_cfg.get(
                         "stable_bull_continuation_min_adx_1h",
@@ -1167,10 +1218,7 @@ class FundFlowDecisionEngine:
                 overheat_growing_penalty=self._to_float(penalty_cfg.get("overheat_growing_penalty"), 0.12),
                 overheat_ema_multiplier_threshold=self._to_float(penalty_cfg.get("overheat_boll_multiplier_threshold", penalty_cfg.get("overheat_ema_multiplier_threshold")), 1.2),
                 overheat_vwap_score_threshold=self._to_float(penalty_cfg.get("overheat_vwap_score_threshold"), 0.10),
-                min_vwap_score_for_entry=self._to_float(
-                    filter_cfg.get("min_vwap_score_for_entry", penalty_cfg.get("min_vwap_score_for_entry")),
-                    0.10,
-                ),
+                min_vwap_score_for_entry=0.0,
                 # 止损配置
                 use_dynamic_stop=bool(stop_cfg.get("use_dynamic_stop", True)),
                 ema_stop_atr_multiplier=self._to_float(stop_cfg.get("boll_stop_atr_multiplier", stop_cfg.get("ema_stop_atr_multiplier")), 0.5),
@@ -1325,6 +1373,21 @@ class FundFlowDecisionEngine:
                     entry_quality_vwap_score_cfg.get("probe_max"),
                     0.042,
                 ),
+                vwap_score_slow_bull_override_enabled=bool(
+                    entry_quality_vwap_score_cfg.get("slow_bull_override", False)
+                ),
+                vwap_score_slow_bull_min_block=self._to_float(
+                    entry_quality_vwap_score_cfg.get("slow_bull_min_block"),
+                    0.050,
+                ),
+                vwap_score_slow_bull_cap_0_12=self._to_float(
+                    entry_quality_vwap_score_cfg.get("slow_bull_cap_0_12"),
+                    0.020,
+                ),
+                vwap_score_slow_bull_cap_0_30=self._to_float(
+                    entry_quality_vwap_score_cfg.get("slow_bull_cap_0_30"),
+                    0.030,
+                ),
                 entry_quality_no_trade_gate_enabled=bool(entry_quality_no_trade_cfg.get("enabled", False)),
                 entry_quality_no_trade_block_below_score=self._to_float(
                     entry_quality_no_trade_cfg.get("block_below_score"),
@@ -1342,6 +1405,76 @@ class FundFlowDecisionEngine:
                 entry_quality_range_probe_max=self._to_float(
                     entry_quality_range_cfg.get("probe_max"),
                     0.060,
+                ),
+                enable_continuation_long=bool(continuation_long_cfg.get("enabled", False)),
+                continuation_long_min_conditions_met=max(
+                    1,
+                    int(self._to_float(continuation_long_cfg.get("min_conditions_met"), 4)),
+                ),
+                continuation_long_ret_30m_threshold=self._to_float(
+                    continuation_long_cfg.get("ret_30m_threshold"),
+                    0.003,
+                ),
+                continuation_long_ret_60m_threshold=self._to_float(
+                    continuation_long_cfg.get("ret_60m_threshold"),
+                    0.006,
+                ),
+                continuation_long_rsi_min=self._to_float(continuation_long_cfg.get("rsi_min"), 50.0),
+                continuation_long_rsi_max=self._to_float(continuation_long_cfg.get("rsi_max"), 72.0),
+                continuation_long_leverage=int(self._to_float(continuation_long_cfg.get("leverage"), 3)),
+                continuation_long_max_portion_6of6=self._to_float(
+                    continuation_long_cfg.get("max_portion_6of6"),
+                    0.042,
+                ),
+                continuation_long_max_portion_5of6=self._to_float(
+                    continuation_long_cfg.get("max_portion_5of6"),
+                    0.030,
+                ),
+                continuation_long_max_portion_4of6=self._to_float(
+                    continuation_long_cfg.get("max_portion_4of6"),
+                    0.020,
+                ),
+                continuation_long_low_corr_strict_mode=bool(
+                    continuation_long_cfg.get("low_corr_strict_mode", True)
+                ),
+                continuation_long_low_corr_threshold=self._to_float(
+                    continuation_long_cfg.get("low_corr_threshold"),
+                    0.20,
+                ),
+                continuation_long_overheat_guard_enabled=bool(
+                    continuation_long_cfg.get("overheat_guard_enabled", False)
+                ),
+                continuation_long_overheat_ret_30m=self._to_float(
+                    continuation_long_cfg.get("overheat_ret_30m"),
+                    0.008,
+                ),
+                continuation_long_overheat_ret_60m=self._to_float(
+                    continuation_long_cfg.get("overheat_ret_60m"),
+                    0.018,
+                ),
+                continuation_long_strong_boll_portion_cap_enabled=bool(
+                    continuation_long_cfg.get("strong_boll_portion_cap_enabled", False)
+                ),
+                continuation_long_strong_boll_ema_multiplier_threshold=self._to_float(
+                    continuation_long_cfg.get("strong_boll_ema_multiplier_threshold"),
+                    1.2,
+                ),
+                continuation_long_strong_boll_max_portion=self._to_float(
+                    continuation_long_cfg.get("strong_boll_max_portion"),
+                    0.020,
+                ),
+                enable_slow_bull_short_guard=bool(slow_bull_short_cfg.get("enabled", False)),
+                slow_bull_short_breadth_70_block_vwap=self._to_float(
+                    slow_bull_short_cfg.get("breadth_70_block_vwap"),
+                    0.50,
+                ),
+                slow_bull_short_breadth_60_block_vwap=self._to_float(
+                    slow_bull_short_cfg.get("breadth_60_block_vwap"),
+                    0.35,
+                ),
+                slow_bull_short_probe_max_portion=self._to_float(
+                    slow_bull_short_cfg.get("probe_max_portion"),
+                    0.042,
                 ),
                 enable_meaningful_short_entry_cap=(
                     bool(short_side_enable_cfg)
@@ -2256,6 +2389,11 @@ class FundFlowDecisionEngine:
             "btc_regime": btc_regime.value,
             "btc_rets_4bar": btc_values[-4:],
         }
+        metadata["market_breadth"] = self._extract_breadth_state(metadata)
+        print(
+            f"[BTC_REGIME] {symbol} regime={btc_regime.value} "
+            f"action={btc_action} reason={btc_gate.get('reason')}"
+        )
         if btc_action == "BLOCK":
             return FundFlowDecision(
                 operation=Operation.HOLD,
@@ -2287,6 +2425,8 @@ class FundFlowDecisionEngine:
         vwap_gate = macd_engine._apply_vwap_score_entry_gate(
             vwap_score=float(signal.vwap_score or 0.0),
             current_portion=capped_portion,
+            direction=direction,
+            is_slow_bull=bool(self._extract_breadth_state(metadata).get("is_slow_bull", False)),
         )
         vwap_action = str(vwap_gate.get("action") or "PASS").upper()
         metadata["vwap_score_entry_gate"] = dict(vwap_gate)
@@ -2476,6 +2616,241 @@ class FundFlowDecisionEngine:
         metadata["vol_vwap_warn_original_portion"] = original_portion
         metadata["vol_vwap_warn_adjusted_portion"] = adjusted_portion
         return adjusted_portion
+
+    def _extract_breadth_state(self, market_flow_context: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(market_flow_context, dict):
+            return {}
+        raw = market_flow_context.get("market_breadth") or market_flow_context.get("slow_bull_breadth")
+        if raw is None:
+            raw = market_flow_context.get("market_breadth_state")
+        return raw if isinstance(raw, dict) else {}
+
+    def _symbol_15m_returns(self, market_flow_context: Dict[str, Any]) -> Tuple[float, float]:
+        if not isinstance(market_flow_context, dict):
+            return 0.0, 0.0
+        timeframes = market_flow_context.get("timeframes")
+        tf15 = timeframes.get("15m") if isinstance(timeframes, dict) and isinstance(timeframes.get("15m"), dict) else {}
+        close_series = tf15.get("close_series", tf15.get("close_array"))
+        try:
+            values = [float(v) for v in close_series] if close_series is not None else []
+        except Exception:
+            values = []
+        if len(values) >= 5 and values[-3] > 0 and values[-5] > 0:
+            return (values[-1] - values[-3]) / values[-3], (values[-1] - values[-5]) / values[-5]
+        ret_15m = self._to_float(tf15.get("ret_period"), self._to_float(market_flow_context.get("ret_period"), 0.0))
+        ret_30m = self._to_float(tf15.get("ret_30m"), self._to_float(market_flow_context.get("ret_30m"), ret_15m))
+        ret_60m = self._to_float(tf15.get("ret_60m"), self._to_float(market_flow_context.get("ret_60m"), ret_30m))
+        return ret_30m, ret_60m
+
+    def _continuation_15m_features(
+        self,
+        macd_v2_engine: MACDStrategyV2Engine,
+        market_flow_context: Dict[str, Any],
+        close_15m: float,
+    ) -> Dict[str, float]:
+        timeframes = market_flow_context.get("timeframes") if isinstance(market_flow_context, dict) else {}
+        tf15 = timeframes.get("15m") if isinstance(timeframes, dict) and isinstance(timeframes.get("15m"), dict) else {}
+        close_series = tf15.get("close_series", tf15.get("close_array"))
+        values = []
+        try:
+            values = [float(v) for v in close_series] if close_series is not None else []
+        except Exception:
+            values = []
+        current_close = self._to_float(tf15.get("close"), close_15m)
+        rsi_15m = self._to_float(tf15.get("rsi"), self._to_float(tf15.get("rsi_15m"), 50.0))
+        ema_fast = self._to_float(tf15.get("ema_fast"), 0.0)
+        ema_slope = self._to_float(tf15.get("ema_slope"), self._to_float(tf15.get("ema_fast_slope"), 0.0))
+        if values:
+            arr = pd.Series(values, dtype="float64").to_numpy()
+            rsi_series = macd_v2_engine.calculate_rsi_series(arr, period=max(2, int(macd_v2_engine.config.rsi_period)))
+            if len(rsi_series) and pd.notna(rsi_series[-1]):
+                rsi_15m = float(rsi_series[-1])
+            ema_period = 12
+            if len(arr) >= 2:
+                ema_series = macd_v2_engine.calculate_ema(arr, period=ema_period)
+                ema_fast = float(ema_series[-1])
+                previous = float(ema_series[-2]) if len(ema_series) >= 2 else ema_fast
+                ema_slope = (ema_fast - previous) / previous if previous > 0 else 0.0
+                current_close = float(arr[-1])
+        return {
+            "rsi_15m": rsi_15m,
+            "ema_fast_15m": ema_fast,
+            "ema_slope_15m": ema_slope,
+            "close_15m": current_close,
+        }
+
+    def _btc_alt_corr_for_continuation(self, symbol: str, market_flow_context: Dict[str, Any]) -> float:
+        if isinstance(market_flow_context, dict):
+            for key in ("btc_alt_corr", "corr_btc_alt"):
+                if key in market_flow_context:
+                    return self._to_float(market_flow_context.get(key), 0.0)
+        return 0.40 if str(symbol).upper() in {"ETHUSDT", "SOLUSDT", "BNBUSDT", "ADAUSDT", "XRPUSDT", "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT"} else 0.0
+
+    def _continuation_ranking_score(
+        self,
+        *,
+        ret_30m: float,
+        ret_60m: float,
+        rsi_15m: float,
+        ema_slope_15m: float,
+        breadth_ratio: float,
+        btc_ret_30m: float,
+    ) -> float:
+        ret30 = self._to_float(ret_30m, 0.0)
+        ret60 = self._to_float(ret_60m, 0.0)
+        rsi = self._to_float(rsi_15m, 50.0)
+        ema_slope = self._to_float(ema_slope_15m, 0.0)
+        breadth = self._to_float(breadth_ratio, 0.0)
+        btc30 = self._to_float(btc_ret_30m, 0.0)
+        early_bonus = max(0.0, min(0.12, (0.012 - max(ret30, 0.0)) / 0.012 * 0.12))
+        trend_bonus = max(0.0, min(0.08, max(ret60, 0.0) / 0.018 * 0.08))
+        rsi_bonus = 0.06 if 80.0 <= rsi <= 100.0 else (0.03 if 50.0 <= rsi < 80.0 else 0.0)
+        ema_bonus = max(0.0, min(0.05, ema_slope / 0.004 * 0.05))
+        breadth_bonus = max(0.0, min(0.05, (breadth - 0.60) / 0.35 * 0.05))
+        btc_penalty = 0.08 if btc30 < -0.001 else 0.0
+        return max(0.60, min(0.95, 0.60 + early_bonus + trend_bonus + rsi_bonus + ema_bonus + breadth_bonus - btc_penalty))
+
+    def _build_continuation_long_decision(
+        self,
+        *,
+        symbol: str,
+        price: float,
+        current_time: datetime,
+        signal: MACDSignalV2,
+        metadata: Dict[str, Any],
+        macd_v2_engine: MACDStrategyV2Engine,
+        market_flow_context: Dict[str, Any],
+        regime_runtime_mode: str,
+    ) -> Optional[FundFlowDecision]:
+        if regime_runtime_mode not in {"BOTH", "LONG_ONLY"}:
+            return None
+        breadth_state = self._extract_breadth_state(market_flow_context)
+        if not bool(breadth_state.get("is_slow_bull", False)):
+            return None
+        ret_30m, ret_60m = self._symbol_15m_returns(market_flow_context)
+        features = self._continuation_15m_features(
+            macd_v2_engine,
+            market_flow_context,
+            self._to_float(metadata.get("close_15m"), price),
+        )
+        btc_ret_30m = self._to_float(breadth_state.get("btc_ret_30m"), 0.0)
+        breadth_ratio = self._to_float(breadth_state.get("breadth_ratio"), 0.0)
+        corr = self._btc_alt_corr_for_continuation(symbol, market_flow_context)
+        result = macd_v2_engine._evaluate_continuation_long_candidate(
+            symbol=symbol,
+            symbol_ret_30m=ret_30m,
+            symbol_ret_60m=ret_60m,
+            rsi_15m=features["rsi_15m"],
+            ema_slope_15m=features["ema_slope_15m"],
+            close_15m=features["close_15m"],
+            ema_fast_15m=features["ema_fast_15m"],
+            btc_ret_30m=btc_ret_30m,
+            breadth_state=breadth_state,
+            vwap_score=float(signal.vwap_score or 0.0),
+            corr_btc_alt=corr,
+        )
+        metadata["slow_bull_continuation"] = dict(result)
+        metadata["market_breadth"] = dict(breadth_state)
+        if not bool(result.get("allowed", False)):
+            return None
+
+        portion = min(
+            self._to_float(result.get("max_portion"), 0.0),
+            float(self.max_symbol_position_portion),
+        )
+        strong_boll_cap = {"applied": False}
+        if bool(macd_v2_engine.config.continuation_long_strong_boll_portion_cap_enabled):
+            ema_multiplier = self._to_float(getattr(signal, "ema_multiplier", 1.0), 1.0)
+            threshold = float(macd_v2_engine.config.continuation_long_strong_boll_ema_multiplier_threshold)
+            cap = max(0.0, float(macd_v2_engine.config.continuation_long_strong_boll_max_portion))
+            if ema_multiplier >= threshold and cap > 0:
+                original_portion = portion
+                portion = min(portion, cap)
+                strong_boll_cap = {
+                    "applied": portion < original_portion,
+                    "ema_multiplier": ema_multiplier,
+                    "threshold": threshold,
+                    "cap": cap,
+                    "original_portion": original_portion,
+                    "final_portion": portion,
+                }
+        if portion <= 0:
+            return None
+        rsi_override = ""
+        if (
+            self.slow_bull_live_test_enabled
+            and self.slow_bull_rsi_extreme_mode == "cap_not_block"
+            and features["rsi_15m"] >= self.slow_bull_rsi_extreme_threshold
+        ):
+            original_portion = portion
+            portion = min(portion, max(0.0, self.slow_bull_rsi_extreme_max_portion))
+            if portion < original_portion:
+                rsi_override = "capped_extreme"
+        ranking_score = self._continuation_ranking_score(
+            ret_30m=ret_30m,
+            ret_60m=ret_60m,
+            rsi_15m=features["rsi_15m"],
+            ema_slope_15m=features["ema_slope_15m"],
+            breadth_ratio=breadth_ratio,
+            btc_ret_30m=btc_ret_30m,
+        )
+        leverage = max(
+            self.min_leverage,
+            min(self.max_leverage, int(macd_v2_engine.config.continuation_long_leverage)),
+        )
+        stop_loss_price = price * (1.0 - self.stop_loss_pct) if self.stop_loss_pct > 0 else None
+        take_profit_price = price * (1.0 + self.take_profit_pct) if self.take_profit_pct > 0 else None
+        local_metadata = dict(metadata)
+        local_metadata.update(
+            {
+                "stage": "continuation_long",
+                "signal_direction": "long",
+                "signal_score": 0.60,
+                "competition_score": ranking_score,
+                "continuation_ranking_score": ranking_score,
+                "entry_ret_30m": ret_30m,
+                "entry_ret_60m": ret_60m,
+                "entry_rsi_15m": features["rsi_15m"],
+                "entry_ema_slope_15m": features["ema_slope_15m"],
+                "entry_breadth_ratio": breadth_ratio,
+                "entry_btc_ret_30m": btc_ret_30m,
+                "continuation_strong_boll_portion_cap": strong_boll_cap,
+                "is_trial_entry": True,
+                "final_portion_after_rsi": portion,
+                "final_leverage_after_rsi": leverage,
+                "rsi_override": rsi_override,
+                "entry_reference_price": float(price),
+                "tp_sl": {
+                    "tp_pct": self.take_profit_pct,
+                    "sl_pct": self.stop_loss_pct,
+                    "tp_enabled": take_profit_price is not None,
+                    "sl_enabled": stop_loss_price is not None,
+                },
+            }
+        )
+        print(f"[SLOW_BULL_CANDIDATE] {symbol} {result.get('reason')}")
+        decision = FundFlowDecision(
+            operation=Operation.BUY,
+            symbol=symbol,
+            target_portion_of_balance=portion,
+            leverage=leverage,
+            max_price=price * (1.0 + self.entry_slippage),
+            take_profit_price=take_profit_price,
+            stop_loss_price=stop_loss_price,
+            time_in_force=TimeInForce.IOC,
+            tp_execution=ExecutionMode.LIMIT,
+            sl_execution=ExecutionMode.LIMIT,
+            reason=f"slow_bull_continuation_long_vwap_{float(signal.vwap_score or 0.0):.2f}",
+            metadata=local_metadata,
+        )
+        return self._apply_symbol_side_override(
+            self._apply_macd_v2_direction_gate(
+                decision,
+                effective_mode=regime_runtime_mode,
+                source="slow_bull_continuation",
+            ),
+            runtime_override_mode=regime_runtime_mode,
+        )
 
     def _apply_symbol_side_override(
         self,
@@ -4735,6 +5110,8 @@ class FundFlowDecisionEngine:
             "last_open": regime_info.get("last_open", 0.0),
             "last_close": regime_info.get("last_close", 0.0),
             "macd_v2_debug": signal.details if isinstance(signal.details, dict) else {},
+            "market_breadth": self._extract_breadth_state(market_flow_context),
+            "close_15m": close_15m,
         }
         metadata.update(entry_routing_metadata)
         if symbol_signal_override:
@@ -4942,6 +5319,18 @@ class FundFlowDecisionEngine:
                         regime_entry,
                         runtime_override_mode=regime_runtime_mode,
                     )
+                continuation_entry = self._build_continuation_long_decision(
+                    symbol=symbol,
+                    price=price,
+                    current_time=current_time,
+                    signal=signal,
+                    metadata=metadata,
+                    macd_v2_engine=macd_v2_engine,
+                    market_flow_context=market_flow_context,
+                    regime_runtime_mode=regime_runtime_mode,
+                )
+                if continuation_entry is not None:
+                    return continuation_entry
             return FundFlowDecision(
                 operation=Operation.HOLD,
                 symbol=symbol,
@@ -5183,6 +5572,25 @@ class FundFlowDecisionEngine:
             if pretrade_block is not None:
                 return pretrade_block
             portion = min(portion, self._to_float(metadata.get("entry_quality_portion_cap"), portion))
+            breadth_state = self._extract_breadth_state(market_flow_context)
+            short_guard = macd_v2_engine._apply_slow_bull_short_guard(
+                direction="short",
+                signal_1h=str(signal.signal_type_1h or ""),
+                vwap_score=float(signal.vwap_score or 0.0),
+                breadth_ratio=self._to_float(breadth_state.get("breadth_ratio"), 0.0),
+                is_slow_bull=bool(breadth_state.get("is_slow_bull", False)),
+            )
+            metadata["slow_bull_short_guard"] = dict(short_guard)
+            short_guard_action = str(short_guard.get("action") or "PASS").upper()
+            if short_guard_action == "BLOCK":
+                return FundFlowDecision(
+                    operation=Operation.HOLD,
+                    symbol=symbol,
+                    reason=str(short_guard.get("reason") or "slow_bull_short_block"),
+                    metadata=metadata,
+                )
+            if short_guard_action in {"PROBE", "PROBE_CAP"}:
+                portion = min(portion, self._to_float(short_guard.get("max_portion"), portion))
             portion = self._apply_macd_v2_vol_vwap_warn_position_scale(portion, signal, metadata)
             metadata["session_risk"] = {
                 "position_scale": float(session_position_scale),
@@ -5260,7 +5668,93 @@ class FundFlowDecisionEngine:
             reason="macd_v2_hold_unknown",
             metadata=metadata
         )
-    
+
+    def _decide_quadrant_resonance_strategy(
+        self,
+        symbol: str,
+        portfolio: Dict[str, Any],
+        price: float,
+        market_flow_context: Dict[str, Any],
+    ) -> FundFlowDecision:
+        timeframes = market_flow_context.get("timeframes") if isinstance(market_flow_context, dict) else {}
+        signal = self.quadrant_resonance_engine.analyze(
+            symbol=symbol,
+            price=price,
+            timeframes=timeframes if isinstance(timeframes, dict) else {},
+            portfolio=portfolio or {},
+        )
+        metadata = dict(signal.metadata or {})
+        metadata.setdefault("symbol", symbol)
+        metadata.setdefault("entry_reference_price", price)
+        metadata["take_profit_levels"] = list(signal.take_profit_levels)
+        if not signal.allowed:
+            decision = FundFlowDecision(
+                operation=Operation.HOLD,
+                symbol=symbol,
+                reason=signal.reason,
+                metadata=metadata,
+            )
+            self._append_quadrant_entry_audit(decision)
+            return decision
+
+        operation = Operation.BUY if signal.direction == "long" else Operation.SELL
+        entry_slippage = float(self.entry_slippage or 0.0)
+        if operation is Operation.BUY:
+            max_price = float(price) * (1.0 + entry_slippage)
+            min_price = None
+        else:
+            max_price = None
+            min_price = float(price) * (1.0 - entry_slippage)
+
+        tp_levels = signal.take_profit_levels
+        first_tp = tp_levels[0]["price"] if tp_levels else None
+        decision = FundFlowDecision(
+            operation=operation,
+            symbol=symbol,
+            target_portion_of_balance=float(signal.target_portion),
+            leverage=int(signal.leverage),
+            max_price=max_price,
+            min_price=min_price,
+            time_in_force=TimeInForce.IOC,
+            take_profit_price=float(first_tp) if first_tp is not None else None,
+            stop_loss_price=signal.stop_loss_price,
+            reason=signal.reason,
+            metadata=metadata,
+        )
+        self._append_quadrant_entry_audit(decision)
+        return decision
+
+    def _append_quadrant_entry_audit(self, decision: FundFlowDecision) -> None:
+        path_raw = str(getattr(self, "quadrant_entry_audit_path", "") or "").strip()
+        if not path_raw:
+            return
+        metadata = decision.metadata if isinstance(decision.metadata, dict) else {}
+        record = {
+            "type": "ENTRY_DECISION",
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "symbol": decision.symbol,
+            "operation": decision.operation.value,
+            "target_portion": decision.target_portion_of_balance,
+            "leverage": decision.leverage,
+            "reason": decision.reason,
+            "strategy_mode": metadata.get("strategy_mode", "quadrant_resonance"),
+            "quadrant_4h": metadata.get("quadrant_4h"),
+            "direction": metadata.get("signal_direction"),
+            "resonance_score": metadata.get("resonance_score"),
+            "threshold": metadata.get("signal_score_threshold"),
+            "factor_scores": metadata.get("factor_scores", {}),
+            "blocked_reason_detail": metadata.get("blocked_reason_detail"),
+            "quadrant_debug": metadata.get("quadrant_debug"),
+            "metadata": metadata,
+        }
+        try:
+            path = Path(path_raw)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+        except Exception:
+            return
+
     def _decide_macd_strategy(
         self,
         symbol: str,
@@ -6884,6 +7378,13 @@ class FundFlowDecisionEngine:
         regime_info = self._detect_regime(market_flow_context or {})
         regime = str(regime_info.get("regime", "NO_TRADE")).upper()
         direction = str(regime_info.get("direction", "BOTH")).upper()
+        if self.quadrant_resonance_enabled:
+            return self._decide_quadrant_resonance_strategy(
+                symbol,
+                portfolio,
+                price,
+                market_flow_context or {},
+            )
         if self.rule_strategy_enabled:
             return self._decide_rule_strategy(symbol, portfolio, price, market_flow_context or {}, regime_info)
         

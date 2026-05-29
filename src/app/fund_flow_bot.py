@@ -57,6 +57,7 @@ from src.fund_flow.log_compaction import (
     compact_trigger_context_payload,
 )
 from src.fund_flow.btc_beta_risk import BtcBetaRiskConfig, BtcBetaRiskScorer
+from src.fund_flow.market_breadth import MarketBreadthConfig, MarketBreadthDetector
 from src.fund_flow.exit_signal_guard import PositionExitSignalGuard
 try:
     from src.risk.enhanced_risk import RiskConfig as _ImportedRiskConfig
@@ -367,6 +368,11 @@ class TradingBot:
         self._conflict_cooldown_reason_by_symbol: Dict[str, str] = {}
         self.exit_signal_guard = PositionExitSignalGuard(self._position_exit_signal_guard_config())
         self.btc_beta_scorer = BtcBetaRiskScorer(self._btc_beta_risk_config())
+        self.market_breadth_detector = MarketBreadthDetector(
+            self._market_breadth_config(),
+            ConfigLoader.get_trading_symbols(self.config),
+        )
+        self._last_market_breadth_state: Dict[str, Any] = {"is_slow_bull": False, "reason": "not_initialized"}
         exit_cd_cfg = self._exit_cooldown_config()
         self.exit_cooldown = ExitCooldownRegistry(int(exit_cd_cfg.get("cooldown_seconds", 1800)))
         self._dca_blocked_by_exit_guard: set[str] = set()
@@ -934,6 +940,165 @@ class TradingBot:
         log_path = self._resolve_api_cycle_stats_log_path_utc()
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(compact_json_dumps(payload) + "\n")
+
+    def _append_entry_exit_audit_log(self, payload: Dict[str, Any]) -> None:
+        if not isinstance(payload, dict) or not payload:
+            return
+        logs_dir = str(getattr(self, "logs_dir", "") or "")
+        if not logs_dir:
+            logs_dir = self._resolve_logs_dir()
+        os.makedirs(logs_dir, exist_ok=True)
+        log_path = os.path.join(logs_dir, "fund_flow_entry_exit_audit.jsonl")
+        row = {"ts": datetime.now(timezone.utc).isoformat(), **payload}
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(compact_json_dumps(row) + "\n")
+
+    def _build_entry_exit_audit_payload(
+        self,
+        *,
+        stage: str,
+        symbol: str,
+        decision: FundFlowDecision,
+        account_summary: Optional[Dict[str, Any]] = None,
+        current_price: float = 0.0,
+        position: Optional[Dict[str, Any]] = None,
+        flow_context: Optional[Dict[str, Any]] = None,
+        trigger_context: Optional[Dict[str, Any]] = None,
+        execution_result: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        md = decision.metadata if isinstance(getattr(decision, "metadata", None), dict) else {}
+        equity = self._to_float((account_summary or {}).get("equity"), 0.0)
+        target = self._to_float(getattr(decision, "target_portion_of_balance", 0.0), 0.0)
+        estimated_notional = max(0.0, target * equity)
+        position_side = self._extract_position_side(position) if isinstance(position, dict) else ""
+        flow = flow_context if isinstance(flow_context, dict) else {}
+        trigger = trigger_context if isinstance(trigger_context, dict) else {}
+        result = execution_result if isinstance(execution_result, dict) else {}
+        operation_value = getattr(decision.operation, "value", str(decision.operation))
+        side = "LONG" if decision.operation == FundFlowOperation.BUY else "SHORT" if decision.operation == FundFlowOperation.SELL else position_side
+        leverage = int(getattr(decision, "leverage", 0) or 0)
+        strategy_source = str(md.get("source") or md.get("stage") or md.get("engine") or md.get("regime") or "")
+        decision_reason = str(
+            md.get("entry_reason")
+            or md.get("decision_reason")
+            or md.get("exit_reason")
+            or getattr(decision, "reason", "")
+            or ""
+        )
+        hold_bars = (position or {}).get("hold_bars_15m") if isinstance(position, dict) else None
+        try:
+            holding_minutes_estimated = int(hold_bars) * 15 if hold_bars is not None else None
+        except Exception:
+            holding_minutes_estimated = None
+        micro_margin_gate = md.get("micro_margin_gate")
+        estimated_margin = None
+        if isinstance(micro_margin_gate, dict) and micro_margin_gate.get("estimated_margin_usdt") is not None:
+            estimated_margin = micro_margin_gate.get("estimated_margin_usdt")
+        elif decision.operation in (FundFlowOperation.BUY, FundFlowOperation.SELL):
+            estimated_margin = estimated_notional
+        payload = {
+            "event": "entry_exit_audit",
+            "stage": stage,
+            "symbol": str(symbol or getattr(decision, "symbol", "") or "").upper(),
+            "operation": operation_value,
+            "side": side,
+            "target_portion_of_balance": target,
+            "leverage": leverage,
+            "estimated_notional_usdt": estimated_notional,
+            "current_price": self._to_float(current_price, 0.0),
+            "reason": str(getattr(decision, "reason", "") or ""),
+            "strategy_source": strategy_source,
+            "strategy": {
+                "source": strategy_source,
+                "method": str(md.get("method") or md.get("strategy_method") or strategy_source or ""),
+                "signal_type": str(md.get("signal_type") or md.get("signal_kind") or ""),
+                "direction": side,
+                "direction_reason": str(md.get("direction_reason") or md.get("signal_direction_reason") or ""),
+                "decision_reason": decision_reason,
+                "blocked_reason_detail": md.get("blocked_reason_detail"),
+                "entry_execution_policy": md.get("entry_execution_policy") or trigger.get("entry_execution_policy"),
+                "signal_pool_id": md.get("signal_pool_id") or md.get("selected_pool_id"),
+                "stage": str(md.get("stage") or ""),
+                "reject_code": md.get("reject_code"),
+            },
+            "signal": {
+                "score": self._to_float(md.get("signal_score"), 0.0),
+                "threshold": self._to_float(md.get("signal_score_threshold"), 0.0),
+                "type_1h": str(md.get("signal_type_1h") or ""),
+                "type_4h": str(md.get("signal_type_4h") or ""),
+                "entry_15m": str(md.get("entry_type_15m") or md.get("entry_15m") or ""),
+                "rsi_probe_mode": md.get("rsi_probe_mode"),
+                "competition_score": md.get("competition_score"),
+                "details": md.get("signal_details") or md.get("continuation_diagnostics") or md.get("slow_bull_continuation"),
+                "quadrant_debug": md.get("quadrant_debug"),
+            },
+            "gates": {
+                "btc_entry_regime_gate": md.get("btc_entry_regime_gate"),
+                "regime_entry_gate": md.get("regime_entry_gate"),
+                "vwap_score_entry_gate": md.get("vwap_score_entry_gate"),
+                "slow_bull_short_guard": md.get("slow_bull_short_guard"),
+                "min_open_notional_gate": md.get("min_open_notional_gate"),
+                "micro_notional_gate": md.get("micro_notional_gate"),
+                "micro_margin_gate": micro_margin_gate,
+                "gate_cap_applied": md.get("gate_cap_applied"),
+                "gate_cap_portion": md.get("gate_cap_portion"),
+            },
+            "sizing": {
+                "target_portion_of_balance": target,
+                "leverage": leverage,
+                "estimated_notional_usdt": estimated_notional,
+                "estimated_margin_usdt": estimated_margin,
+                "account_equity_usdt": equity,
+                "current_price": self._to_float(current_price, 0.0),
+                "min_open_notional_gate": md.get("min_open_notional_gate"),
+                "micro_notional_gate": md.get("micro_notional_gate"),
+                "micro_margin_gate": micro_margin_gate,
+                "gate_cap_applied": md.get("gate_cap_applied"),
+                "gate_cap_portion": md.get("gate_cap_portion"),
+            },
+            "market": {
+                "market_breadth": md.get("market_breadth") or flow.get("market_breadth"),
+                "btc_beta_risk": md.get("btc_beta_risk"),
+                "vwap_score_observation": md.get("vwap_score"),
+                "vwap_deviation_observation": md.get("vwap_deviation"),
+            },
+            "position": {
+                "side": position_side,
+                "amount": self._extract_position_amount(position) if isinstance(position, dict) else 0.0,
+                "hold_bars_15m": (position or {}).get("hold_bars_15m") if isinstance(position, dict) else None,
+                "mfe_pct": (position or {}).get("mfe_pct") if isinstance(position, dict) else None,
+                "mae_pct": (position or {}).get("mae_pct") if isinstance(position, dict) else None,
+                "notional_usdt": self._position_notional_usdt(position, current_price) if isinstance(position, dict) else 0.0,
+            },
+            "trigger": {
+                "type": trigger.get("type") or trigger.get("trigger_type"),
+                "id": trigger.get("id") or trigger.get("trigger_id"),
+            },
+            "exit": {
+                "trigger_source": md.get("exit_source") or md.get("source") or trigger.get("type") or trigger.get("trigger_type"),
+                "close_ratio": md.get("close_ratio") if md.get("close_ratio") is not None else target,
+                "exit_reason": str(md.get("exit_reason") or getattr(decision, "reason", "") or ""),
+                "entry_summary": md.get("entry_summary"),
+                "btc_beta_risk": md.get("btc_beta_risk"),
+                "exit_signal_guard": md.get("exit_signal_guard"),
+                "reverse_signal": md.get("reverse_signal"),
+                "holding_bars_15m": hold_bars,
+                "holding_minutes_estimated": holding_minutes_estimated,
+                "mfe_pct": (position or {}).get("mfe_pct") if isinstance(position, dict) else None,
+                "mae_pct": (position or {}).get("mae_pct") if isinstance(position, dict) else None,
+            },
+        }
+        if result:
+            payload["execution"] = {
+                "status": result.get("status"),
+                "message": result.get("message"),
+                "realized_pnl": result.get("realized_pnl"),
+                "quantity": result.get("quantity"),
+                "quantity_info": result.get("quantity_info"),
+                "order": result.get("order"),
+                "post_protection_hook": result.get("post_protection_hook"),
+            }
+        return payload
 
     @staticmethod
     def _normalize_trade_fill_fee(fee: float) -> float:
@@ -2137,12 +2302,36 @@ class TradingBot:
             alt_against_15m_pct=self._to_float(raw.get("alt_against_15m_pct"), -0.0010),
             alt_against_30m_pct=self._to_float(raw.get("alt_against_30m_pct"), -0.0015),
             corr_window_bars=max(10, int(self._to_float(raw.get("corr_window_bars"), 48))),
-            fast_fail_window_bars=max(1, int(self._to_float(raw.get("fast_fail_window_bars"), 2))),
-            fast_fail_mae_threshold=self._to_float(raw.get("fast_fail_mae_threshold"), -0.002),
+            fast_fail_min_age_bars=max(1, int(self._to_float(raw.get("fast_fail_min_age_bars"), 4))),
+            fast_fail_window_bars=max(1, int(self._to_float(raw.get("fast_fail_window_bars"), 4))),
+            fast_fail_mae_threshold=self._to_float(raw.get("fast_fail_mae_threshold"), -0.0035),
             fast_fail_mfe_threshold=self._to_float(raw.get("fast_fail_mfe_threshold"), 0.002),
             risk_score_reduce_threshold=max(1, int(self._to_float(raw.get("risk_score_reduce_threshold"), 2))),
             risk_score_close_threshold=max(1, int(self._to_float(raw.get("risk_score_close_threshold"), 4))),
-            small_notional_close_threshold=self._to_float(raw.get("small_notional_close_threshold"), 10.0),
+            small_notional_close_threshold=self._to_float(raw.get("small_notional_close_threshold"), 5.0),
+            small_notional_close_equity_pct=self._to_float(raw.get("small_notional_close_equity_pct"), 0.02),
+            tiny_notional_skip_threshold=self._to_float(raw.get("tiny_notional_skip_threshold"), 1.0),
+        )
+
+    def _market_breadth_config(self) -> MarketBreadthConfig:
+        ff_cfg = self.config.get("fund_flow", {}) if isinstance(self.config, dict) else {}
+        raw = ff_cfg.get("market_breadth", {}) if isinstance(ff_cfg.get("market_breadth"), dict) else {}
+        return MarketBreadthConfig(
+            enabled=self._to_bool(raw.get("enabled"), False),
+            slow_bull_breadth_ratio=self._to_float(raw.get("slow_bull_breadth_ratio"), 0.60),
+            slow_bull_btc_ret_30m=self._to_float(raw.get("slow_bull_btc_ret_30m"), 0.003),
+            slow_bull_btc_ret_60m=self._to_float(raw.get("slow_bull_btc_ret_60m"), 0.005),
+            slow_bull_alt_median_60m=self._to_float(raw.get("slow_bull_alt_median_60m"), 0.004),
+            mode_a_breadth_min=self._to_float(raw.get("mode_a_breadth_min"), 0.80),
+            mode_a_alt_median_min=self._to_float(raw.get("mode_a_alt_median_min"), 0.0025),
+            mode_a_btc_min=self._to_float(raw.get("mode_a_btc_min"), -0.001),
+            mode_b_btc_30m_min=self._to_float(raw.get("mode_b_btc_30m_min"), 0.002),
+            mode_b_breadth_min=self._to_float(raw.get("mode_b_breadth_min"), 0.60),
+            mode_b_alt_median_min=self._to_float(raw.get("mode_b_alt_median_min"), 0.003),
+            mode_c_breadth_min=self._to_float(raw.get("mode_c_breadth_min"), 0.90),
+            mode_c_alt_median_min=self._to_float(raw.get("mode_c_alt_median_min"), 0.001),
+            confirm_cycles=max(1, int(self._to_float(raw.get("confirm_cycles"), 2))),
+            invalidate_cycles=max(1, int(self._to_float(raw.get("invalidate_cycles"), 2))),
         )
 
     def _exit_cooldown_config(self) -> Dict[str, Any]:
@@ -2167,6 +2356,16 @@ class TradingBot:
             scorer = BtcBetaRiskScorer(self._btc_beta_risk_config())
             self.btc_beta_scorer = scorer
         return scorer
+
+    def _ensure_market_breadth_detector(self) -> MarketBreadthDetector:
+        detector = getattr(self, "market_breadth_detector", None)
+        if not isinstance(detector, MarketBreadthDetector):
+            detector = MarketBreadthDetector(
+                self._market_breadth_config(),
+                ConfigLoader.get_trading_symbols(self.config),
+            )
+            self.market_breadth_detector = detector
+        return detector
 
     def _closed_15m_returns_from_symbol(self, symbol: str) -> Tuple[float, float]:
         try:
@@ -2229,6 +2428,34 @@ class TradingBot:
                 out.append((cur - prev) / prev)
         return out
 
+    def _update_market_breadth_state(self, symbols: List[str]) -> Dict[str, Any]:
+        detector = self._ensure_market_breadth_detector()
+        if not bool(detector.cfg.enabled):
+            state = {"is_slow_bull": False, "reason": "disabled"}
+            self._last_market_breadth_state = state
+            return state
+        btc_rets = self._closed_15m_returns_4bar_from_symbol("BTCUSDT")
+        btc_ret_15m = btc_rets[-1] if btc_rets else 0.0
+        alt_rets: Dict[str, float] = {}
+        for symbol in symbols:
+            symbol_u = str(symbol).upper()
+            if symbol_u == "BTCUSDT":
+                continue
+            rets = self._closed_15m_returns_4bar_from_symbol(symbol_u)
+            if rets:
+                alt_rets[symbol_u] = rets[-1]
+        detector.update(btc_ret_15m, alt_rets)
+        state = detector.detect()
+        self._last_market_breadth_state = state
+        print(
+            f"[SLOW_BULL] is_bull={bool(state.get('is_slow_bull', False))} "
+            f"breadth={self._to_float(state.get('breadth_ratio'), 0.0):.2f} "
+            f"btc30={self._to_float(state.get('btc_ret_30m'), 0.0):.3%} "
+            f"alt_med60={self._to_float(state.get('alt_median_60m'), 0.0):.3%} "
+            f"confirm={int(self._to_float(state.get('confirm_count'), 0))}"
+        )
+        return state
+
     def _position_notional_usdt(self, position: Dict[str, Any], current_price: float) -> float:
         qty = abs(self._to_float(position.get("amount", position.get("positionAmt", 0.0)), 0.0))
         mark = self._to_float(position.get("mark_price", position.get("markPrice", current_price)), current_price)
@@ -2254,6 +2481,7 @@ class TradingBot:
         current_price: float,
         decision: FundFlowDecision,
         decision_md: Dict[str, Any],
+        account_summary: Optional[Dict[str, Any]] = None,
     ) -> Tuple[FundFlowDecision, Dict[str, Any]]:
         scorer = self._ensure_btc_beta_scorer()
         if not scorer.cfg.enabled:
@@ -2268,6 +2496,9 @@ class TradingBot:
         extrema = getattr(self, "_position_extrema_by_pos", {}).get(pos_key, {})
         mfe_ratio = max(0.0, self._to_float(extrema.get("max_favorable_ratio"), 0.0))
         mae_ratio = min(0.0, self._to_float(extrema.get("max_adverse_ratio"), self._position_pnl_ratio(position, current_price)))
+        account_equity = self._to_float((account_summary or {}).get("equity"), 0.0)
+        if account_equity <= 0:
+            account_equity = self._to_float(decision_md.get("account_equity_usdt"), 0.0)
         result = scorer.score(
             symbol=symbol,
             direction=side.lower(),
@@ -2279,6 +2510,7 @@ class TradingBot:
             mfe_pct=mfe_ratio,
             mae_pct=mae_ratio,
             position_notional=self._position_notional_usdt(position, current_price),
+            account_equity=account_equity or None,
         )
         decision_md["btc_beta_risk"] = dict(result)
         print(
@@ -2336,6 +2568,7 @@ class TradingBot:
         current_price: float,
         decision: FundFlowDecision,
         decision_md: Dict[str, Any],
+        account_summary: Optional[Dict[str, Any]] = None,
     ) -> Tuple[FundFlowDecision, Dict[str, Any]]:
         beta_decision, beta_result = self._apply_btc_beta_exit_risk(
             symbol=symbol,
@@ -2343,6 +2576,7 @@ class TradingBot:
             current_price=current_price,
             decision=decision,
             decision_md=decision_md,
+            account_summary=account_summary,
         )
         beta_action = str(beta_result.get("action", "HOLD")).upper()
         if beta_decision is not decision and beta_action == "CLOSE":
@@ -3538,6 +3772,83 @@ class TradingBot:
             return True, meta
         meta["reason"] = "notional_below_min_open"
         return False, meta
+
+    def _allows_entry_above_micro_notional(
+        self,
+        *,
+        decision: FundFlowDecision,
+        account_equity: float,
+    ) -> Tuple[bool, Dict[str, Any]]:
+        ff_cfg = self.config.get("fund_flow", {}) if isinstance(self.config, dict) else {}
+        threshold = self._to_float(ff_cfg.get("min_entry_notional_usdt"), 0.10)
+        margin_threshold = self._to_float(ff_cfg.get("min_entry_margin_usdt"), 0.0)
+        target = self._to_float(getattr(decision, "target_portion_of_balance", 0.0), 0.0)
+        equity = self._to_float(account_equity, 0.0)
+        estimated_notional = max(0.0, target * equity)
+        leverage = max(1, int(self._to_float(getattr(decision, "leverage", 1), 1.0)))
+        estimated_margin = estimated_notional
+        meta = {
+            "enabled": threshold > 0.0 or margin_threshold > 0.0,
+            "target_portion": target,
+            "account_equity": equity,
+            "leverage": leverage,
+            "estimated_notional_usdt": estimated_notional,
+            "estimated_margin_usdt": estimated_margin,
+            "min_entry_notional_usdt": threshold,
+            "min_entry_margin_usdt": margin_threshold,
+        }
+        if decision.operation not in (FundFlowOperation.BUY, FundFlowOperation.SELL):
+            meta["reason"] = "not_entry"
+            return True, meta
+        if threshold <= 0.0 and margin_threshold <= 0.0:
+            meta["reason"] = "disabled"
+            return True, meta
+        if margin_threshold > 0.0 and estimated_margin + 1e-12 < margin_threshold:
+            meta["reason"] = "micro_margin_block"
+            return False, meta
+        if estimated_notional + 1e-12 >= threshold:
+            meta["reason"] = "notional_check_passed"
+            return True, meta
+        meta["reason"] = "micro_notional_block"
+        return False, meta
+
+    def _allows_entry_above_live_slow_bull_fee_floor(
+        self,
+        *,
+        decision: FundFlowDecision,
+        account_equity: float,
+    ) -> Tuple[bool, Dict[str, Any]]:
+        ff_cfg = self.config.get("fund_flow", {}) if isinstance(self.config, dict) else {}
+        live_cfg = ff_cfg.get("slow_bull_live_test", {}) if isinstance(ff_cfg.get("slow_bull_live_test"), dict) else {}
+        fee_cfg = (
+            live_cfg.get("fee_fragmentation_control", {})
+            if isinstance(live_cfg.get("fee_fragmentation_control"), dict)
+            else {}
+        )
+        target = self._to_float(getattr(decision, "target_portion_of_balance", 0.0), 0.0)
+        equity = self._to_float(account_equity, 0.0)
+        estimated_notional = max(0.0, target * equity)
+        threshold = self._to_float(fee_cfg.get("min_probe_notional"), 5.0)
+        meta = {
+            "enabled": bool(live_cfg.get("enabled", False)) and bool(fee_cfg.get("enabled", False)),
+            "target_portion": target,
+            "account_equity": equity,
+            "estimated_notional_usdt": estimated_notional,
+            "min_probe_notional": threshold,
+        }
+        if decision.operation not in (FundFlowOperation.BUY, FundFlowOperation.SELL):
+            meta["reason"] = "not_entry"
+            return True, meta
+        md = decision.metadata if isinstance(getattr(decision, "metadata", None), dict) else {}
+        is_probe = bool(md.get("is_trial_entry")) or str(md.get("stage") or "").lower() == "continuation_long"
+        if not bool(meta["enabled"]) or not is_probe:
+            meta["reason"] = "disabled_or_not_probe"
+            return True, meta
+        if estimated_notional + 1e-12 < threshold:
+            meta["reason"] = "slow_bull_min_probe_notional_block"
+            return False, meta
+        meta["reason"] = "slow_bull_min_probe_notional_passed"
+        return True, meta
 
     def _resolve_dual_leg_shock_context(self, md: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
         shock_cfg = cfg.get("shock_detector", {}) if isinstance(cfg.get("shock_detector"), dict) else {}
@@ -5286,6 +5597,8 @@ class TradingBot:
                             timeframes[tf_key][k] = v
             out["timeframes"] = timeframes
 
+        self._normalize_quadrant_timeframe_fields(timeframes)
+
         ff_cfg = self.config.get("fund_flow", {}) or {}
         tf = str(ff_cfg.get("decision_timeframe") or ff_cfg.get("signal_timeframe") or "").strip().lower()
         if tf and isinstance(timeframes.get(tf), dict):
@@ -5314,6 +5627,25 @@ class TradingBot:
         else:
             out["active_timeframe"] = "raw"
         return out
+
+    def _normalize_quadrant_timeframe_fields(self, timeframes: Dict[str, Any]) -> None:
+        aliases = {
+            "ema20": ("ema20", "ema_20", "ema_fast", "ema21"),
+            "ema50": ("ema50", "ema_50", "ema_slow", "ema55"),
+            "ema200": ("ema200", "ema_200"),
+        }
+        for tf_ctx in timeframes.values():
+            if not isinstance(tf_ctx, dict):
+                continue
+            for target, keys in aliases.items():
+                current = self._to_float(tf_ctx.get(target), 0.0)
+                if math.isfinite(current) and current > 0.0:
+                    continue
+                for key in keys:
+                    value = self._to_float(tf_ctx.get(key), 0.0)
+                    if math.isfinite(value) and value > 0.0:
+                        tf_ctx[target] = value
+                        break
 
     def _extract_orderbook_flow(self, symbol: str) -> Dict[str, float]:
         try:
@@ -5585,11 +5917,13 @@ class TradingBot:
         market_data: Dict[str, Any],
     ) -> Tuple[Dict[str, Any], Any, Dict[str, Any]]:
         raw_flow_context = self._build_fund_flow_context(symbol, market_data)
+        raw_flow_context["market_breadth"] = dict(getattr(self, "_last_market_breadth_state", {}) or {})
         flow_snapshot = self.fund_flow_ingestion_service.aggregate_from_metrics(
             symbol=symbol,
             metrics=raw_flow_context,
         )
         flow_context = self._apply_timeframe_context(raw_flow_context, flow_snapshot)
+        flow_context["market_breadth"] = dict(getattr(self, "_last_market_breadth_state", {}) or {})
         self._safe_storage_call(
             "upsert_market_flow",
             exchange=flow_snapshot.exchange,
@@ -7037,9 +7371,34 @@ class TradingBot:
                 "trigger_context": exec_trigger_context,
             },
         )
+        self._append_entry_exit_audit_log(
+            self._build_entry_exit_audit_payload(
+                stage="pre_execution",
+                symbol=symbol,
+                decision=decision,
+                account_summary=account_summary,
+                current_price=current_price,
+                position=position,
+                flow_context=flow_context,
+                trigger_context=exec_trigger_context,
+            )
+        )
 
         if decision.operation == FundFlowOperation.CLOSE and self._has_pending_close_order(symbol):
             print(f"⏭️ {symbol} 存在待成交平仓单，跳过重复平仓下发")
+            self._append_entry_exit_audit_log(
+                self._build_entry_exit_audit_payload(
+                    stage="skipped_pending_close",
+                    symbol=symbol,
+                    decision=decision,
+                    account_summary=account_summary,
+                    current_price=current_price,
+                    position=position,
+                    flow_context=flow_context,
+                    trigger_context=exec_trigger_context,
+                    execution_result={"status": "skipped", "message": "pending_close_order_exists"},
+                )
+            )
             return
 
         execution_result = self.fund_flow_execution_router.execute_decision(
@@ -7057,6 +7416,19 @@ class TradingBot:
             )
             if isinstance(post_hook, dict) and post_hook:
                 execution_result["post_protection_hook"] = post_hook
+        self._append_entry_exit_audit_log(
+            self._build_entry_exit_audit_payload(
+                stage="post_execution",
+                symbol=symbol,
+                decision=decision,
+                account_summary=account_summary,
+                current_price=current_price,
+                position=position,
+                flow_context=flow_context,
+                trigger_context=exec_trigger_context,
+                execution_result=execution_result if isinstance(execution_result, dict) else {},
+            )
+        )
         self._update_dca_state_after_execution(symbol=symbol, decision=decision, execution_result=execution_result)
         position_for_log = position
         if decision.operation in (FundFlowOperation.BUY, FundFlowOperation.SELL, FundFlowOperation.CLOSE):
@@ -7753,6 +8125,7 @@ class TradingBot:
                     print("⏭️ 非开仓窗口且当前无持仓，跳过本轮。")
                     return
                 print(f"📌 非开仓窗口仅检查持仓: {', '.join(symbols)}")
+        market_breadth_state = self._update_market_breadth_state(all_symbols if allow_new_entries or ingestion_only else symbols)
         account_summary = self.account_data.get_account_summary()
         if not account_summary:
             if ingestion_only:
@@ -7801,6 +8174,7 @@ class TradingBot:
             "symbols": symbols,
             "account_summary": account_summary,
             "risk_guard_enabled": risk_guard_enabled,
+            "market_breadth": market_breadth_state,
         }
 
     def _prepare_symbol_context(self, context: Dict[str, Any]) -> Dict[str, Any]:
@@ -7845,6 +8219,8 @@ class TradingBot:
         block_new_entries_due_to_protection_gap = bool(
             context.get("block_new_entries_due_to_protection_gap", False)
         )
+        market_breadth_raw = context.get("market_breadth")
+        market_breadth = market_breadth_raw if isinstance(market_breadth_raw, dict) else {}
 
         return {
             "symbols": symbols,
@@ -7868,6 +8244,7 @@ class TradingBot:
             "pending_new_entries": pending_new_entries,
             "protection_gap_symbols": protection_gap_symbols,
             "block_new_entries_due_to_protection_gap": block_new_entries_due_to_protection_gap,
+            "market_breadth": market_breadth,
         }
 
 
@@ -8566,6 +8943,7 @@ class TradingBot:
                         current_price=current_price,
                         decision=decision,
                         decision_md=decision_md,
+                        account_summary=account_summary,
                     )
                     if decision.operation == FundFlowOperation.CLOSE:
                         pending_new_entries.append({
@@ -9564,6 +9942,58 @@ class TradingBot:
                             },
                         )
                         continue
+                micro_allowed, micro_meta = self._allows_entry_above_micro_notional(
+                    decision=decision,
+                    account_equity=self._to_float((account_summary or {}).get("equity"), 0.0),
+                )
+                if isinstance(decision.metadata, dict):
+                    decision.metadata["micro_notional_gate"] = micro_meta
+                if not micro_allowed:
+                    print(
+                        f"⏭️ {symbol} 开仓名义价值低于微仓阈值，跳过开仓: "
+                        f"notional={micro_meta.get('estimated_notional_usdt', 0.0):.4f}U, "
+                        f"min={micro_meta.get('min_entry_notional_usdt', 0.10):.4f}U"
+                    )
+                    self._log_entry_gate_block(
+                        symbol=symbol,
+                        gate="micro_notional",
+                        reason="micro_notional_block",
+                        threshold=micro_meta.get("min_entry_notional_usdt"),
+                        value=micro_meta,
+                        decision=decision,
+                        flow_context=flow_context,
+                        trigger_context=trigger_context,
+                        market_data=market_data,
+                        flow_snapshot=flow_snapshot,
+                        extra={"open_new_entry": True},
+                    )
+                    continue
+                fee_allowed, fee_meta = self._allows_entry_above_live_slow_bull_fee_floor(
+                    decision=decision,
+                    account_equity=self._to_float((account_summary or {}).get("equity"), 0.0),
+                )
+                if isinstance(decision.metadata, dict):
+                    decision.metadata["slow_bull_fee_fragmentation_gate"] = fee_meta
+                if not fee_allowed:
+                    print(
+                        f"⏭️ {symbol} 慢牛probe名义价值低于费用碎片阈值，跳过开仓: "
+                        f"notional={fee_meta.get('estimated_notional_usdt', 0.0):.4f}U, "
+                        f"min={fee_meta.get('min_probe_notional', 5.0):.4f}U"
+                    )
+                    self._log_entry_gate_block(
+                        symbol=symbol,
+                        gate="slow_bull_fee_fragmentation",
+                        reason="slow_bull_min_probe_notional_block",
+                        threshold=fee_meta.get("min_probe_notional"),
+                        value=fee_meta,
+                        decision=decision,
+                        flow_context=flow_context,
+                        trigger_context=trigger_context,
+                        market_data=market_data,
+                        flow_snapshot=flow_snapshot,
+                        extra={"open_new_entry": True},
+                    )
+                    continue
                 item_max_active_symbols = max(
                     1,
                     int(
@@ -10033,6 +10463,55 @@ class TradingBot:
                             f"🤖 {symbol_i} 未进入AI终审: rank={rank} shortlist={shortlist_rank} "
                             f"local={decision_i.operation.value.upper()}"
                         )
+                if decision_i.operation in (FundFlowOperation.BUY, FundFlowOperation.SELL):
+                    micro_allowed, micro_meta = self._allows_entry_above_micro_notional(
+                        decision=decision_i,
+                        account_equity=self._to_float((account_summary_i or {}).get("equity"), 0.0),
+                    )
+                    if isinstance(decision_i.metadata, dict):
+                        decision_i.metadata["micro_notional_gate"] = micro_meta
+                    if not micro_allowed:
+                        print(
+                            f"⏭️ {symbol_i} 最终开仓名义价值低于微仓阈值，跳过开仓: "
+                            f"notional={micro_meta.get('estimated_notional_usdt', 0.0):.4f}U, "
+                            f"min={micro_meta.get('min_entry_notional_usdt', 0.10):.4f}U"
+                        )
+                        self._log_entry_gate_block(
+                            symbol=symbol_i,
+                            gate="micro_notional",
+                            reason="micro_notional_block",
+                            threshold=micro_meta.get("min_entry_notional_usdt"),
+                            value=micro_meta,
+                            decision=decision_i,
+                            flow_context=flow_context_i,
+                            trigger_context=trigger_context_i,
+                            extra={"rank": rank, "final_revalidation": True},
+                        )
+                        continue
+                    fee_allowed, fee_meta = self._allows_entry_above_live_slow_bull_fee_floor(
+                        decision=decision_i,
+                        account_equity=self._to_float((account_summary_i or {}).get("equity"), 0.0),
+                    )
+                    if isinstance(decision_i.metadata, dict):
+                        decision_i.metadata["slow_bull_fee_fragmentation_gate"] = fee_meta
+                    if not fee_allowed:
+                        print(
+                            f"⏭️ {symbol_i} 最终慢牛probe名义价值低于费用碎片阈值，跳过开仓: "
+                            f"notional={fee_meta.get('estimated_notional_usdt', 0.0):.4f}U, "
+                            f"min={fee_meta.get('min_probe_notional', 5.0):.4f}U"
+                        )
+                        self._log_entry_gate_block(
+                            symbol=symbol_i,
+                            gate="slow_bull_fee_fragmentation",
+                            reason="slow_bull_min_probe_notional_block",
+                            threshold=fee_meta.get("min_probe_notional"),
+                            value=fee_meta,
+                            decision=decision_i,
+                            flow_context=flow_context_i,
+                            trigger_context=trigger_context_i,
+                            extra={"rank": rank, "final_revalidation": True},
+                        )
+                        continue
                 self._execute_and_log_decision(
                     symbol=symbol_i,
                     decision=decision_i,

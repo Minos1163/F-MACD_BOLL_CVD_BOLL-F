@@ -12,6 +12,8 @@ from src.fund_flow.log_compaction import (
     compact_execution_result_payload,
     compact_flow_context_payload,
     compact_json_dumps,
+    compact_minimal_attribution_context,
+    compact_minimal_decision_payload,
     compact_portfolio_payload,
     compact_trigger_context_payload,
 )
@@ -34,11 +36,13 @@ class FundFlowAttributionEngine:
         file_name: str = "fund_flow_attribution.jsonl",
         bucket_root_dir: str | None = None,
         raw_keep_days: int = 2,
+        mode: str = "compact",
     ) -> None:
         self.logs_dir = logs_dir
         self.file_name = file_name
         self.bucket_root_dir = bucket_root_dir
         self.raw_keep_days = max(0, int(raw_keep_days))
+        self.mode = str(mode or "compact").strip().lower()
         self._last_archive_day = datetime.now().date()
         os.makedirs(self.logs_dir, exist_ok=True)
         self.log_path = os.path.join(self.logs_dir, self.file_name)
@@ -226,6 +230,15 @@ class FundFlowAttributionEngine:
 
     def log_decision(self, decision: FundFlowDecision, context: Dict[str, Any]) -> None:
         context = context if isinstance(context, dict) else {}
+        if self.mode == "minimal":
+            self._append(
+                {
+                    "event": "decision",
+                    "decision": compact_minimal_decision_payload(decision),
+                    "context": compact_minimal_attribution_context(context),
+                }
+            )
+            return
         self._append(
             {
                 "event": "decision",

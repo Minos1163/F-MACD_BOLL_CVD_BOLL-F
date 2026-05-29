@@ -18,12 +18,15 @@ class BtcBetaRiskConfig:
     alt_against_15m_pct: float = -0.0010
     alt_against_30m_pct: float = -0.0015
     corr_window_bars: int = 48
-    fast_fail_window_bars: int = 2
-    fast_fail_mae_threshold: float = -0.002
+    fast_fail_min_age_bars: int = 4
+    fast_fail_window_bars: int = 4
+    fast_fail_mae_threshold: float = -0.0035
     fast_fail_mfe_threshold: float = 0.002
     risk_score_reduce_threshold: int = 2
     risk_score_close_threshold: int = 4
-    small_notional_close_threshold: float = 10.0
+    small_notional_close_threshold: float = 5.0
+    small_notional_close_equity_pct: float = 0.02
+    tiny_notional_skip_threshold: float = 1.0
 
 
 class BtcPriceCache:
@@ -117,6 +120,7 @@ class BtcBetaRiskScorer:
         mfe_pct: float,
         mae_pct: float,
         position_notional: float | None = None,
+        account_equity: float | None = None,
     ) -> Dict[str, object]:
         cfg = self.cfg
         if not cfg.enabled:
@@ -154,26 +158,49 @@ class BtcBetaRiskScorer:
                 risk_score += 1
                 reasons.append(f"btc_alt_30m_sync({float(btc_ret_30m):.3%},{float(alt_ret_30m):.3%})")
 
-        in_fast_fail = int(position_age_bars) <= int(cfg.fast_fail_window_bars)
+        age_bars = int(position_age_bars)
+        fast_fail_min_age = max(1, int(cfg.fast_fail_min_age_bars))
+        fast_fail_window = max(fast_fail_min_age, int(cfg.fast_fail_window_bars))
+        in_fast_fail = fast_fail_min_age <= age_bars <= fast_fail_window
         no_mfe_gain = float(mfe_pct) < float(cfg.fast_fail_mfe_threshold)
         has_mae = float(mae_pct) <= float(cfg.fast_fail_mae_threshold)
         if in_fast_fail and (alt_against_15m or (use_btc and btc_against_15m)):
             if no_mfe_gain and has_mae:
                 risk_score += 2
                 reasons.append(
-                    f"fast_fail(age={int(position_age_bars)}bars,mfe={float(mfe_pct):.3%},mae={float(mae_pct):.3%})"
+                    f"fast_fail(age={age_bars}bars,mfe={float(mfe_pct):.3%},mae={float(mae_pct):.3%})"
                 )
             elif no_mfe_gain:
                 risk_score += 1
-                reasons.append(f"fast_fail_no_mfe(age={int(position_age_bars)}bars)")
+                reasons.append(f"fast_fail_no_mfe(age={age_bars}bars)")
 
         reason = " | ".join(reasons) if reasons else "no_risk"
         small_notional_close = False
+        tiny_notional_skip = False
         notional = None if position_notional is None else float(position_notional)
-        if risk_score >= int(cfg.risk_score_close_threshold):
+        equity = None if account_equity is None else max(0.0, float(account_equity))
+        equity_floor = (
+            equity * max(0.0, float(cfg.small_notional_close_equity_pct))
+            if equity is not None
+            else 0.0
+        )
+        small_notional_close_threshold = max(
+            0.0,
+            float(cfg.small_notional_close_threshold),
+            equity_floor,
+        )
+        if (
+            notional is not None
+            and 0.0 <= notional < float(cfg.tiny_notional_skip_threshold)
+            and risk_score > 0
+        ):
+            action = "SKIP_TINY_CLOSE"
+            tiny_notional_skip = True
+            reason = f"{reason} | tiny_notional_skip({notional:.2f}U)"
+        elif risk_score >= int(cfg.risk_score_close_threshold):
             action = "CLOSE"
         elif risk_score >= int(cfg.risk_score_reduce_threshold):
-            if notional is not None and 0.0 <= notional < float(cfg.small_notional_close_threshold):
+            if notional is not None and 0.0 <= notional < small_notional_close_threshold:
                 action = "CLOSE"
                 small_notional_close = True
                 reasons.append(f"small_notional_close({notional:.2f}U)")
@@ -181,7 +208,7 @@ class BtcBetaRiskScorer:
             else:
                 action = "REDUCE_50"
         elif risk_score == 1 and in_fast_fail:
-            if notional is not None and 0.0 <= notional < float(cfg.small_notional_close_threshold):
+            if notional is not None and 0.0 <= notional < small_notional_close_threshold:
                 action = "CLOSE"
                 small_notional_close = True
                 reason = f"{reason} | small_notional_close({notional:.2f}U) [fast_fail_window]"
@@ -197,7 +224,12 @@ class BtcBetaRiskScorer:
             "use_btc": use_btc,
             "corr": corr,
             "position_notional": notional,
+            "account_equity": equity,
             "small_notional_close": small_notional_close,
+            "small_notional_close_threshold": small_notional_close_threshold,
+            "tiny_notional_skip": tiny_notional_skip,
+            "fast_fail_min_age_bars": fast_fail_min_age,
+            "fast_fail_window_bars": fast_fail_window,
         }
 
 

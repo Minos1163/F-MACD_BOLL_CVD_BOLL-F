@@ -1,0 +1,68 @@
+{
+  "description": "Crypto quant strategy guardrails for AI2.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .codex/hooks/init_env.py",
+            "timeout": 10,
+            "statusMessage": "Loading crypto quant guardrails"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|apply_patch|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .codex/hooks/anti_future_leak.py",
+            "timeout": 10,
+            "statusMessage": "Checking for future leaks"
+          },
+          {
+            "type": "command",
+            "command": "python .codex/hooks/risk_guard.py",
+            "timeout": 10,
+            "statusMessage": "Checking live risk guard"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|apply_patch|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .codex/hooks/pre_backtest.py",
+            "timeout": 10,
+            "statusMessage": "Marking strategy backtest requirement"
+          },
+          {
+            "type": "command",
+            "command": "python .codex/hooks/metrics_check.py",
+            "timeout": 10,
+            "statusMessage": "Checking backtest metrics"
+          },
+          {
+            "type": "command",
+            "command": "python .codex/hooks/pnl_sanity.py",
+            "timeout": 10,
+            "statusMessage": "Checking PnL sanity"
+          },
+          {
+            "type": "command",
+            "command": "python .codex/hooks/auto_journal.py",
+            "timeout": 10,
+            "statusMessage": "Writing research journal"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -55,18 +55,24 @@ def verify(config_path: Path) -> int:
         errors.append("fund_flow.macd_mtf_strategy_v2.dynamic_position_sizing.total_compression_floor.enabled must be false")
 
     vwap_gate = vwap_cfg.get("vwap_deviation_gate", {}) if isinstance(vwap_cfg.get("vwap_deviation_gate"), dict) else {}
-    if str(vwap_gate.get("mode", "")).strip().lower() != "directional_ablation":
-        errors.append("fund_flow.macd_mtf_strategy_v2.vwap_config.vwap_deviation_gate.mode must be directional_ablation")
+    if vwap_gate.get("enabled") is not False:
+        errors.append("fund_flow.macd_mtf_strategy_v2.vwap_config.vwap_deviation_gate.enabled must be false")
+    if str(vwap_gate.get("mode", "")).strip().lower() not in {"observation_only", "disabled"}:
+        errors.append("fund_flow.macd_mtf_strategy_v2.vwap_config.vwap_deviation_gate.mode must be observation_only/disabled")
     if "vwap_deviation_hard_block" in vwap_cfg:
         errors.append("fund_flow.macd_mtf_strategy_v2.vwap_config.vwap_deviation_hard_block must be removed")
-    same_dir = vwap_gate.get("same_dir_trend_aligned", {}) if isinstance(vwap_gate.get("same_dir_trend_aligned"), dict) else {}
-    if _as_float(same_dir.get("pass_dev_pct"), 0.0) < 0.04:
-        errors.append("fund_flow.macd_mtf_strategy_v2.vwap_config.vwap_deviation_gate.same_dir_trend_aligned.pass_dev_pct must be >= 0.04")
-    if _as_float(same_dir.get("probe_dev_pct"), 0.0) > 0.15 + 1e-12:
-        errors.append("fund_flow.macd_mtf_strategy_v2.vwap_config.vwap_deviation_gate.same_dir_trend_aligned.probe_dev_pct must be <= 0.15")
-    ambiguous = vwap_gate.get("ambiguous", {}) if isinstance(vwap_gate.get("ambiguous"), dict) else {}
-    if abs(_as_float(ambiguous.get("block_atr_mult"), 0.0) - 4.0) > 0.001:
-        errors.append("fund_flow.macd_mtf_strategy_v2.vwap_config.vwap_deviation_gate.ambiguous.block_atr_mult must be 4.0")
+    weights = v2.get("scoring_weights", {}) if isinstance(v2.get("scoring_weights"), dict) else {}
+    if abs(_as_float(weights.get("weight_vwap"), 1.0)) > 1e-12:
+        errors.append("fund_flow.macd_mtf_strategy_v2.scoring_weights.weight_vwap must be 0.0")
+    for key in (
+        "min_vwap_score_for_entry",
+        "short_min_vwap_score_for_entry",
+        "flip_bearish_short_min_vwap_score_for_entry",
+        "stable_bear_continuation_min_vwap_score",
+        "stable_bull_continuation_min_vwap_score",
+    ):
+        if _as_float(entry_filters.get(key), 0.0) > 0.0:
+            errors.append(f"fund_flow.macd_mtf_strategy_v2.entry_filters.{key} must be 0.0")
 
     if partial_confirm.get("enabled") is not True:
         errors.append("fund_flow.macd_mtf_strategy_v2.partial_confirm.enabled must be true")
@@ -109,18 +115,24 @@ def verify(config_path: Path) -> int:
         errors.append("fund_flow.btc_beta_risk.min_corr_for_btc_weight must be >= 0.20")
     if int(_as_float(beta.get("corr_window_bars"), 0.0)) < 48:
         errors.append("fund_flow.btc_beta_risk.corr_window_bars must be >= 48")
-    if int(_as_float(beta.get("fast_fail_window_bars"), 0.0)) != 2:
-        errors.append("fund_flow.btc_beta_risk.fast_fail_window_bars must be 2")
-    if _as_float(beta.get("fast_fail_mae_threshold"), 0.0) > -0.002 + 1e-12:
-        errors.append("fund_flow.btc_beta_risk.fast_fail_mae_threshold must be <= -0.002")
+    if int(_as_float(beta.get("fast_fail_min_age_bars"), 0.0)) < 4:
+        errors.append("fund_flow.btc_beta_risk.fast_fail_min_age_bars must be >= 4")
+    if int(_as_float(beta.get("fast_fail_window_bars"), 0.0)) < 4:
+        errors.append("fund_flow.btc_beta_risk.fast_fail_window_bars must be >= 4")
+    if _as_float(beta.get("fast_fail_mae_threshold"), 0.0) > -0.0035 + 1e-12:
+        errors.append("fund_flow.btc_beta_risk.fast_fail_mae_threshold must be <= -0.0035")
     if _as_float(beta.get("fast_fail_mfe_threshold"), 0.0) > 0.002 + 1e-12:
         errors.append("fund_flow.btc_beta_risk.fast_fail_mfe_threshold must be <= 0.002")
     if int(_as_float(beta.get("risk_score_reduce_threshold"), 0.0)) != 2:
         errors.append("fund_flow.btc_beta_risk.risk_score_reduce_threshold must be 2")
     if int(_as_float(beta.get("risk_score_close_threshold"), 0.0)) != 4:
         errors.append("fund_flow.btc_beta_risk.risk_score_close_threshold must be 4")
-    if _as_float(beta.get("small_notional_close_threshold"), 0.0) > 10.0:
-        errors.append("fund_flow.btc_beta_risk.small_notional_close_threshold must be <= 10")
+    if _as_float(beta.get("small_notional_close_threshold"), 0.0) > 5.0:
+        errors.append("fund_flow.btc_beta_risk.small_notional_close_threshold must be <= 5")
+    if _as_float(beta.get("small_notional_close_equity_pct"), 0.0) < 0.02:
+        errors.append("fund_flow.btc_beta_risk.small_notional_close_equity_pct must be >= 0.02")
+    if _as_float(beta.get("tiny_notional_skip_threshold"), 0.0) < 1.0:
+        errors.append("fund_flow.btc_beta_risk.tiny_notional_skip_threshold must be >= 1")
 
     btc_entry = ff.get("btc_entry_regime_gate", {}) if isinstance(ff.get("btc_entry_regime_gate"), dict) else {}
     if btc_entry.get("enabled") is not True:
@@ -131,19 +143,15 @@ def verify(config_path: Path) -> int:
         errors.append("fund_flow.btc_entry_regime_gate.rising_avg_ret must be >= 0.001")
     if _as_float(btc_entry.get("chase_short_ret_threshold"), 0.0) > -0.015 + 1e-12:
         errors.append("fund_flow.btc_entry_regime_gate.chase_short_ret_threshold must be <= -0.015")
-    if _as_float(btc_entry.get("btc_falling_low_vwap_block"), 1.0) > 0.30:
-        errors.append("fund_flow.btc_entry_regime_gate.btc_falling_low_vwap_block must be <= 0.30")
+    if "btc_falling_low_vwap_block" in btc_entry:
+        errors.append("fund_flow.btc_entry_regime_gate.btc_falling_low_vwap_block must be removed")
+    if "chase_short_block_vwap" in btc_entry:
+        errors.append("fund_flow.btc_entry_regime_gate.chase_short_block_vwap must be removed")
 
     entry_quality = v2.get("entry_quality_gates", {}) if isinstance(v2.get("entry_quality_gates"), dict) else {}
     vwap_score_gate = entry_quality.get("vwap_score_hard_block", {}) if isinstance(entry_quality.get("vwap_score_hard_block"), dict) else {}
-    if vwap_score_gate.get("enabled") is not True:
-        errors.append("fund_flow.macd_mtf_strategy_v2.entry_quality_gates.vwap_score_hard_block.enabled must be true")
-    if _as_float(vwap_score_gate.get("below_block"), 1.0) > 0.12:
-        errors.append("fund_flow.macd_mtf_strategy_v2.entry_quality_gates.vwap_score_hard_block.below_block must be <= 0.12")
-    if _as_float(vwap_score_gate.get("below_probe"), 1.0) > 0.30:
-        errors.append("fund_flow.macd_mtf_strategy_v2.entry_quality_gates.vwap_score_hard_block.below_probe must be <= 0.30")
-    if _as_float(vwap_score_gate.get("probe_max"), 1.0) > 0.042:
-        errors.append("fund_flow.macd_mtf_strategy_v2.entry_quality_gates.vwap_score_hard_block.probe_max must be <= 0.042")
+    if vwap_score_gate.get("enabled") is not False:
+        errors.append("fund_flow.macd_mtf_strategy_v2.entry_quality_gates.vwap_score_hard_block.enabled must be false")
     no_trade_gate = entry_quality.get("no_trade_gate", {}) if isinstance(entry_quality.get("no_trade_gate"), dict) else {}
     if no_trade_gate.get("enabled") is not True:
         errors.append("fund_flow.macd_mtf_strategy_v2.entry_quality_gates.no_trade_gate.enabled must be true")
@@ -151,18 +159,121 @@ def verify(config_path: Path) -> int:
     if range_gate.get("enabled") is not True:
         errors.append("fund_flow.macd_mtf_strategy_v2.entry_quality_gates.range_gate.enabled must be true")
 
+    breadth = ff.get("market_breadth", {}) if isinstance(ff.get("market_breadth"), dict) else {}
+    if breadth.get("enabled") is not True:
+        errors.append("fund_flow.market_breadth.enabled must be true")
+    if _as_float(breadth.get("slow_bull_breadth_ratio"), 0.0) < 0.60:
+        errors.append("fund_flow.market_breadth.slow_bull_breadth_ratio must be >= 0.60")
+    if _as_float(breadth.get("mode_a_breadth_min"), 0.0) < 0.80:
+        errors.append("fund_flow.market_breadth.mode_a_breadth_min must be >= 0.80")
+    if _as_float(breadth.get("mode_a_alt_median_min"), 0.0) < 0.0025:
+        errors.append("fund_flow.market_breadth.mode_a_alt_median_min must be >= 0.0025")
+    if _as_float(breadth.get("mode_a_btc_min"), 0.0) > -0.001 + 1e-12:
+        errors.append("fund_flow.market_breadth.mode_a_btc_min must be <= -0.001")
+    if _as_float(breadth.get("mode_b_btc_30m_min"), 0.0) > 0.002 + 1e-12:
+        errors.append("fund_flow.market_breadth.mode_b_btc_30m_min must be <= 0.002")
+    if _as_float(breadth.get("mode_c_breadth_min"), 0.0) < 0.90:
+        errors.append("fund_flow.market_breadth.mode_c_breadth_min must be >= 0.90")
+    if _as_float(breadth.get("mode_c_alt_median_min"), 0.0) < 0.001:
+        errors.append("fund_flow.market_breadth.mode_c_alt_median_min must be >= 0.001")
+    if int(_as_float(breadth.get("confirm_cycles"), 0.0)) < 2:
+        errors.append("fund_flow.market_breadth.confirm_cycles must be >= 2")
+
+    if _as_float(ff.get("min_entry_notional_usdt"), 0.0) < 0.10:
+        errors.append("fund_flow.min_entry_notional_usdt must be >= 0.10")
+    if _as_float(ff.get("min_entry_margin_usdt"), 0.0) < 1.0:
+        errors.append("fund_flow.min_entry_margin_usdt must be >= 1.0")
+
+    if str(ff.get("strategy_mode") or "").strip().lower() == "quadrant_resonance":
+        quadrant = ff.get("quadrant_resonance", {}) if isinstance(ff.get("quadrant_resonance"), dict) else {}
+        q_risk = quadrant.get("risk", {}) if isinstance(quadrant.get("risk"), dict) else {}
+        q_entry = quadrant.get("entry", {}) if isinstance(quadrant.get("entry"), dict) else {}
+        q_capacity = quadrant.get("capacity", {}) if isinstance(quadrant.get("capacity"), dict) else {}
+        q_audit = quadrant.get("audit", {}) if isinstance(quadrant.get("audit"), dict) else {}
+        if _as_float(q_risk.get("min_entry_notional_usdt"), 0.0) < 8.0:
+            errors.append("fund_flow.quadrant_resonance.risk.min_entry_notional_usdt must be >= 8.0")
+        if _as_float(q_risk.get("min_entry_margin_usdt"), 0.0) < 1.0:
+            errors.append("fund_flow.quadrant_resonance.risk.min_entry_margin_usdt must be >= 1.0")
+        if int(_as_float(q_risk.get("max_leverage"), 99.0)) > 3:
+            errors.append("fund_flow.quadrant_resonance.risk.max_leverage must be <= 3")
+        if _as_float(q_risk.get("max_total_exposure_pct"), 99.0) > 0.75 + 1e-12:
+            errors.append("fund_flow.quadrant_resonance.risk.max_total_exposure_pct must be <= 0.75")
+        if _as_float(q_entry.get("standard_threshold"), 0.0) < 0.80:
+            errors.append("fund_flow.quadrant_resonance.entry.standard_threshold must be >= 0.80")
+        if _as_float(q_entry.get("transition_threshold"), 0.0) < 0.85:
+            errors.append("fund_flow.quadrant_resonance.entry.transition_threshold must be >= 0.85")
+        if int(_as_float(q_capacity.get("max_active_symbols"), 99.0)) > 8:
+            errors.append("fund_flow.quadrant_resonance.capacity.max_active_symbols must be <= 8")
+        for key in ("entry_decision_path", "exit_audit_path", "capacity_replacement_path"):
+            if not str(q_audit.get(key) or "").strip():
+                errors.append(f"fund_flow.quadrant_resonance.audit.{key} must be configured")
+
+    slow_bull_live = ff.get("slow_bull_live_test", {}) if isinstance(ff.get("slow_bull_live_test"), dict) else {}
+    if slow_bull_live.get("enabled") is not True:
+        errors.append("fund_flow.slow_bull_live_test.enabled must be true for 100U live test")
+    if str(slow_bull_live.get("rsi_extreme_mode") or "").strip().lower() != "cap_not_block":
+        errors.append("fund_flow.slow_bull_live_test.rsi_extreme_mode must be cap_not_block")
+    if _as_float(slow_bull_live.get("rsi_extreme_threshold"), 0.0) > 72.0:
+        errors.append("fund_flow.slow_bull_live_test.rsi_extreme_threshold must be <= 72")
+    rsi_cap = _as_float(slow_bull_live.get("rsi_extreme_max_portion"), 0.0)
+    if rsi_cap <= 0.0 or rsi_cap > 0.02 + 1e-12:
+        errors.append("fund_flow.slow_bull_live_test.rsi_extreme_max_portion must be >0 and <= 0.02")
+    one_h = (
+        slow_bull_live.get("slow_bull_1h_gate_downgrade", {})
+        if isinstance(slow_bull_live.get("slow_bull_1h_gate_downgrade"), dict)
+        else {}
+    )
+    if one_h.get("enabled") is not True:
+        errors.append("fund_flow.slow_bull_live_test.slow_bull_1h_gate_downgrade.enabled must be true")
+    if str(one_h.get("mode") or "").strip().lower() != "ignore_if_momentum_ok":
+        errors.append("fund_flow.slow_bull_live_test.slow_bull_1h_gate_downgrade.mode must be ignore_if_momentum_ok")
+    if _as_float(one_h.get("momentum_threshold_30m"), 0.0) > 0.003 + 1e-12:
+        errors.append("fund_flow.slow_bull_live_test.slow_bull_1h_gate_downgrade.momentum_threshold_30m must be <= 0.003")
+    if _as_float(one_h.get("momentum_threshold_60m"), 0.0) > 0.005 + 1e-12:
+        errors.append("fund_flow.slow_bull_live_test.slow_bull_1h_gate_downgrade.momentum_threshold_60m must be <= 0.005")
+    fee_cfg = (
+        slow_bull_live.get("fee_fragmentation_control", {})
+        if isinstance(slow_bull_live.get("fee_fragmentation_control"), dict)
+        else {}
+    )
+    if fee_cfg.get("enabled") is not True:
+        errors.append("fund_flow.slow_bull_live_test.fee_fragmentation_control.enabled must be true")
+    if _as_float(fee_cfg.get("min_probe_notional"), 0.0) < 1.0:
+        errors.append("fund_flow.slow_bull_live_test.fee_fragmentation_control.min_probe_notional must be >= 1.0")
+    capacity_shadow = (
+        slow_bull_live.get("capacity_replacement_shadow", {})
+        if isinstance(slow_bull_live.get("capacity_replacement_shadow"), dict)
+        else {}
+    )
+    if capacity_shadow.get("replacement_enabled") is not False:
+        errors.append("fund_flow.slow_bull_live_test.capacity_replacement_shadow.replacement_enabled must remain false")
+
+    continuation = v2.get("continuation_long", {}) if isinstance(v2.get("continuation_long"), dict) else {}
+    if continuation.get("enabled") is not True:
+        errors.append("fund_flow.macd_mtf_strategy_v2.continuation_long.enabled must be true")
+    if int(_as_float(continuation.get("min_conditions_met"), 0.0)) < 4:
+        errors.append("fund_flow.macd_mtf_strategy_v2.continuation_long.min_conditions_met must be >= 4")
+    if _as_float(continuation.get("max_portion_6of6"), 1.0) > 0.042:
+        errors.append("fund_flow.macd_mtf_strategy_v2.continuation_long.max_portion_6of6 must be <= 0.042")
+
+    slow_short = v2.get("slow_bull_short_guard", {}) if isinstance(v2.get("slow_bull_short_guard"), dict) else {}
+    if slow_short.get("enabled") is not True:
+        errors.append("fund_flow.macd_mtf_strategy_v2.slow_bull_short_guard.enabled must be true")
+
     position_limit = ff.get("position_count_limit_by_margin", {}) if isinstance(ff.get("position_count_limit_by_margin"), dict) else {}
     required_total_cap = int(_as_float(position_limit.get("max_small_margin_positions"), 0.0)) + int(
         _as_float(position_limit.get("max_large_margin_positions"), 0.0)
     )
+    is_quadrant = str(ff.get("strategy_mode") or "").strip().lower() == "quadrant_resonance"
     if position_limit.get("enabled") is True and required_total_cap > 0:
         if int(_as_float(ff.get("max_active_symbols"), 0.0)) < required_total_cap:
             errors.append("fund_flow.max_active_symbols must be >= small+large bucket total")
         dyn_cap = ff.get("dynamic_max_active_symbols", {}) if isinstance(ff.get("dynamic_max_active_symbols"), dict) else {}
         if int(_as_float(dyn_cap.get("max_active_symbols"), 0.0)) < required_total_cap:
             errors.append("fund_flow.dynamic_max_active_symbols.max_active_symbols must be >= small+large bucket total")
-        if int(_as_float(position_limit.get("small_margin_leverage"), 0.0)) != 9:
-            errors.append("fund_flow.position_count_limit_by_margin.small_margin_leverage must be 9")
+        expected_small_leverage = 9
+        if int(_as_float(position_limit.get("small_margin_leverage"), 0.0)) != expected_small_leverage:
+            errors.append(f"fund_flow.position_count_limit_by_margin.small_margin_leverage must be {expected_small_leverage}")
         if int(_as_float(ff.get("max_leverage"), 0.0)) < 9:
             errors.append("fund_flow.max_leverage must be >= 9 for small margin leverage override")
 

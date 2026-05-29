@@ -1,0 +1,36 @@
+{
+  "slow_bull_all_shadow": true,
+  "slow_bull_rsi_ablation": {
+    "enabled": false,
+    "rsi_extreme_mode": "cap_not_block",
+    "rsi_extreme_max_portion": 0.02,
+    "rsi_extreme_trailing_stop_pct": 0.015
+  },
+  "slow_bull_1h_gate_downgrade": {
+    "enabled": false,
+    "mode": "ignore_if_momentum_ok",
+    "momentum_threshold_30m": 0.003,
+    "momentum_threshold_60m": 0.005
+  },
+  "capacity_replacement_shadow": {
+    "enabled": false,
+    "replacement_enabled": false,
+    "ranking_metric": "momentum_quality",
+    "min_mfe_to_replace": 0.001,
+    "replacement_threshold": 0.05
+  },
+  "tiered_beta_exit": {
+    "enabled": false,
+    "continuation_fast_fail_bars": 4,
+    "normal_fast_fail_bars": 2,
+    "require_btc_alt_reversal": true,
+    "btc_reversal_threshold": -0.001,
+    "alt_reversal_threshold": -0.002
+  },
+  "fee_fragmentation_control": {
+    "enabled": false,
+    "min_holding_bars_for_exit": 2,
+    "cooldown_after_exit_bars": 6,
+    "min_probe_notional": 5.0
+  }
+}

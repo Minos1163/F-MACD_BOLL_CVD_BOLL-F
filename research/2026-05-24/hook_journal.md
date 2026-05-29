@@ -1,0 +1,31 @@
+# Hook Journal 2026-05-24
+
+- 2026-05-24T11:09:12 summary=output/backtest/live_v2_followup_macd_v2_ablation_no_trade_meaningful_block_30d_20260510_summary.json return=27.85% pf=3.10 dd=6.55 trades=94
+- 2026-05-24T11:09:12 summary=output/backtest/live_v2_followup_macd_v2_ablation_no_trade_meaningful_block_30d_20260510_summary.json return=27.85% pf=3.10 dd=6.55 trades=94
+- 2026-05-24T11:09:20 summary=output/backtest/live_v2_followup_macd_v2_ablation_no_trade_meaningful_block_30d_20260510_summary.json return=27.85% pf=3.10 dd=6.55 trades=94
+- 2026-05-24T11:09:35 summary=output/backtest/live_v2_followup_macd_v2_ablation_no_trade_meaningful_block_30d_20260510_summary.json return=27.85% pf=3.10 dd=6.55 trades=94
+- 2026-05-24T11:10:30 summary=output/backtest/live_v2_followup_macd_v2_ablation_no_trade_meaningful_block_30d_20260510_summary.json return=27.85% pf=3.10 dd=6.55 trades=94
+- 2026-05-24T11:10:30 summary=output/backtest/live_v2_followup_macd_v2_ablation_no_trade_meaningful_block_30d_20260510_summary.json return=27.85% pf=3.10 dd=6.55 trades=94
+- 2026-05-24T11:10:30 summary=output/backtest/live_v2_followup_macd_v2_ablation_no_trade_meaningful_block_30d_20260510_summary.json return=27.85% pf=3.10 dd=6.55 trades=94
+- 2026-05-24T11:10:45 summary=output/backtest/live_v2_followup_macd_v2_ablation_no_trade_meaningful_block_30d_20260510_summary.json return=27.85% pf=3.10 dd=6.55 trades=94
+- 2026-05-24T11:11:23 summary=output/backtest/live_v2_followup_macd_v2_ablation_no_trade_meaningful_block_30d_20260510_summary.json return=27.85% pf=3.10 dd=6.55 trades=94
+- 2026-05-24T11:12:03 summary=output/backtest/live_v2_followup_macd_v2_ablation_no_trade_meaningful_block_30d_20260510_summary.json return=27.85% pf=3.10 dd=6.55 trades=94
+- 2026-05-24T11:12:24 summary=output/backtest/live_v2_followup_macd_v2_ablation_no_trade_meaningful_block_30d_20260510_summary.json return=27.85% pf=3.10 dd=6.55 trades=94
+- 2026-05-24T17:55:07 summary=output/backtest/live_v2_followup_macd_v2_ablation_no_trade_meaningful_block_30d_20260510_summary.json return=27.85% pf=3.10 dd=6.55 trades=94
+- 2026-05-24T17:55:07 summary=output/backtest/live_v2_followup_macd_v2_ablation_no_trade_meaningful_block_30d_20260510_summary.json return=27.85% pf=3.10 dd=6.55 trades=94
+- 2026-05-24T17:55:18 summary=output/backtest/live_v2_followup_macd_v2_ablation_no_trade_meaningful_block_30d_20260510_summary.json return=27.85% pf=3.10 dd=6.55 trades=94
+- 2026-05-24T17:55:42 summary=output/backtest/live_v2_followup_macd_v2_ablation_no_trade_meaningful_block_30d_20260510_summary.json return=27.85% pf=3.10 dd=6.55 trades=94
+- 2026-05-24T17:55:56 summary=output/backtest/live_v2_followup_macd_v2_ablation_no_trade_meaningful_block_30d_20260510_summary.json return=27.85% pf=3.10 dd=6.55 trades=94
+- 2026-05-24T17:55:57 summary=output/backtest/live_v2_followup_macd_v2_ablation_no_trade_meaningful_block_30d_20260510_summary.json return=27.85% pf=3.10 dd=6.55 trades=94
+- 2026-05-24T17:55:57 summary=output/backtest/live_v2_followup_macd_v2_ablation_no_trade_meaningful_block_30d_20260510_summary.json return=27.85% pf=3.10 dd=6.55 trades=94
+- 2026-05-24T17:55:57 summary=output/backtest/live_v2_followup_macd_v2_ablation_no_trade_meaningful_block_30d_20260510_summary.json return=27.85% pf=3.10 dd=6.55 trades=94
+- 2026-05-24T22:57:22 summary=output/backtest/20260523_1700_slow_bull_vwap_ablation_summary.json return=0.00% pf=0.00 dd=0.00 trades=0
+- 2026-05-24T22:57:22 summary=output/backtest/20260523_1700_slow_bull_vwap_ablation_summary.json return=0.00% pf=0.00 dd=0.00 trades=0
+- 2026-05-24T22:57:37 summary=output/backtest/20260523_1700_slow_bull_vwap_ablation_summary.json return=0.00% pf=0.00 dd=0.00 trades=0
+- 2026-05-24T22:57:37 summary=output/backtest/20260523_1700_slow_bull_vwap_ablation_summary.json return=0.00% pf=0.00 dd=0.00 trades=0
+- 2026-05-24T22:57:49 summary=output/backtest/20260523_1700_slow_bull_vwap_ablation_summary.json return=0.00% pf=0.00 dd=0.00 trades=0
+- 2026-05-24T22:58:14 summary=output/backtest/20260523_1700_slow_bull_vwap_ablation_summary.json return=0.00% pf=0.00 dd=0.00 trades=0
+- 2026-05-24T22:58:45 summary=output/backtest/20260523_1700_slow_bull_vwap_ablation_summary.json return=0.00% pf=0.00 dd=0.00 trades=0
+- 2026-05-24T22:58:45 summary=output/backtest/20260523_1700_slow_bull_vwap_ablation_summary.json return=0.00% pf=0.00 dd=0.00 trades=0
+- 2026-05-24T22:58:46 summary=output/backtest/20260523_1700_slow_bull_vwap_ablation_summary.json return=0.00% pf=0.00 dd=0.00 trades=0
+- 2026-05-24T22:58:46 summary=output/backtest/20260523_1700_slow_bull_vwap_ablation_summary.json return=0.00% pf=0.00 dd=0.00 trades=0

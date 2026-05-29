@@ -3,6 +3,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.fund_flow.btc_beta_risk import BtcBetaRiskConfig, BtcBetaRiskScorer, BtcPriceCache
@@ -47,15 +49,35 @@ def test_high_corr_fast_fail_reduces_when_alt_turns_against() -> None:
         btc_ret_30m=-0.0010,
         alt_ret_15m=-0.0012,
         alt_ret_30m=-0.0010,
-        position_age_bars=1,
+        position_age_bars=4,
         mfe_pct=0.001,
-        mae_pct=-0.0025,
+        mae_pct=-0.004,
     )
 
     assert result["use_btc"] is True
     assert result["risk_score"] >= 2
     assert result["action"] == "REDUCE_50"
     assert "fast_fail" in result["reason"]
+
+
+def test_fast_fail_does_not_fire_before_min_age_bars() -> None:
+    scorer = BtcBetaRiskScorer(BtcBetaRiskConfig())
+    _seed_corr(scorer, "ADAUSDT", aligned=True)
+
+    result = scorer.score(
+        symbol="ADAUSDT",
+        direction="long",
+        btc_ret_15m=-0.0005,
+        btc_ret_30m=-0.0010,
+        alt_ret_15m=-0.0012,
+        alt_ret_30m=-0.0010,
+        position_age_bars=1,
+        mfe_pct=0.001,
+        mae_pct=-0.004,
+    )
+
+    assert "fast_fail" not in result["reason"]
+    assert result["fast_fail_min_age_bars"] == 4
 
 
 def test_major_symbol_uses_default_corr_before_history_is_warmed() -> None:
@@ -109,8 +131,10 @@ def test_warmup_from_klines_replaces_default_corr_with_real_history() -> None:
     assert corr > 0.95
 
 
-def test_small_position_reduce_upgrades_to_close() -> None:
-    scorer = BtcBetaRiskScorer(BtcBetaRiskConfig(small_notional_close_threshold=10.0))
+def test_small_position_reduce_upgrades_to_close_above_tiny_skip_floor() -> None:
+    scorer = BtcBetaRiskScorer(
+        BtcBetaRiskConfig(small_notional_close_threshold=5.0, tiny_notional_skip_threshold=1.0)
+    )
     _seed_corr(scorer, "ADAUSDT", aligned=True)
 
     small = scorer.score(
@@ -120,10 +144,11 @@ def test_small_position_reduce_upgrades_to_close() -> None:
         btc_ret_30m=-0.0010,
         alt_ret_15m=-0.0012,
         alt_ret_30m=-0.0010,
-        position_age_bars=1,
+        position_age_bars=4,
         mfe_pct=0.001,
-        mae_pct=-0.0025,
-        position_notional=5.0,
+        mae_pct=-0.004,
+        position_notional=3.0,
+        account_equity=100.0,
     )
     large = scorer.score(
         symbol="ADAUSDT",
@@ -132,16 +157,70 @@ def test_small_position_reduce_upgrades_to_close() -> None:
         btc_ret_30m=-0.0010,
         alt_ret_15m=-0.0012,
         alt_ret_30m=-0.0010,
-        position_age_bars=1,
+        position_age_bars=4,
         mfe_pct=0.001,
-        mae_pct=-0.0025,
+        mae_pct=-0.004,
         position_notional=20.0,
+        account_equity=100.0,
     )
 
     assert small["risk_score"] >= 2
     assert small["action"] == "CLOSE"
     assert small["small_notional_close"] is True
+    assert small["tiny_notional_skip"] is False
     assert large["action"] == "REDUCE_50"
+
+
+def test_dynamic_small_notional_close_threshold_uses_equity_floor() -> None:
+    scorer = BtcBetaRiskScorer(
+        BtcBetaRiskConfig(small_notional_close_threshold=1.0, small_notional_close_equity_pct=0.02)
+    )
+    _seed_corr(scorer, "ADAUSDT", aligned=True)
+
+    result = scorer.score(
+        symbol="ADAUSDT",
+        direction="long",
+        btc_ret_15m=-0.0005,
+        btc_ret_30m=-0.0010,
+        alt_ret_15m=-0.0012,
+        alt_ret_30m=-0.0010,
+        position_age_bars=4,
+        mfe_pct=0.001,
+        mae_pct=-0.004,
+        position_notional=1.5,
+        account_equity=100.0,
+    )
+
+    assert result["small_notional_close_threshold"] == pytest.approx(2.0)
+    assert result["action"] == "CLOSE"
+    assert result["small_notional_close"] is True
+
+
+def test_tiny_position_skips_real_close_instead_of_sending_dust_order() -> None:
+    scorer = BtcBetaRiskScorer(
+        BtcBetaRiskConfig(small_notional_close_threshold=5.0, tiny_notional_skip_threshold=1.0)
+    )
+    _seed_corr(scorer, "ADAUSDT", aligned=True)
+
+    result = scorer.score(
+        symbol="ADAUSDT",
+        direction="long",
+        btc_ret_15m=-0.0005,
+        btc_ret_30m=-0.0010,
+        alt_ret_15m=-0.0012,
+        alt_ret_30m=-0.0010,
+        position_age_bars=4,
+        mfe_pct=0.001,
+        mae_pct=-0.004,
+        position_notional=0.5,
+        account_equity=100.0,
+    )
+
+    assert result["risk_score"] >= 2
+    assert result["action"] == "SKIP_TINY_CLOSE"
+    assert result["small_notional_close"] is False
+    assert result["tiny_notional_skip"] is True
+    assert "tiny_notional_skip(0.50U)" in result["reason"]
 
 
 def test_high_corr_btc_alt_sync_close_requires_stacked_risk() -> None:
@@ -155,9 +234,9 @@ def test_high_corr_btc_alt_sync_close_requires_stacked_risk() -> None:
         btc_ret_30m=-0.0030,
         alt_ret_15m=-0.0014,
         alt_ret_30m=-0.0020,
-        position_age_bars=1,
+        position_age_bars=4,
         mfe_pct=0.0,
-        mae_pct=-0.003,
+        mae_pct=-0.004,
     )
 
     assert result["use_btc"] is True

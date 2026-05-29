@@ -55,7 +55,23 @@ class FundFlowRiskEngine:
         position_cfg = v2_cfg.get("position_management", {})
         if not isinstance(position_cfg, dict):
             position_cfg = {}
-        self.short_floor_max_lift_ratio = float(position_cfg.get("short_floor_max_lift_ratio", 5.0) or 5.0)
+        floor_cfg = fund_flow_cfg.get("final_signal_notional_floor", {})
+        if not isinstance(floor_cfg, dict):
+            floor_cfg = {}
+        self.final_signal_notional_floor_enabled = bool(floor_cfg.get("enabled", True))
+        self.final_signal_notional_floor_final_only = bool(floor_cfg.get("apply_to_final_only", True))
+        quadrant_cfg = fund_flow_cfg.get("quadrant_resonance", {})
+        if not isinstance(quadrant_cfg, dict):
+            quadrant_cfg = {}
+        quadrant_risk_cfg = quadrant_cfg.get("risk", {})
+        if not isinstance(quadrant_risk_cfg, dict):
+            quadrant_risk_cfg = {}
+        self.quadrant_min_entry_notional = float(
+            quadrant_risk_cfg.get("min_entry_notional_usdt", 12.0) or 12.0
+        )
+        self.quadrant_min_entry_margin = float(
+            quadrant_risk_cfg.get("min_entry_margin_usdt", 1.0) or 1.0
+        )
         self.max_open_portion = float(fund_flow_cfg.get("max_open_portion", 1.0))
         self.price_deviation_limit_percent = float(
             fund_flow_cfg.get("price_deviation_limit_percent", 1.0)
@@ -112,6 +128,17 @@ class FundFlowRiskEngine:
             return self.min_open_notional_major
         return self.min_open_notional_default
 
+    def _get_effective_min_notional(self, symbol: str, metadata: Optional[Dict[str, Any]] = None) -> float:
+        base = self._get_min_notional(symbol)
+        if isinstance(metadata, dict) and str(metadata.get("strategy_mode") or "").strip().lower() == "quadrant_resonance":
+            return max(base, self.quadrant_min_entry_notional)
+        return base
+
+    def _get_effective_min_margin(self, metadata: Optional[Dict[str, Any]] = None) -> float:
+        if isinstance(metadata, dict) and str(metadata.get("strategy_mode") or "").strip().lower() == "quadrant_resonance":
+            return max(0.0, self.quadrant_min_entry_margin)
+        return 0.0
+
     @staticmethod
     def _metadata_float(metadata: Optional[Dict[str, Any]], *keys: str) -> float:
         if not isinstance(metadata, dict):
@@ -125,12 +152,38 @@ class FundFlowRiskEngine:
                 return value
         return 0.0
 
+    @staticmethod
+    def _metadata_bool(metadata: Optional[Dict[str, Any]], key: str) -> bool:
+        if not isinstance(metadata, dict):
+            return False
+        value = metadata.get(key)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on", "final"}
+        return False
+
+    @classmethod
+    def _is_final_passed_signal(cls, metadata: Optional[Dict[str, Any]]) -> bool:
+        if not isinstance(metadata, dict):
+            return False
+        stage = str(metadata.get("stage") or metadata.get("reject_stage") or "").strip().lower()
+        is_final = stage == "final" or cls._metadata_bool(metadata, "is_final_signal")
+        if not is_final:
+            return False
+        score = cls._metadata_float(metadata, "signal_score", "total_score")
+        threshold = cls._metadata_float(metadata, "signal_score_threshold", "threshold")
+        return threshold > 0 and score + 1e-12 >= threshold
+
     def validate_target_portion(
         self,
         portion: Any,
         operation: Operation,
         symbol: str = "",
         account_equity: float = 0.0,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> Optional[float]:
         self._last_min_notional_meta = {}
         if operation == Operation.HOLD:
@@ -151,23 +204,55 @@ class FundFlowRiskEngine:
             )
         equity = float(account_equity or 0.0)
         if equity > 0:
-            notional = val * equity
-            min_notional = self._get_min_notional(symbol)
-            if notional < min_notional:
-                min_portion = min_notional / equity if equity > 0 else 0.0
+            leverage = max(1.0, self._metadata_float(metadata, "leverage", "leverage_cap"))
+            is_quadrant = isinstance(metadata, dict) and str(metadata.get("strategy_mode") or "").strip().lower() == "quadrant_resonance"
+            notional = val * equity * leverage if is_quadrant else val * equity
+            margin = val * equity
+            min_notional = self._get_effective_min_notional(symbol, metadata)
+            min_margin = self._get_effective_min_margin(metadata)
+            if notional < min_notional or margin < min_margin:
+                min_notional_portion = (
+                    min_notional / (equity * leverage)
+                    if is_quadrant and equity > 0 and leverage > 0
+                    else min_notional / equity if equity > 0 else 0.0
+                )
+                min_margin_portion = min_margin / equity if equity > 0 else 0.0
+                min_portion = max(min_notional_portion, min_margin_portion)
                 lift_ratio = (min_portion / val) if val > 0 else float("inf")
                 self._last_min_notional_meta = {
                     "target_portion": val,
                     "account_equity": equity,
                     "notional_usdt": notional,
+                    "margin_usdt": margin,
                     "min_notional_usdt": min_notional,
+                    "min_entry_margin_usdt": min_margin,
                     "min_executable_portion": min_portion,
                     "min_notional_lift_ratio": lift_ratio,
-                    "short_floor_max_lift_ratio": self.short_floor_max_lift_ratio,
                 }
-                if operation == Operation.SELL and lift_ratio <= self.short_floor_max_lift_ratio:
+                final_passed = self._is_final_passed_signal(metadata)
+                if (
+                    self.final_signal_notional_floor_enabled
+                    and final_passed
+                    and operation in (Operation.BUY, Operation.SELL)
+                ):
+                    gate_cap = 0.0
+                    if isinstance(metadata, dict) and bool(metadata.get("gate_cap_applied", False)):
+                        try:
+                            gate_cap = float(metadata.get("gate_cap_portion") or 0.0)
+                        except Exception:
+                            gate_cap = 0.0
+                    lifted_portion = min(min_portion, self.max_open_portion)
+                    if gate_cap > 0:
+                        lifted_portion = min(lifted_portion, gate_cap)
+                        self._last_min_notional_meta["gate_cap_applied"] = True
+                        self._last_min_notional_meta["gate_cap_portion"] = gate_cap
+                    self._last_min_notional_meta["final_signal_notional_floor_applied"] = True
+                    self._last_min_notional_meta["short_executable_floor_applied"] = operation == Operation.SELL
+                    return lifted_portion
+                if operation == Operation.SELL and not self.final_signal_notional_floor_final_only:
                     self._last_min_notional_meta["short_executable_floor_applied"] = True
                     return min_portion
+                self._last_min_notional_meta["final_signal_notional_floor_applied"] = False
                 self._last_min_notional_meta["short_executable_floor_applied"] = False
                 return None
         return val
@@ -308,6 +393,9 @@ class FundFlowRiskEngine:
         self.validate_symbol(decision.symbol, decision.operation, position)
         decision.leverage = self.clamp_leverage(decision.leverage)
         if decision.operation in (Operation.BUY, Operation.SELL):
+            metadata = dict(decision.metadata or {})
+            metadata.setdefault("leverage", decision.leverage)
+            decision.metadata = metadata
             account_equity = self._metadata_float(
                 decision.metadata,
                 "account_equity",
@@ -319,6 +407,7 @@ class FundFlowRiskEngine:
                 decision.operation,
                 symbol=decision.symbol,
                 account_equity=account_equity,
+                metadata=decision.metadata,
             )
             if validated_portion is None:
                 metadata = dict(decision.metadata or {})
@@ -359,6 +448,7 @@ class FundFlowRiskEngine:
                 decision.operation,
                 symbol=decision.symbol,
                 account_equity=account_equity,
+                metadata=decision.metadata,
             )
             if revalidated_portion is None:
                 metadata = dict(decision.metadata or {})

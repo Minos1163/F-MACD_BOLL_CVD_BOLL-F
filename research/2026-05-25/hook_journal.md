@@ -1,0 +1,23 @@
+# Hook Journal 2026-05-25
+
+- 2026-05-25T11:10:34 summary=output/backtest/20260523_1700_slow_bull_ranking_bollcap0015_final_post_mortem_analysis_summary.json return=0.00% pf=0.00 dd=0.00 trades=0
+- 2026-05-25T11:10:48 summary=output/backtest/20260523_1700_slow_bull_ranking_bollcap0015_final_post_mortem_analysis_summary.json return=0.00% pf=0.00 dd=0.00 trades=0
+- 2026-05-25T11:10:57 summary=output/backtest/20260523_1700_slow_bull_ranking_bollcap0015_final_post_mortem_analysis_summary.json return=0.00% pf=0.00 dd=0.00 trades=0
+- 2026-05-25T11:11:10 summary=output/backtest/20260523_1700_slow_bull_ranking_bollcap0015_final_post_mortem_analysis_summary.json return=0.00% pf=0.00 dd=0.00 trades=0
+- 2026-05-25T11:11:28 summary=output/backtest/20260523_1700_slow_bull_ranking_bollcap0015_final_post_mortem_analysis_summary.json return=0.00% pf=0.00 dd=0.00 trades=0
+- 2026-05-25T11:11:28 summary=output/backtest/20260523_1700_slow_bull_ranking_bollcap0015_final_post_mortem_analysis_summary.json return=0.00% pf=0.00 dd=0.00 trades=0
+- 2026-05-25T11:11:28 summary=output/backtest/20260523_1700_slow_bull_ranking_bollcap0015_final_post_mortem_analysis_summary.json return=0.00% pf=0.00 dd=0.00 trades=0
+- 2026-05-25T11:12:06 summary=output/backtest/20260523_1700_slow_bull_ranking_bollcap0015_final_post_mortem_analysis_summary.json return=0.00% pf=0.00 dd=0.00 trades=0
+- 2026-05-25T16:56:44 summary=output/backtest/20260523_1700_slow_bull_ranking_bollcap0015_final_post_mortem_analysis_summary.json return=0.00% pf=0.00 dd=0.00 trades=0
+- 2026-05-25T16:56:55 summary=output/backtest/20260523_1700_slow_bull_ranking_bollcap0015_final_post_mortem_analysis_summary.json return=0.00% pf=0.00 dd=0.00 trades=0
+- 2026-05-25T16:57:16 summary=output/backtest/20260523_1700_slow_bull_ranking_bollcap0015_final_post_mortem_analysis_summary.json return=0.00% pf=0.00 dd=0.00 trades=0
+- 2026-05-25T16:57:50 summary=output/backtest/20260523_1700_slow_bull_ranking_bollcap0015_final_post_mortem_analysis_summary.json return=0.00% pf=0.00 dd=0.00 trades=0
+- 2026-05-25T16:58:18 summary=output/backtest/20260523_1700_slow_bull_ranking_bollcap0015_final_post_mortem_analysis_summary.json return=0.00% pf=0.00 dd=0.00 trades=0
+- 2026-05-25T16:58:18 summary=output/backtest/20260523_1700_slow_bull_ranking_bollcap0015_final_post_mortem_analysis_summary.json return=0.00% pf=0.00 dd=0.00 trades=0
+- 2026-05-25T21:58:55 summary=output/backtest/20260523_1700_slow_bull_ranking_bollcap0015_final_post_mortem_analysis_summary.json return=0.00% pf=0.00 dd=0.00 trades=0
+- 2026-05-25T21:59:06 summary=output/backtest/20260523_1700_slow_bull_ranking_bollcap0015_final_post_mortem_analysis_summary.json return=0.00% pf=0.00 dd=0.00 trades=0
+- 2026-05-25T21:59:23 summary=output/backtest/20260523_1700_slow_bull_ranking_bollcap0015_final_post_mortem_analysis_summary.json return=0.00% pf=0.00 dd=0.00 trades=0
+- 2026-05-25T21:59:23 summary=output/backtest/20260523_1700_slow_bull_ranking_bollcap0015_final_post_mortem_analysis_summary.json return=0.00% pf=0.00 dd=0.00 trades=0
+- 2026-05-25T21:59:36 summary=output/backtest/20260523_1700_slow_bull_ranking_bollcap0015_final_post_mortem_analysis_summary.json return=0.00% pf=0.00 dd=0.00 trades=0
+- 2026-05-25T22:00:30 summary=output/backtest/20260523_1700_slow_bull_ranking_bollcap0015_final_post_mortem_analysis_summary.json return=0.00% pf=0.00 dd=0.00 trades=0
+- 2026-05-25T22:00:33 summary=output/backtest/20260523_1700_slow_bull_ranking_bollcap0015_final_post_mortem_analysis_summary.json return=0.00% pf=0.00 dd=0.00 trades=0
