@@ -293,6 +293,799 @@ def test_high_score_missing_15m_override_still_requires_entry_threshold() -> Non
     assert result.resonance_score == pytest.approx(0.9)
 
 
+def test_quadrant_metadata_includes_closed_bar_direction_quality_fields() -> None:
+    engine = _engine(entry={"standard_threshold": 0.85})
+    result = engine.analyze(
+        symbol="HYPEUSDT",
+        price=100.0,
+        timeframes=_timeframes(
+            tf1h=_tf(macd_hist_series=[0.04, 0.03, 0.02], rsi=69),
+            tf15m=_tf(close=100, open=100.2, high=100.25, low=99.95, ema20=99.5, macd_hist_series=[0.03, 0.02, 0.01], rsi=72),
+        ),
+        portfolio={"equity": 100.0},
+    )
+
+    md = result.metadata
+    assert md["entry_rsi_15m"] == pytest.approx(72.0)
+    assert md["entry_rsi_1h"] == pytest.approx(69.0)
+    assert md["macd_hist_15m_last3"] == [0.03, 0.02, 0.01]
+    assert md["macd_hist_1h_last3"] == [0.04, 0.03, 0.02]
+    assert md["macd_hist_15m_strengthening"] is False
+    assert md["macd_hist_1h_strengthening"] is False
+    assert md["entry_15m_detail"]["near_ema"] is True
+    assert md["entry_15m_detail"]["hist_cross"] is False
+    assert md["entry_15m_detail"]["direction_candle"] is False
+
+
+def test_15m_entry_quality_scores_partial_setup_without_opening_trade() -> None:
+    engine = _engine(entry={"standard_threshold": 0.85})
+    result = engine.analyze(
+        symbol="JSTUSDT",
+        price=100.0,
+        timeframes=_timeframes(
+            tf1h=_tf(macd_hist_series=[0.01, 0.02, 0.03], rsi=55),
+            tf15m=_tf(
+                close=100.0,
+                open=100.2,
+                high=100.25,
+                low=99.95,
+                ema20=99.7,
+                atr=1.0,
+                macd_hist_series=[0.01, 0.02, 0.03],
+                rsi=55,
+            ),
+        ),
+        portfolio={"equity": 100.0},
+    )
+
+    detail = result.metadata["entry_15m_detail"]
+    assert detail["ok"] is False
+    assert result.metadata["entry_15m_quality_score"] == pytest.approx(0.55)
+    assert result.metadata["entry_15m_quality_bucket"] == "watch"
+    assert result.metadata["entry_15m_missing_conditions"] == ["hist_cross", "direction_candle", "pin_bar"]
+
+
+def test_15m_entry_quality_marks_open_bucket_for_existing_valid_pattern() -> None:
+    engine = _engine(entry={"standard_threshold": 0.85})
+    result = engine.analyze(
+        symbol="ICPUSDT",
+        price=100.0,
+        timeframes=_timeframes(
+            tf1h=_tf(macd_hist_series=[0.01, 0.02, 0.03], rsi=55),
+            tf15m=_tf(
+                close=100.0,
+                open=99.8,
+                high=100.25,
+                low=99.75,
+                ema20=99.7,
+                atr=1.0,
+                macd_hist_series=[-0.01, -0.005, 0.03],
+                rsi=55,
+            ),
+        ),
+        portfolio={"equity": 100.0},
+    )
+
+    assert result.metadata["entry_15m_detail"]["ok"] is True
+    assert result.metadata["entry_15m_quality_score"] >= 0.75
+    assert result.metadata["entry_15m_quality_bucket"] == "open"
+
+
+def test_missing_15m_high_partial_quality_emits_watchlist_intent_without_entry() -> None:
+    engine = _engine(
+        entry={
+            "standard_threshold": 0.85,
+            "require_15m_entry_pattern": True,
+            "high_score_15m_override": True,
+            "high_score_15m_override_threshold": 0.95,
+            "watchlist_intent_enabled": True,
+            "watchlist_intent_dry_run": True,
+            "watchlist_min_signal_score": 0.75,
+        }
+    )
+    result = engine.analyze(
+        symbol="JSTUSDT",
+        price=100.0,
+        timeframes=_timeframes(
+            tf1h=_tf(macd_hist_series=[0.01, 0.02, 0.03], rsi=55),
+            tf15m=_tf(
+                close=100.0,
+                open=100.2,
+                high=100.25,
+                low=99.95,
+                ema20=99.7,
+                atr=1.0,
+                macd_hist_series=[0.01, 0.02, 0.03],
+                rsi=55,
+            ),
+        ),
+        portfolio={"equity": 100.0},
+    )
+
+    assert result.allowed is False
+    assert result.reason == "missing_15m_entry_pattern"
+    assert result.metadata["watchlist_intent"]["enabled"] is True
+    assert result.metadata["watchlist_intent"]["dry_run"] is True
+    assert result.metadata["watchlist_intent"]["side"] == "long"
+    assert result.metadata["watchlist_intent"]["candidate_reason"] == "missing_15m_entry_pattern"
+    assert "hist_cross" in result.metadata["watchlist_intent"]["missing_conditions"]
+
+
+def test_entry_15m_quality_live_mode_allows_open_bucket_without_legacy_pattern() -> None:
+    engine = _engine(
+        entry={
+            "standard_threshold": 0.85,
+            "require_15m_entry_pattern": True,
+            "entry_15m_quality_mode": "live",
+            "entry_15m_quality_open_min": 0.55,
+            "entry_15m_quality_watch_min": 0.50,
+        }
+    )
+
+    result = engine.analyze(
+        symbol="JSTUSDT",
+        price=100.0,
+        timeframes=_timeframes(
+            tf1h=_tf(macd_hist_series=[0.01, 0.02, 0.03], rsi=55),
+            tf15m=_tf(
+                close=100.0,
+                open=100.2,
+                high=100.25,
+                low=99.9,
+                ema20=99.7,
+                atr=1.0,
+                macd_hist_series=[0.01, 0.02, 0.03],
+                rsi=55,
+            ),
+        ),
+        portfolio={"equity": 100.0},
+    )
+
+    assert result.metadata["entry_15m_detail"]["ok"] is False
+    assert result.metadata["entry_15m_quality_score"] == pytest.approx(0.55)
+    assert result.metadata["entry_15m_quality_bucket"] == "open"
+    assert result.allowed is True
+    assert result.reason == "quadrant_resonance_pass"
+    assert result.metadata["entry_15m_quality_live_pass"] is True
+
+
+def test_entry_15m_quality_live_mode_watch_bucket_adds_watchlist_without_entry() -> None:
+    engine = _engine(
+        entry={
+            "standard_threshold": 0.85,
+            "require_15m_entry_pattern": True,
+            "entry_15m_quality_mode": "live",
+            "entry_15m_quality_open_min": 0.70,
+            "entry_15m_quality_watch_min": 0.50,
+            "watchlist_intent_enabled": True,
+            "watchlist_intent_dry_run": False,
+        }
+    )
+
+    result = engine.analyze(
+        symbol="JSTUSDT",
+        price=100.0,
+        timeframes=_timeframes(
+            tf1h=_tf(macd_hist_series=[0.01, 0.02, 0.03], rsi=55),
+            tf15m=_tf(
+                close=100.0,
+                open=100.2,
+                high=100.25,
+                low=99.95,
+                ema20=99.7,
+                atr=1.0,
+                macd_hist_series=[0.01, 0.02, 0.03],
+                rsi=55,
+            ),
+        ),
+        portfolio={"equity": 100.0},
+    )
+
+    assert result.allowed is False
+    assert result.reason == "missing_15m_entry_pattern"
+    assert result.metadata["entry_15m_quality_score"] == pytest.approx(0.55)
+    assert result.metadata["entry_15m_quality_bucket"] == "watch"
+    assert result.metadata["watchlist_intent"]["dry_run"] is False
+
+
+def test_entry_15m_quality_live_mode_hold_bucket_stays_hold() -> None:
+    engine = _engine(
+        entry={
+            "standard_threshold": 0.85,
+            "require_15m_entry_pattern": True,
+            "entry_15m_quality_mode": "live",
+            "entry_15m_quality_open_min": 0.70,
+            "entry_15m_quality_watch_min": 0.50,
+            "watchlist_intent_enabled": True,
+            "watchlist_intent_dry_run": False,
+        }
+    )
+
+    result = engine.analyze(
+        symbol="JSTUSDT",
+        price=100.0,
+        timeframes=_timeframes(
+            tf1h=_tf(macd_hist_series=[0.01, 0.02, 0.03], rsi=55),
+            tf15m=_tf(
+                close=103.0,
+                open=103.2,
+                high=103.25,
+                low=102.95,
+                ema20=99.7,
+                atr=1.0,
+                macd_hist_series=[0.03, 0.02, 0.01],
+                rsi=55,
+            ),
+        ),
+        portfolio={"equity": 100.0},
+    )
+
+    assert result.allowed is False
+    assert result.reason == "missing_15m_entry_pattern"
+    assert result.metadata["entry_15m_quality_score"] < 0.50
+    assert "watchlist_intent" not in result.metadata
+
+
+def test_probe_veto_reversible_breadth_emits_watchlist_intent() -> None:
+    engine = _engine(
+        entry={
+            "standard_threshold": 0.85,
+            "require_15m_entry_pattern": True,
+            "high_score_15m_override": True,
+            "high_score_15m_override_threshold": 0.85,
+            "probe_no_15m_veto_enabled": True,
+            "probe_no_15m_breadth_veto_enabled": True,
+            "watchlist_intent_enabled": True,
+            "watchlist_intent_dry_run": True,
+            "watchlist_include_probe_veto": True,
+        }
+    )
+    result = engine.analyze(
+        symbol="JSTUSDT",
+        price=100.0,
+        timeframes=_timeframes(
+            tf1h=_tf(macd_hist_series=[0.01, 0.02, 0.03], rsi=55),
+            tf15m=_tf(
+                close=100.0,
+                open=100.2,
+                high=100.25,
+                low=99.95,
+                ema20=99.7,
+                atr=1.0,
+                macd_hist_series=[0.01, 0.02, 0.03],
+                rsi=55,
+            ),
+        ),
+        portfolio={"equity": 100.0},
+        market_context={"market_breadth": {"confirm_count": 0, "invalid_count": 2}},
+    )
+
+    assert result.allowed is False
+    assert result.reason == "probe_no_15m_direction_veto"
+    assert result.metadata["watchlist_intent"]["candidate_reason"] == "reversible_probe_veto"
+    assert result.metadata["watchlist_intent"]["ttl_bars"] == 2
+
+
+def test_quadrant_defense_can_emit_recovering_state_metadata_without_entry() -> None:
+    engine = _engine(entry={"quadrant_4h_three_state_enabled": True})
+    result = engine.analyze(
+        symbol="HYPEUSDT",
+        price=100.0,
+        timeframes=_timeframes(
+            q4h=_tf(
+                ema20=105.0,
+                ema50=100.0,
+                ema200=90.0,
+                macd_hist_series=[-0.03, -0.02, -0.01],
+            ),
+            tf1h=_tf(macd_hist_series=[0.01, 0.02, 0.03]),
+            tf15m=_tf(macd_hist_series=[0.01, 0.02, 0.03]),
+        ),
+        portfolio={"equity": 100.0},
+    )
+
+    assert result.allowed is False
+    assert result.reason == "quadrant_defense_no_entry"
+    assert result.metadata["quadrant_state"] == "recovering"
+    assert result.metadata["quadrant_recovering_direction"] == "long"
+
+
+def test_4h_recovering_state_can_enter_half_position_when_enabled() -> None:
+    engine = _engine(
+        entry={
+            "quadrant_4h_three_state_enabled": True,
+            "quadrant_4h_three_state_act_on_recovering": True,
+            "recovering_state_score_threshold": 0.80,
+            "recovering_state_portion_multiplier": 0.50,
+            "entry_15m_quality_mode": "live",
+            "entry_15m_quality_open_min": 0.70,
+        }
+    )
+
+    recovering = engine.analyze(
+        symbol="HYPEUSDT",
+        price=100.0,
+        timeframes=_timeframes(
+            q4h=_tf(ema20=105.0, ema50=100.0, ema200=90.0, macd_hist_series=[-0.03, -0.02, -0.01]),
+            tf1h=_tf(macd_hist_series=[0.01, 0.02, 0.03], rsi=55),
+            tf15m=_tf(close=100.0, open=100.2, high=101.0, low=99.6, ema20=99.7, atr=1.0, macd_hist_series=[-0.01, -0.005, 0.03], rsi=55),
+        ),
+        portfolio={"equity": 100.0},
+    )
+    standard = _engine(entry={"entry_15m_quality_mode": "live", "entry_15m_quality_open_min": 0.70}).analyze(
+        symbol="HYPEUSDT",
+        price=100.0,
+        timeframes=_timeframes(
+            q4h=_tf(ema20=105.0, ema50=100.0, ema200=90.0, macd_hist_series=[0.01, 0.02, 0.03]),
+            tf1h=_tf(macd_hist_series=[0.01, 0.02, 0.03], rsi=55),
+            tf15m=_tf(close=100.0, open=100.2, high=101.0, low=99.6, ema20=99.7, atr=1.0, macd_hist_series=[-0.01, -0.005, 0.03], rsi=55),
+        ),
+        portfolio={"equity": 100.0},
+    )
+
+    assert recovering.allowed is True
+    assert recovering.reason == "quadrant_resonance_recovering_reduced"
+    assert recovering.metadata["quadrant_state"] == "recovering"
+    assert recovering.metadata["allowed_reason"] == "quadrant_recovering_reduced"
+    assert recovering.target_portion == pytest.approx(standard.target_portion * 0.50)
+
+
+def test_4h_recovering_below_threshold_adds_watchlist_and_defense_still_holds() -> None:
+    engine = _engine(
+        entry={
+            "quadrant_4h_three_state_enabled": True,
+            "quadrant_4h_three_state_act_on_recovering": True,
+            "recovering_state_score_threshold": 0.80,
+            "watchlist_intent_enabled": True,
+            "watchlist_intent_dry_run": False,
+            "watchlist_min_signal_score": 0.50,
+        }
+    )
+
+    recovering_low = engine.analyze(
+        symbol="HYPEUSDT",
+        price=100.0,
+        timeframes=_timeframes(
+            q4h=_tf(ema20=105.0, ema50=100.0, ema200=90.0, macd_hist_series=[-0.03, -0.02, -0.01]),
+            tf1h=_tf(close=99.0, ema20=100.0, ema50=101.0, macd_hist_series=[0.03, 0.02, 0.01], rsi=55),
+            tf15m=_tf(close=100.0, open=100.2, high=100.25, low=99.95, ema20=99.7, atr=1.0, macd_hist_series=[0.03, 0.02, 0.01], rsi=55),
+        ),
+        portfolio={"equity": 100.0},
+    )
+    defense = engine.analyze(
+        symbol="HYPEUSDT",
+        price=100.0,
+        timeframes=_timeframes(q4h=_tf(ema20=100.0, ema50=105.0, ema200=90.0)),
+        portfolio={"equity": 100.0},
+    )
+
+    assert recovering_low.allowed is False
+    assert recovering_low.reason == "quadrant_recovering_watchlist"
+    assert recovering_low.metadata["quadrant_state"] == "recovering"
+    assert recovering_low.metadata["watchlist_intent"]["candidate_reason"] == "quadrant_recovering_watchlist"
+    assert defense.allowed is False
+    assert defense.reason == "quadrant_defense_no_entry"
+    assert defense.metadata["quadrant_state"] == "defense"
+
+
+def _bad_hype_like_context() -> dict:
+    return {
+        "market_breadth": {
+            "confirm_count": 0,
+            "invalid_count": 2,
+            "mode_a": "FAIL",
+            "mode_b": "FAIL",
+            "mode_c": "FAIL",
+        },
+        "flow": {
+            "cvd": -0.0665,
+            "oi_delta": -0.0020,
+            "imbalance": -0.2635,
+            "liq_norm": -0.1919,
+        },
+    }
+
+
+def test_high_score_missing_15m_probe_blocks_bad_breadth_and_bearish_flow() -> None:
+    engine = _engine(
+        entry={
+            "standard_threshold": 0.85,
+            "require_15m_entry_pattern": True,
+            "high_score_15m_override": True,
+            "high_score_15m_override_threshold": 0.90,
+            "probe_no_15m_veto_enabled": True,
+            "probe_no_15m_breadth_veto_enabled": True,
+            "probe_no_15m_flow_veto_enabled": True,
+        }
+    )
+    result = engine.analyze(
+        symbol="HYPEUSDT",
+        price=100.0,
+        timeframes=_timeframes(
+            tf1h=_tf(macd_hist_series=[0.01, 0.02, 0.03], rsi=69),
+            tf15m=_tf(close=100, open=100.2, high=100.25, low=99.95, ema20=99.5, macd_hist_series=[0.03, 0.02, 0.01], rsi=55),
+        ),
+        portfolio={"equity": 100.0},
+        market_context=_bad_hype_like_context(),
+    )
+
+    assert result.allowed is False
+    assert result.reason == "probe_no_15m_direction_veto"
+    assert result.metadata["blocked_reason"] == "probe_no_15m_direction_veto"
+    assert "breadth_zero_confirm_invalid_2" in result.metadata["probe_no_15m_veto_reasons"]
+    assert "long_flow_all_bearish" in result.metadata["probe_no_15m_veto_reasons"]
+
+
+def test_high_score_missing_15m_probe_still_allows_confirmed_flow_context() -> None:
+    engine = _engine(
+        entry={
+            "standard_threshold": 0.85,
+            "require_15m_entry_pattern": True,
+            "high_score_15m_override": True,
+            "high_score_15m_override_threshold": 0.90,
+            "probe_no_15m_veto_enabled": True,
+            "probe_no_15m_breadth_veto_enabled": True,
+            "probe_no_15m_flow_veto_enabled": True,
+        }
+    )
+    result = engine.analyze(
+        symbol="ICPUSDT",
+        price=100.0,
+        timeframes=_timeframes(
+            tf1h=_tf(macd_hist_series=[0.01, 0.02, 0.03], rsi=55),
+            tf15m=_tf(close=100, open=100.2, high=100.25, low=99.95, ema20=99.5, macd_hist_series=[0.01, 0.02], rsi=55),
+        ),
+        portfolio={"equity": 100.0},
+        market_context={
+            "market_breadth": {"confirm_count": 2, "invalid_count": 0},
+            "flow": {"cvd": 0.03, "oi_delta": 0.001, "imbalance": 0.05, "liq_norm": 0.0},
+        },
+    )
+
+    assert result.allowed is True
+    assert result.reason == "quadrant_resonance_probe_no_15m"
+    assert result.metadata["probe_no_15m_veto_reasons"] == []
+
+
+def test_probe_min_15m_resonance_blocks_score_only_override_when_enabled() -> None:
+    engine = _engine(
+        entry={
+            "standard_threshold": 0.75,
+            "require_15m_entry_pattern": True,
+            "high_score_15m_override": True,
+            "high_score_15m_override_threshold": 0.75,
+            "probe_no_15m_veto_enabled": True,
+            "probe_min_15m_resonance_enabled": True,
+        }
+    )
+    result = engine.analyze(
+        symbol="HYPEUSDT",
+        price=100.0,
+        timeframes=_timeframes(
+            tf1h=_tf(macd_hist_series=[0.03, 0.02, 0.01], rsi=55),
+            tf15m=_tf(close=100, open=100.2, high=100.25, low=99.95, ema20=99.5, macd_hist_series=[0.03, 0.02, 0.01], rsi=55),
+        ),
+        portfolio={"equity": 100.0},
+    )
+
+    assert result.allowed is False
+    assert result.reason == "probe_no_15m_direction_veto"
+    assert "probe_veto_no_15m_resonance" in result.metadata["probe_no_15m_veto_reasons"]
+
+
+def test_probe_min_15m_resonance_allows_15m_strengthening_without_full_entry_pattern() -> None:
+    engine = _engine(
+        entry={
+            "standard_threshold": 0.85,
+            "require_15m_entry_pattern": True,
+            "high_score_15m_override": True,
+            "high_score_15m_override_threshold": 0.85,
+            "probe_no_15m_veto_enabled": True,
+            "probe_min_15m_resonance_enabled": True,
+        }
+    )
+    result = engine.analyze(
+        symbol="HYPEUSDT",
+        price=100.0,
+        timeframes=_timeframes(
+            tf1h=_tf(macd_hist_series=[0.01, 0.02, 0.03], rsi=55),
+            tf15m=_tf(close=100, open=100.2, high=100.25, low=99.95, ema20=99.5, macd_hist_series=[0.01, 0.02, 0.03], rsi=55),
+        ),
+        portfolio={"equity": 100.0},
+    )
+
+    assert result.allowed is True
+    assert result.reason == "quadrant_resonance_probe_no_15m"
+    assert result.metadata["entry_15m_detail"]["ok"] is False
+    assert result.metadata["probe_no_15m_veto_reasons"] == []
+
+
+def test_probe_direction_aware_breadth_blocks_short_against_strong_market_rise() -> None:
+    engine = _engine(
+        entry={
+            "standard_threshold": 0.85,
+            "require_15m_entry_pattern": True,
+            "high_score_15m_override": True,
+            "high_score_15m_override_threshold": 0.85,
+            "probe_no_15m_veto_enabled": True,
+            "probe_direction_breadth_veto_enabled": True,
+        }
+    )
+    result = engine.analyze(
+        symbol="VETUSDT",
+        price=100.0,
+        timeframes=_timeframes(
+            q4h=_tf(ema20=90, ema50=100, ema200=105, macd_hist_series=[-0.01, -0.02, -0.03]),
+            tf1h=_tf(close=100, ema20=101, ema50=105, ema200=110, macd_hist_series=[-0.01, -0.02, -0.03], rsi=50),
+            tf15m=_tf(close=100, open=99.8, high=100.25, low=99.95, ema20=100.5, macd_hist_series=[-0.03, -0.02, -0.01], rsi=50),
+        ),
+        portfolio={"equity": 100.0},
+        market_context={
+            "market_breadth": {
+                "confirm_count": 1,
+                "invalid_count": 0,
+                "btc_ret_30m": 0.01437,
+                "btc_ret_60m": 0.00934,
+                "alt_median_60m": 0.01204,
+            }
+        },
+    )
+
+    assert result.allowed is False
+    assert result.reason == "probe_no_15m_direction_veto"
+    assert any(reason.startswith("probe_veto_short_against_breadth") for reason in result.metadata["probe_no_15m_veto_reasons"])
+
+
+def test_probe_zero_confirm_invalid_threshold_is_configurable() -> None:
+    engine = _engine(
+        entry={
+            "standard_threshold": 0.85,
+            "require_15m_entry_pattern": True,
+            "high_score_15m_override": True,
+            "high_score_15m_override_threshold": 0.85,
+            "probe_no_15m_veto_enabled": True,
+            "probe_no_15m_breadth_veto_enabled": True,
+            "probe_breadth_zero_confirm_invalid_min": 1,
+        }
+    )
+    result = engine.analyze(
+        symbol="SOLUSDT",
+        price=100.0,
+        timeframes=_timeframes(
+            tf1h=_tf(macd_hist_series=[0.01, 0.02, 0.03], rsi=55),
+            tf15m=_tf(close=100, open=100.2, high=100.25, low=99.95, ema20=99.5, macd_hist_series=[0.01, 0.02], rsi=55),
+        ),
+        portfolio={"equity": 100.0},
+        market_context={"market_breadth": {"confirm_count": 0, "invalid_count": 1}},
+    )
+
+    assert result.allowed is False
+    assert result.reason == "probe_no_15m_direction_veto"
+    assert "breadth_zero_confirm_invalid_1" in result.metadata["probe_no_15m_veto_reasons"]
+
+
+def test_probe_resonance_and_flow_alignment_scores_can_veto_when_enabled() -> None:
+    engine = _engine(
+        entry={
+            "standard_threshold": 0.75,
+            "require_15m_entry_pattern": True,
+            "high_score_15m_override": True,
+            "high_score_15m_override_threshold": 0.75,
+            "probe_no_15m_veto_enabled": True,
+            "probe_no_15m_flow_veto_enabled": False,
+            "probe_resonance_score_enabled": True,
+            "probe_resonance_min_threshold": 0.55,
+            "probe_flow_alignment_score_enabled": True,
+            "probe_min_flow_alignment": -0.20,
+        }
+    )
+    result = engine.analyze(
+        symbol="HYPEUSDT",
+        price=100.0,
+        timeframes=_timeframes(
+            tf1h=_tf(macd_hist_series=[0.03, 0.02, 0.01], rsi=55),
+            tf15m=_tf(close=100, open=100.2, high=100.25, low=99.95, ema20=99.5, macd_hist_series=[0.03, 0.02, 0.01], rsi=55),
+        ),
+        portfolio={"equity": 100.0},
+        market_context=_bad_hype_like_context(),
+    )
+
+    assert result.allowed is False
+    assert result.reason == "probe_no_15m_direction_veto"
+    assert result.metadata["probe_resonance_score"] < 0.55
+    assert result.metadata["probe_flow_alignment_score"] < -0.20
+    assert "probe_veto_low_resonance_score" in result.metadata["probe_no_15m_veto_reasons"]
+    assert "probe_veto_flow_misaligned" in result.metadata["probe_no_15m_veto_reasons"]
+
+
+def test_probe_veto_graded_breadth_zero_confirm_opens_half_probe() -> None:
+    engine = _engine(
+        entry={
+            "standard_threshold": 0.85,
+            "require_15m_entry_pattern": True,
+            "high_score_15m_override": True,
+            "high_score_15m_override_threshold": 0.85,
+            "high_score_probe_portion": 0.042,
+            "probe_no_15m_veto_enabled": True,
+            "probe_no_15m_breadth_veto_enabled": True,
+            "probe_veto_graded_enabled": True,
+            "probe_veto_breadth_reduced_multiplier": 0.50,
+        }
+    )
+
+    result = engine.analyze(
+        symbol="JSTUSDT",
+        price=100.0,
+        timeframes=_timeframes(
+            tf1h=_tf(macd_hist_series=[0.01, 0.02, 0.03], rsi=55),
+            tf15m=_tf(close=100.0, open=100.2, high=100.25, low=99.95, ema20=99.7, atr=1.0, macd_hist_series=[0.01, 0.02, 0.03], rsi=55),
+        ),
+        portfolio={"equity": 100.0},
+        market_context={"market_breadth": {"confirm_count": 0, "invalid_count": 2}},
+    )
+
+    assert result.allowed is True
+    assert result.reason == "quadrant_resonance_probe_no_15m_reduced_veto"
+    assert result.target_portion == pytest.approx(0.021)
+    assert result.metadata["probe_veto_grade"]["action"] == "open_reduced"
+    assert result.metadata["probe_veto_grade"]["portion_multiplier"] == pytest.approx(0.50)
+
+
+def test_probe_veto_graded_direction_against_under_hard_threshold_opens_quarter_probe() -> None:
+    engine = _engine(
+        entry={
+            "standard_threshold": 0.85,
+            "require_15m_entry_pattern": True,
+            "high_score_15m_override": True,
+            "high_score_15m_override_threshold": 0.85,
+            "high_score_probe_portion": 0.042,
+            "probe_no_15m_veto_enabled": True,
+            "probe_direction_breadth_veto_enabled": True,
+            "probe_veto_graded_enabled": True,
+            "probe_veto_direction_reduced_multiplier": 0.25,
+            "probe_veto_hard_reject_btc_against_pct": 0.008,
+        }
+    )
+
+    result = engine.analyze(
+        symbol="VETUSDT",
+        price=100.0,
+        timeframes=_timeframes(
+            q4h=_tf(ema20=90, ema50=100, ema200=105, macd_hist_series=[-0.01, -0.02, -0.03]),
+            tf1h=_tf(close=100, ema20=101, ema50=105, ema200=110, macd_hist_series=[-0.01, -0.02, -0.03], rsi=50),
+            tf15m=_tf(close=100, open=99.8, high=100.25, low=99.95, ema20=100.5, macd_hist_series=[-0.03, -0.02, -0.01], rsi=50),
+        ),
+        portfolio={"equity": 100.0},
+        market_context={"market_breadth": {"confirm_count": 1, "invalid_count": 0, "btc_ret_30m": 0.006}},
+    )
+
+    assert result.allowed is True
+    assert result.reason == "quadrant_resonance_probe_no_15m_reduced_veto"
+    assert result.target_portion == pytest.approx(0.0105)
+    assert result.metadata["probe_veto_grade"]["portion_multiplier"] == pytest.approx(0.25)
+
+
+def test_probe_veto_graded_direction_against_hard_threshold_rejects() -> None:
+    engine = _engine(
+        entry={
+            "standard_threshold": 0.85,
+            "require_15m_entry_pattern": True,
+            "high_score_15m_override": True,
+            "high_score_15m_override_threshold": 0.85,
+            "probe_no_15m_veto_enabled": True,
+            "probe_direction_breadth_veto_enabled": True,
+            "probe_veto_graded_enabled": True,
+            "probe_veto_hard_reject_btc_against_pct": 0.008,
+        }
+    )
+
+    result = engine.analyze(
+        symbol="VETUSDT",
+        price=100.0,
+        timeframes=_timeframes(
+            q4h=_tf(ema20=90, ema50=100, ema200=105, macd_hist_series=[-0.01, -0.02, -0.03]),
+            tf1h=_tf(close=100, ema20=101, ema50=105, ema200=110, macd_hist_series=[-0.01, -0.02, -0.03], rsi=50),
+            tf15m=_tf(close=100, open=99.8, high=100.25, low=99.95, ema20=100.5, macd_hist_series=[-0.03, -0.02, -0.01], rsi=50),
+        ),
+        portfolio={"equity": 100.0},
+        market_context={"market_breadth": {"confirm_count": 1, "invalid_count": 0, "btc_ret_30m": 0.0085}},
+    )
+
+    assert result.allowed is False
+    assert result.reason == "probe_no_15m_direction_veto"
+    assert result.metadata["probe_veto_grade"]["action"] == "reject"
+
+
+def test_probe_veto_graded_no_15m_resonance_rejects_when_15m_and_1h_not_strengthening() -> None:
+    engine = _engine(
+        entry={
+            "standard_threshold": 0.75,
+            "require_15m_entry_pattern": True,
+            "high_score_15m_override": True,
+            "high_score_15m_override_threshold": 0.75,
+            "probe_no_15m_veto_enabled": True,
+            "probe_min_15m_resonance_enabled": True,
+            "probe_veto_graded_enabled": True,
+        }
+    )
+
+    result = engine.analyze(
+        symbol="HYPEUSDT",
+        price=100.0,
+        timeframes=_timeframes(
+            tf1h=_tf(macd_hist_series=[0.03, 0.02, 0.01], rsi=55),
+            tf15m=_tf(close=100, open=100.2, high=100.25, low=99.95, ema20=99.5, macd_hist_series=[0.03, 0.02, 0.01], rsi=55),
+        ),
+        portfolio={"equity": 100.0},
+    )
+
+    assert result.allowed is False
+    assert result.reason == "probe_no_15m_direction_veto"
+    assert result.metadata["probe_veto_grade"]["action"] == "reject"
+    assert "probe_veto_no_15m_resonance" in result.metadata["probe_no_15m_veto_reasons"]
+
+
+def test_probe_veto_graded_flow_misaligned_above_hard_threshold_opens_quarter_probe() -> None:
+    engine = _engine(
+        entry={
+            "standard_threshold": 0.85,
+            "require_15m_entry_pattern": True,
+            "high_score_15m_override": True,
+            "high_score_15m_override_threshold": 0.85,
+            "high_score_probe_portion": 0.042,
+            "probe_no_15m_veto_enabled": True,
+            "probe_no_15m_flow_veto_enabled": False,
+            "probe_flow_alignment_score_enabled": True,
+            "probe_min_flow_alignment": -0.20,
+            "probe_veto_graded_enabled": True,
+            "probe_veto_direction_reduced_multiplier": 0.25,
+            "probe_veto_hard_reject_flow_score": -0.30,
+        }
+    )
+
+    result = engine.analyze(
+        symbol="HYPEUSDT",
+        price=100.0,
+        timeframes=_timeframes(
+            tf1h=_tf(macd_hist_series=[0.01, 0.02, 0.03], rsi=55),
+            tf15m=_tf(close=100.0, open=100.2, high=100.25, low=99.95, ema20=99.7, atr=1.0, macd_hist_series=[0.01, 0.02, 0.03], rsi=55),
+        ),
+        portfolio={"equity": 100.0},
+        market_context={"flow": {"cvd": -0.20, "oi_delta": 0.0, "imbalance": -0.08, "liq_norm": 0.0}},
+    )
+
+    assert -0.30 < result.metadata["probe_flow_alignment_score"] < -0.20
+    assert result.allowed is True
+    assert result.reason == "quadrant_resonance_probe_no_15m_reduced_veto"
+    assert result.target_portion == pytest.approx(0.0105)
+    assert result.metadata["probe_veto_grade"]["portion_multiplier"] == pytest.approx(0.25)
+
+
+def test_score_equal_to_mid_upper_bound_requires_three_bar_macd_before_high_score_probe() -> None:
+    engine = _engine(
+        entry={
+            "standard_threshold": 0.85,
+            "require_15m_entry_pattern": True,
+            "high_score_15m_override": True,
+            "high_score_15m_override_threshold": 0.90,
+            "mid_score_requires_3bar_macd": True,
+            "mid_score_upper_bound": 0.90,
+        }
+    )
+    result = engine.analyze(
+        symbol="HYPEUSDT",
+        price=100.0,
+        timeframes=_timeframes(
+            tf1h=_tf(macd_hist_series=[0.01, 0.02], rsi=55),
+            tf15m=_tf(close=100, open=100.2, high=100.25, low=99.95, ema20=99.5, macd_hist_series=[0.01, 0.02], rsi=55),
+        ),
+        portfolio={"equity": 100.0},
+    )
+
+    assert result.allowed is False
+    assert result.reason == "mid_score_needs_3bar_macd"
+
+
 def test_mid_score_requires_three_1h_macd_bars_when_enabled() -> None:
     engine = _engine(entry={"standard_threshold": 0.85, "mid_score_requires_3bar_macd": True})
     result = engine.analyze(
@@ -437,6 +1230,202 @@ def test_decision_engine_routes_degraded_missing_15m_probe_to_entry() -> None:
     assert decision.target_portion_of_balance == pytest.approx(0.042)
     assert decision.metadata["signal_quality"] == "degraded_no_15m"
     assert decision.metadata["blocked_reason"] == "missing_15m_entry_pattern"
+
+
+def test_decision_engine_live_watchlist_records_candidate_without_entry() -> None:
+    engine = FundFlowDecisionEngine(
+        {
+            "fund_flow": {
+                "strategy_mode": "quadrant_resonance",
+                "min_leverage": 1,
+                "default_leverage": 3,
+                "max_leverage": 9,
+                "quadrant_resonance": {
+                    "entry": {
+                        "standard_threshold": 0.85,
+                        "require_15m_entry_pattern": True,
+                        "high_score_15m_override": True,
+                        "high_score_15m_override_threshold": 0.95,
+                        "watchlist_intent_enabled": True,
+                        "watchlist_intent_dry_run": False,
+                        "watchlist_min_signal_score": 0.75,
+                        "watchlist_ttl_bars": 4,
+                    },
+                    "risk": {"min_entry_notional_usdt": 12.0},
+                },
+            }
+        }
+    )
+
+    decision = engine.decide(
+        "JSTUSDT",
+        {"equity": 100.0, "positions": {}},
+        100.0,
+        {
+            "timeframes": _timeframes(
+                tf15m=_tf(
+                    close=100.0,
+                    open=100.2,
+                    high=100.25,
+                    low=99.95,
+                    ema20=99.7,
+                    atr=1.0,
+                    macd_hist_series=[0.01, 0.02, 0.03],
+                    rsi=55,
+                )
+            )
+        },
+        use_weight_router=False,
+        use_ai_weights=False,
+    )
+
+    assert decision.operation is Operation.HOLD
+    assert decision.reason == "missing_15m_entry_pattern"
+    assert decision.metadata["watchlist_intent"]["dry_run"] is False
+    assert decision.metadata["watchlist_update"]["result"] == "added"
+    assert engine._quadrant_watchlist["JSTUSDT"]["side"] == "long"
+
+
+def test_decision_engine_live_watchlist_marks_standard_entry_promotion() -> None:
+    engine = FundFlowDecisionEngine(
+        {
+            "fund_flow": {
+                "strategy_mode": "quadrant_resonance",
+                "min_leverage": 1,
+                "default_leverage": 3,
+                "max_leverage": 9,
+                "quadrant_resonance": {
+                    "entry": {
+                        "standard_threshold": 0.85,
+                        "require_15m_entry_pattern": True,
+                        "high_score_15m_override": True,
+                        "high_score_15m_override_threshold": 0.95,
+                        "watchlist_intent_enabled": True,
+                        "watchlist_intent_dry_run": False,
+                        "watchlist_min_signal_score": 0.75,
+                        "watchlist_ttl_bars": 4,
+                    },
+                    "risk": {"min_entry_notional_usdt": 12.0},
+                },
+            }
+        }
+    )
+
+    engine.decide(
+        "JSTUSDT",
+        {"equity": 100.0, "positions": {}},
+        100.0,
+        {
+            "timeframes": _timeframes(
+                tf15m=_tf(
+                    close=100.0,
+                    open=100.2,
+                    high=100.25,
+                    low=99.95,
+                    ema20=99.7,
+                    atr=1.0,
+                    macd_hist_series=[0.01, 0.02, 0.03],
+                    rsi=55,
+                )
+            )
+        },
+        use_weight_router=False,
+        use_ai_weights=False,
+    )
+    decision = engine.decide(
+        "JSTUSDT",
+        {"equity": 100.0, "positions": {}},
+        100.0,
+        {"timeframes": _timeframes(tf15m=_tf(close=100.0, open=99.8, high=100.25, low=99.75, ema20=99.7, atr=1.0, macd_hist_series=[-0.01, 0.02], rsi=55))},
+        use_weight_router=False,
+        use_ai_weights=False,
+    )
+
+    assert decision.operation is Operation.BUY
+    assert decision.reason == "quadrant_resonance_pass"
+    assert decision.metadata["watchlist_review"]["result"] == "promoted_by_standard_entry"
+    assert "JSTUSDT" not in engine._quadrant_watchlist
+
+
+def test_decision_engine_live_watchlist_directly_promotes_when_missing_conditions_clear() -> None:
+    engine = FundFlowDecisionEngine(
+        {
+            "fund_flow": {
+                "strategy_mode": "quadrant_resonance",
+                "min_leverage": 1,
+                "default_leverage": 3,
+                "max_leverage": 9,
+                "quadrant_resonance": {
+                    "entry": {
+                        "standard_threshold": 1.05,
+                        "require_15m_entry_pattern": True,
+                        "high_score_15m_override": True,
+                        "high_score_15m_override_threshold": 1.10,
+                        "watchlist_intent_enabled": True,
+                        "watchlist_intent_dry_run": False,
+                        "watchlist_direct_open_enabled": True,
+                        "watchlist_promoted_portion_mult": 0.75,
+                        "watchlist_min_signal_score": 0.75,
+                        "watchlist_ttl_bars": 4,
+                    },
+                    "risk": {"min_entry_notional_usdt": 12.0},
+                },
+            }
+        }
+    )
+
+    first = engine.decide(
+        "JSTUSDT",
+        {"equity": 100.0, "positions": {}},
+        100.0,
+        {
+            "timeframes": _timeframes(
+                tf15m=_tf(
+                    close=100.0,
+                    open=100.2,
+                    high=100.25,
+                    low=99.95,
+                    ema20=99.7,
+                    atr=1.0,
+                    macd_hist_series=[0.01, 0.02, 0.03],
+                    rsi=55,
+                )
+            )
+        },
+        use_weight_router=False,
+        use_ai_weights=False,
+    )
+    base_portion = engine._quadrant_watchlist["JSTUSDT"]["base_portion"]
+
+    promoted = engine.decide(
+        "JSTUSDT",
+        {"equity": 100.0, "positions": {}},
+        100.0,
+        {
+            "timeframes": _timeframes(
+                tf15m=_tf(
+                    close=100.0,
+                    open=99.8,
+                    high=100.3,
+                    low=99.75,
+                    ema20=99.7,
+                    atr=1.0,
+                    macd_hist_series=[-0.01, 0.02],
+                    rsi=55,
+                )
+            )
+        },
+        use_weight_router=False,
+        use_ai_weights=False,
+    )
+
+    assert first.operation is Operation.HOLD
+    assert promoted.operation is Operation.BUY
+    assert promoted.reason == "watchlist_promoted"
+    assert promoted.target_portion_of_balance == pytest.approx(base_portion * 0.75)
+    assert promoted.metadata["watchlist_review"]["result"] == "promoted_direct"
+    assert promoted.metadata["allowed_reason"] == "watchlist_direct_open"
+    assert "JSTUSDT" not in engine._quadrant_watchlist
 
 
 def test_decision_engine_writes_quadrant_entry_audit_jsonl(tmp_path) -> None:

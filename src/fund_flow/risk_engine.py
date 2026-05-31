@@ -73,6 +73,10 @@ class FundFlowRiskEngine:
             quadrant_risk_cfg.get("min_entry_margin_usdt", 1.0) or 1.0
         )
         self.max_open_portion = float(fund_flow_cfg.get("max_open_portion", 1.0))
+        self.max_single_position_notional = max(
+            0.0,
+            float(fund_flow_cfg.get("max_single_position_notional", 0.0) or 0.0),
+        )
         self.price_deviation_limit_percent = float(
             fund_flow_cfg.get("price_deviation_limit_percent", 1.0)
         )
@@ -257,6 +261,30 @@ class FundFlowRiskEngine:
                 return None
         return val
 
+    def _apply_max_single_position_notional_cap(
+        self,
+        portion: float,
+        operation: Operation,
+        account_equity: float,
+        leverage: float,
+        metadata: Optional[Dict[str, Any]],
+    ) -> float:
+        cap = float(self.max_single_position_notional)
+        equity = float(account_equity or 0.0)
+        lev = max(1.0, float(leverage or 1.0))
+        if operation not in (Operation.BUY, Operation.SELL) or cap <= 0.0 or equity <= 0.0:
+            return float(portion)
+        current_notional = float(portion) * equity * lev
+        if current_notional <= cap + 1e-12:
+            return float(portion)
+        capped = max(0.0, min(float(portion), cap / (equity * lev)))
+        if isinstance(metadata, dict):
+            metadata["max_single_position_notional_cap_applied"] = True
+            metadata["max_single_position_notional"] = cap
+            metadata["max_single_position_notional_before"] = current_notional
+            metadata["max_single_position_notional_after"] = capped * equity * lev
+        return capped
+
     def resolve_min_open_portion(self, decision: Optional[FundFlowDecision] = None) -> float:
         base_min = float(self.min_open_portion)
         if isinstance(getattr(decision, "metadata", None), dict) and bool(decision.metadata.get("rsi_probe_mode", False)):
@@ -425,6 +453,13 @@ class FundFlowRiskEngine:
                     ),
                     metadata=metadata,
                 )
+            validated_portion = self._apply_max_single_position_notional_cap(
+                validated_portion,
+                decision.operation,
+                account_equity,
+                decision.leverage,
+                decision.metadata,
+            )
             decision.target_portion_of_balance = validated_portion
             if self._last_min_notional_meta:
                 metadata = dict(decision.metadata or {})
@@ -473,4 +508,13 @@ class FundFlowRiskEngine:
                 metadata.update(self._last_min_notional_meta)
                 metadata["min_notional_post_account_risk_revalidated"] = True
                 decision.metadata = metadata
+            capped_portion = self._apply_max_single_position_notional_cap(
+                decision.target_portion_of_balance,
+                decision.operation,
+                account_equity,
+                decision.leverage,
+                decision.metadata,
+            )
+            if abs(float(capped_portion) - float(decision.target_portion_of_balance)) > 1e-12:
+                decision.target_portion_of_balance = float(capped_portion)
         return decision

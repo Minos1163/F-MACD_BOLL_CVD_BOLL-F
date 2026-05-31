@@ -18,6 +18,7 @@ from src.fund_flow.macd_strategy import MACDStrategyEngine, MACDStrategyConfig, 
 # MACD多时间框架策略 V2.0 (VWAP + BOLL 增强版)
 from src.fund_flow.macd_strategy_v2 import MACDStrategyV2Engine, MACDStrategyV2Config, MACDSignalV2, VetoType
 from src.fund_flow.quadrant_resonance import (
+    QuadrantSignal,
     QuadrantResonanceConfig,
     QuadrantResonanceEngine,
 )
@@ -432,6 +433,7 @@ class FundFlowDecisionEngine:
         self.quadrant_resonance_enabled = self.strategy_mode == "quadrant_resonance"
         self.quadrant_resonance_config = QuadrantResonanceConfig.from_dict(quadrant_cfg)
         self.quadrant_resonance_engine = QuadrantResonanceEngine(self.quadrant_resonance_config)
+        self._quadrant_watchlist: Dict[str, Dict[str, Any]] = {}
         quadrant_audit_cfg = quadrant_cfg.get("audit", {}) if isinstance(quadrant_cfg.get("audit"), dict) else {}
         self.quadrant_entry_audit_path = str(quadrant_audit_cfg.get("entry_decision_path") or "").strip()
         rule_cfg = ff.get("rule_strategy", {}) if isinstance(ff.get("rule_strategy"), dict) else {}
@@ -5682,12 +5684,32 @@ class FundFlowDecisionEngine:
             price=price,
             timeframes=timeframes if isinstance(timeframes, dict) else {},
             portfolio=portfolio or {},
+            market_context=market_flow_context if isinstance(market_flow_context, dict) else {},
         )
         metadata = dict(signal.metadata or {})
         metadata.setdefault("symbol", symbol)
         metadata.setdefault("entry_reference_price", price)
         metadata["take_profit_levels"] = list(signal.take_profit_levels)
+        watchlist_review = self._review_quadrant_watchlist(symbol=symbol, signal=signal)
+        if watchlist_review:
+            metadata["watchlist_review"] = watchlist_review
+        promoted_signal = self._quadrant_watchlist_promoted_signal(
+            symbol=symbol,
+            price=price,
+            signal=signal,
+            review=watchlist_review,
+            metadata=metadata,
+        )
+        if promoted_signal is not None:
+            signal = promoted_signal
+            metadata = dict(signal.metadata or {})
+            metadata.setdefault("symbol", symbol)
+            metadata.setdefault("entry_reference_price", price)
+            metadata["take_profit_levels"] = list(signal.take_profit_levels)
         if not signal.allowed:
+            watchlist_update = self._apply_quadrant_watchlist_intent(symbol=symbol, metadata=metadata)
+            if watchlist_update:
+                metadata["watchlist_update"] = watchlist_update
             decision = FundFlowDecision(
                 operation=Operation.HOLD,
                 symbol=symbol,
@@ -5723,6 +5745,200 @@ class FundFlowDecisionEngine:
         )
         self._append_quadrant_entry_audit(decision)
         return decision
+
+    def _quadrant_watchlist_promoted_signal(
+        self,
+        *,
+        symbol: str,
+        price: float,
+        signal: Any,
+        review: Optional[Dict[str, Any]],
+        metadata: Dict[str, Any],
+    ) -> Optional[QuadrantSignal]:
+        if not isinstance(review, dict) or review.get("result") != "promoted_direct":
+            return None
+        direction = str(review.get("side") or getattr(signal, "direction", "") or "").lower()
+        if direction not in {"long", "short"}:
+            return None
+        base_portion = self._to_float(review.get("base_portion"), self._to_float(getattr(signal, "target_portion", 0.0), 0.0))
+        multiplier = self._to_float(review.get("portion_multiplier"), 0.75)
+        target_portion = max(0.0, base_portion * max(0.0, min(1.0, multiplier)))
+        atr_stop_distance = self._to_float(getattr(signal, "atr_stop_distance", 0.0), 0.0)
+        stop_loss = None
+        if atr_stop_distance > 0:
+            stop_loss = float(price) - atr_stop_distance if direction == "long" else float(price) + atr_stop_distance
+        promoted_md = dict(metadata or {})
+        promoted_md.update(
+            {
+                "watchlist_review": review,
+                "allowed_reason": "watchlist_direct_open",
+                "signal_quality": "watchlist_promoted",
+                "target_portion": target_portion,
+                "base_target_portion": base_portion,
+                "watchlist_promoted_portion_mult": multiplier,
+            }
+        )
+        return QuadrantSignal(
+            allowed=True,
+            symbol=symbol,
+            direction=direction,
+            quadrant=getattr(signal, "quadrant", None),
+            resonance_score=self._to_float(review.get("score_at_candidate"), self._to_float(getattr(signal, "resonance_score", 0.0), 0.0)),
+            threshold=self._to_float(getattr(signal, "threshold", 0.0), 0.0),
+            factor_scores=dict(getattr(signal, "factor_scores", {}) or {}),
+            entry_price_ref=float(price),
+            atr_stop_distance=atr_stop_distance,
+            target_portion=target_portion,
+            leverage=max(1, int(self._to_float(getattr(signal, "leverage", 1), 1))),
+            stop_loss_price=stop_loss,
+            take_profit_levels=list(getattr(signal, "take_profit_levels", []) or []),
+            reason="watchlist_promoted",
+            metadata=promoted_md,
+        )
+
+    def _review_quadrant_watchlist(self, *, symbol: str, signal: Any) -> Optional[Dict[str, Any]]:
+        key = str(symbol or "").upper()
+        if not key:
+            return None
+        candidate = self._quadrant_watchlist.get(key)
+        if not isinstance(candidate, dict):
+            return None
+        side = str(candidate.get("side") or "").lower()
+        now_ts = datetime.now(timezone.utc).isoformat()
+        if bool(getattr(signal, "allowed", False)):
+            current_side = str(getattr(signal, "direction", "") or "").lower()
+            if side and current_side == side:
+                self._quadrant_watchlist.pop(key, None)
+                return {
+                    "result": "promoted_by_standard_entry",
+                    "symbol": key,
+                    "side": side,
+                    "candidate_reason": candidate.get("candidate_reason"),
+                    "score_at_candidate": candidate.get("score"),
+                    "current_reason": getattr(signal, "reason", ""),
+                    "reviewed_at": now_ts,
+                }
+            self._quadrant_watchlist.pop(key, None)
+            return {
+                "result": "invalidated_by_opposite_entry",
+                "symbol": key,
+                "side": side,
+                "current_side": current_side,
+                "candidate_reason": candidate.get("candidate_reason"),
+                "current_reason": getattr(signal, "reason", ""),
+                "reviewed_at": now_ts,
+            }
+        direct_review = self._review_quadrant_watchlist_direct(candidate=candidate, signal=signal, reviewed_at=now_ts)
+        if direct_review:
+            self._quadrant_watchlist.pop(key, None)
+            return direct_review
+        remaining = max(0, int(self._to_float(candidate.get("ttl_remaining_bars"), 1)) - 1)
+        if remaining <= 0:
+            self._quadrant_watchlist.pop(key, None)
+            return {
+                "result": "expired",
+                "symbol": key,
+                "side": side,
+                "candidate_reason": candidate.get("candidate_reason"),
+                "reviewed_at": now_ts,
+            }
+        candidate["ttl_remaining_bars"] = remaining
+        candidate["last_reviewed_at"] = now_ts
+        self._quadrant_watchlist[key] = candidate
+        return {
+            "result": "pending",
+            "symbol": key,
+            "side": side,
+            "candidate_reason": candidate.get("candidate_reason"),
+            "ttl_remaining_bars": remaining,
+            "reviewed_at": now_ts,
+        }
+
+    def _review_quadrant_watchlist_direct(
+        self,
+        *,
+        candidate: Dict[str, Any],
+        signal: Any,
+        reviewed_at: str,
+    ) -> Optional[Dict[str, Any]]:
+        cfg = getattr(self, "quadrant_resonance_config", None)
+        if not bool(getattr(cfg, "watchlist_direct_open_enabled", False)):
+            return None
+        side = str(candidate.get("side") or "").lower()
+        current_side = str(getattr(signal, "direction", "") or "").lower()
+        if side not in {"long", "short"} or current_side != side:
+            return None
+        metadata = getattr(signal, "metadata", {}) if isinstance(getattr(signal, "metadata", {}), dict) else {}
+        candidate_missing = list(candidate.get("missing_conditions") or [])
+        quality_score = self._to_float(metadata.get("entry_15m_quality_score"), 0.0)
+        quality_bucket = str(metadata.get("entry_15m_quality_bucket") or "")
+        detail = metadata.get("entry_15m_detail") if isinstance(metadata.get("entry_15m_detail"), dict) else {}
+        if candidate_missing and not (bool(detail.get("ok", False)) or quality_bucket == "open"):
+            return None
+        base_portion = self._to_float(
+            candidate.get("base_portion"),
+            self._to_float(getattr(signal, "target_portion", 0.0), 0.0),
+        )
+        if base_portion <= 0.0:
+            equity = self._to_float(candidate.get("portfolio_equity"), 0.0)
+            min_margin = self._to_float(metadata.get("min_entry_margin_usdt"), 1.0)
+            min_notional = self._to_float(metadata.get("min_entry_notional_usdt"), 0.0)
+            leverage = max(1.0, self._to_float(getattr(signal, "leverage", 1), 1.0))
+            if equity > 0.0:
+                base_portion = max(min_margin / equity, min_notional / (equity * leverage) if min_notional > 0 else 0.0)
+        multiplier = max(0.0, min(1.0, self._to_float(getattr(cfg, "watchlist_promoted_portion_mult", 0.75), 0.75)))
+        return {
+            "result": "promoted_direct",
+            "symbol": str(candidate.get("symbol") or "").upper(),
+            "side": side,
+            "candidate_reason": candidate.get("candidate_reason"),
+            "score_at_candidate": candidate.get("score"),
+            "current_reason": getattr(signal, "reason", ""),
+            "quality_score": quality_score,
+            "quality_bucket": quality_bucket,
+            "base_portion": base_portion,
+            "portion_multiplier": multiplier,
+            "reviewed_at": reviewed_at,
+        }
+
+    def _apply_quadrant_watchlist_intent(self, *, symbol: str, metadata: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        intent = metadata.get("watchlist_intent")
+        if not isinstance(intent, dict):
+            return None
+        if bool(intent.get("dry_run", True)):
+            return None
+        key = str(intent.get("symbol") or symbol or "").upper()
+        side = str(intent.get("side") or "").lower()
+        if not key or side not in {"long", "short"}:
+            return None
+        ttl = max(1, int(self._to_float(intent.get("ttl_bars"), 1)))
+        now_ts = datetime.now(timezone.utc).isoformat()
+        result = "refreshed" if key in self._quadrant_watchlist else "added"
+        candidate = {
+            "symbol": key,
+            "side": side,
+            "score": intent.get("score"),
+            "candidate_reason": intent.get("candidate_reason"),
+            "missing_conditions": list(intent.get("missing_conditions") or []),
+            "veto_reasons": list(intent.get("veto_reasons") or []),
+            "entry_15m_quality_score": intent.get("entry_15m_quality_score"),
+            "entry_15m_quality_bucket": intent.get("entry_15m_quality_bucket"),
+            "base_portion": self._to_float(metadata.get("target_portion"), 0.0),
+            "portfolio_equity": self._to_float(metadata.get("portfolio_equity"), 0.0),
+            "ttl_bars": ttl,
+            "ttl_remaining_bars": ttl,
+            "created_at": self._quadrant_watchlist.get(key, {}).get("created_at", now_ts),
+            "updated_at": now_ts,
+        }
+        self._quadrant_watchlist[key] = candidate
+        return {
+            "result": result,
+            "symbol": key,
+            "side": side,
+            "candidate_reason": candidate["candidate_reason"],
+            "ttl_remaining_bars": ttl,
+            "updated_at": now_ts,
+        }
 
     def _append_quadrant_entry_audit(self, decision: FundFlowDecision) -> None:
         path_raw = str(getattr(self, "quadrant_entry_audit_path", "") or "").strip()

@@ -46,6 +46,46 @@ class QuadrantResonanceConfig:
     high_score_15m_override: bool = False
     high_score_15m_override_threshold: float = 0.92
     high_score_probe_portion: float = 0.042
+    probe_no_15m_veto_enabled: bool = False
+    probe_no_15m_breadth_veto_enabled: bool = True
+    probe_no_15m_flow_veto_enabled: bool = True
+    probe_no_15m_rsi_macd_veto_enabled: bool = True
+    probe_min_15m_resonance_enabled: bool = False
+    probe_require_macd_15m_or_1h_near_ema: bool = True
+    probe_breadth_zero_confirm_invalid_min: int = 2
+    probe_direction_breadth_veto_enabled: bool = False
+    short_probe_btc_30m_veto_pct: float = 0.005
+    short_probe_btc_60m_veto_pct: float = 0.008
+    short_probe_alt_med_veto_pct: float = 0.006
+    long_probe_btc_30m_veto_pct: float = 0.005
+    long_probe_btc_60m_veto_pct: float = 0.008
+    long_probe_alt_med_veto_pct: float = 0.006
+    probe_resonance_score_enabled: bool = False
+    probe_resonance_min_threshold: float = 0.55
+    probe_resonance_min_threshold_short: float = 0.60
+    probe_flow_alignment_score_enabled: bool = False
+    probe_min_flow_alignment: float = -0.20
+    probe_min_flow_alignment_short: float = -0.15
+    entry_15m_quality_mode: str = "audit"
+    entry_15m_quality_open_min: float = 0.75
+    entry_15m_quality_watch_min: float = 0.55
+    watchlist_intent_enabled: bool = False
+    watchlist_intent_dry_run: bool = True
+    watchlist_min_signal_score: float = 0.75
+    watchlist_ttl_bars: int = 4
+    watchlist_probe_veto_ttl_bars: int = 2
+    watchlist_include_probe_veto: bool = True
+    watchlist_direct_open_enabled: bool = False
+    watchlist_promoted_portion_mult: float = 0.75
+    quadrant_4h_three_state_enabled: bool = False
+    quadrant_4h_three_state_act_on_recovering: bool = False
+    recovering_state_portion_multiplier: float = 0.50
+    recovering_state_score_threshold: float = 0.80
+    probe_veto_graded_enabled: bool = False
+    probe_veto_breadth_reduced_multiplier: float = 0.50
+    probe_veto_direction_reduced_multiplier: float = 0.25
+    probe_veto_hard_reject_btc_against_pct: float = 0.008
+    probe_veto_hard_reject_flow_score: float = -0.30
     mid_score_requires_3bar_macd: bool = False
     mid_score_upper_bound: float = 0.90
     extreme_4h_rsi_penalty: float = 0.0
@@ -110,6 +150,46 @@ class QuadrantResonanceConfig:
             high_score_15m_override=bool(entry.get("high_score_15m_override", False)),
             high_score_15m_override_threshold=_float(entry.get("high_score_15m_override_threshold"), 0.92),
             high_score_probe_portion=max(0.0, _float(entry.get("high_score_probe_portion"), 0.042)),
+            probe_no_15m_veto_enabled=bool(entry.get("probe_no_15m_veto_enabled", False)),
+            probe_no_15m_breadth_veto_enabled=bool(entry.get("probe_no_15m_breadth_veto_enabled", True)),
+            probe_no_15m_flow_veto_enabled=bool(entry.get("probe_no_15m_flow_veto_enabled", True)),
+            probe_no_15m_rsi_macd_veto_enabled=bool(entry.get("probe_no_15m_rsi_macd_veto_enabled", True)),
+            probe_min_15m_resonance_enabled=bool(entry.get("probe_min_15m_resonance_enabled", False)),
+            probe_require_macd_15m_or_1h_near_ema=bool(entry.get("probe_require_macd_15m_or_1h_near_ema", True)),
+            probe_breadth_zero_confirm_invalid_min=int(_float(entry.get("probe_breadth_zero_confirm_invalid_min"), 2)),
+            probe_direction_breadth_veto_enabled=bool(entry.get("probe_direction_breadth_veto_enabled", False)),
+            short_probe_btc_30m_veto_pct=_float(entry.get("short_probe_btc_30m_veto_pct"), 0.005),
+            short_probe_btc_60m_veto_pct=_float(entry.get("short_probe_btc_60m_veto_pct"), 0.008),
+            short_probe_alt_med_veto_pct=_float(entry.get("short_probe_alt_med_veto_pct"), 0.006),
+            long_probe_btc_30m_veto_pct=_float(entry.get("long_probe_btc_30m_veto_pct"), 0.005),
+            long_probe_btc_60m_veto_pct=_float(entry.get("long_probe_btc_60m_veto_pct"), 0.008),
+            long_probe_alt_med_veto_pct=_float(entry.get("long_probe_alt_med_veto_pct"), 0.006),
+            probe_resonance_score_enabled=bool(entry.get("probe_resonance_score_act_enabled", entry.get("probe_resonance_score_enabled", False))),
+            probe_resonance_min_threshold=_float(entry.get("probe_resonance_min_threshold"), 0.55),
+            probe_resonance_min_threshold_short=_float(entry.get("probe_resonance_min_threshold_short"), 0.60),
+            probe_flow_alignment_score_enabled=bool(entry.get("probe_flow_alignment_act_enabled", entry.get("probe_flow_alignment_score_enabled", False))),
+            probe_min_flow_alignment=_float(entry.get("probe_min_flow_alignment"), -0.20),
+            probe_min_flow_alignment_short=_float(entry.get("probe_min_flow_alignment_short"), -0.15),
+            entry_15m_quality_mode=str(entry.get("entry_15m_quality_mode", "audit") or "audit"),
+            entry_15m_quality_open_min=_float(entry.get("entry_15m_quality_open_min"), 0.75),
+            entry_15m_quality_watch_min=_float(entry.get("entry_15m_quality_watch_min"), 0.55),
+            watchlist_intent_enabled=bool(entry.get("watchlist_intent_enabled", False)),
+            watchlist_intent_dry_run=bool(entry.get("watchlist_intent_dry_run", True)),
+            watchlist_min_signal_score=_float(entry.get("watchlist_min_signal_score"), 0.75),
+            watchlist_ttl_bars=int(_float(entry.get("watchlist_ttl_bars"), 4)),
+            watchlist_probe_veto_ttl_bars=int(_float(entry.get("watchlist_ttl_reversible_veto_bars", entry.get("watchlist_probe_veto_ttl_bars")), 2)),
+            watchlist_include_probe_veto=bool(entry.get("watchlist_include_probe_veto", True)),
+            watchlist_direct_open_enabled=bool(entry.get("watchlist_direct_open_enabled", False)),
+            watchlist_promoted_portion_mult=_float(entry.get("watchlist_promoted_portion_mult"), 0.75),
+            quadrant_4h_three_state_enabled=bool(entry.get("quadrant_4h_three_state_enabled", False)),
+            quadrant_4h_three_state_act_on_recovering=bool(entry.get("quadrant_4h_three_state_act_on_recovering", False)),
+            recovering_state_portion_multiplier=_float(entry.get("recovering_state_portion_multiplier"), 0.50),
+            recovering_state_score_threshold=_float(entry.get("recovering_state_score_threshold"), 0.80),
+            probe_veto_graded_enabled=bool(entry.get("probe_veto_graded_enabled", False)),
+            probe_veto_breadth_reduced_multiplier=_float(entry.get("probe_veto_breadth_reduced_multiplier"), 0.50),
+            probe_veto_direction_reduced_multiplier=_float(entry.get("probe_veto_direction_reduced_multiplier"), 0.25),
+            probe_veto_hard_reject_btc_against_pct=_float(entry.get("probe_veto_hard_reject_btc_against_pct"), 0.008),
+            probe_veto_hard_reject_flow_score=_float(entry.get("probe_veto_hard_reject_flow_score"), -0.30),
             mid_score_requires_3bar_macd=bool(entry.get("mid_score_requires_3bar_macd", False)),
             mid_score_upper_bound=_float(entry.get("mid_score_upper_bound"), 0.90),
             extreme_4h_rsi_penalty=_float(entry.get("extreme_4h_rsi_penalty"), 0.0),
@@ -190,6 +270,7 @@ class QuadrantResonanceEngine:
         price: float,
         timeframes: Dict[str, Dict[str, Any]],
         portfolio: Optional[Dict[str, Any]] = None,
+        market_context: Optional[Dict[str, Any]] = None,
     ) -> QuadrantSignal:
         portfolio = portfolio or {}
         tf15 = timeframes.get("15m", {}) if isinstance(timeframes, dict) else {}
@@ -201,6 +282,18 @@ class QuadrantResonanceEngine:
         quadrant = self.detect_quadrant(tf4h)
         if quadrant is Quadrant.DEFENSE:
             debug = self._quadrant_debug(tf4h, quadrant)
+            state_debug = self._quadrant_state_debug(tf4h)
+            debug.update(state_debug)
+            if bool(self.config.quadrant_4h_three_state_act_on_recovering) and state_debug.get("quadrant_state") == "recovering":
+                return self._recovering_state_signal(
+                    symbol=symbol,
+                    price=price,
+                    tf15=tf15,
+                    tf1h=tf1h,
+                    portfolio=portfolio,
+                    state_debug=state_debug,
+                    metadata_extra=debug,
+                )
             return self._blocked(symbol, "quadrant_defense_no_entry", quadrant=quadrant, metadata_extra=debug)
 
         direction = "long" if quadrant in (Quadrant.Q1, Quadrant.Q2) else "short"
@@ -222,10 +315,112 @@ class QuadrantResonanceEngine:
         metadata_extra: Dict[str, Any] = {}
         if penalty > 0:
             metadata_extra["extreme_4h_rsi_penalty"] = penalty
+        if self._requires_mid_score_macd_confirmation(score, threshold, direction, tf1h):
+            metadata = self._metadata(quadrant, direction, score, threshold, factor_scores, tf15, tf1h)
+            metadata.update(metadata_extra)
+            return QuadrantSignal(
+                allowed=False,
+                symbol=symbol,
+                direction=direction,
+                quadrant=quadrant,
+                resonance_score=score,
+                threshold=threshold,
+                factor_scores=factor_scores,
+                entry_price_ref=price,
+                atr_stop_distance=self._atr_stop_distance(tf15),
+                reason="mid_score_needs_3bar_macd",
+                metadata=metadata,
+            )
         if self.config.require_15m_entry_pattern and "entry_15m" not in factor_scores:
             metadata = self._metadata(quadrant, direction, score, threshold, factor_scores, tf15, tf1h)
             metadata.update(metadata_extra)
             if self._allow_high_score_missing_15m_probe(score, threshold):
+                probe_resonance_score = self._compute_probe_resonance_score(direction, quadrant, tf15, tf1h)
+                flow_alignment_score = self._flow_alignment_score(direction, market_context)
+                metadata["probe_resonance_score"] = probe_resonance_score
+                metadata["probe_flow_alignment_score"] = flow_alignment_score
+                veto_reasons = self._probe_no_15m_veto_reasons(
+                    direction,
+                    quadrant,
+                    tf15,
+                    tf1h,
+                    market_context,
+                    probe_resonance_score=probe_resonance_score,
+                    flow_alignment_score=flow_alignment_score,
+                )
+                metadata["probe_no_15m_veto_reasons"] = veto_reasons
+                if veto_reasons:
+                    grade = self._grade_probe_veto(veto_reasons, direction, tf15, tf1h, market_context, flow_alignment_score)
+                    metadata["probe_veto_grade"] = grade
+                    if str(grade.get("action") or "") == "open_reduced":
+                        atr_stop_distance = self._atr_stop_distance(tf15)
+                        leverage = max(1, min(3, int(self.config.max_leverage)))
+                        base_portion = self._probe_position_portion(portfolio)
+                        multiplier = max(0.0, min(1.0, _float(grade.get("portion_multiplier"), 0.0)))
+                        target_portion = base_portion * multiplier
+                        stop_loss = price - atr_stop_distance if direction == "long" else price + atr_stop_distance
+                        metadata.update(
+                            {
+                                "allowed_reason": "high_score_15m_override_graded_veto",
+                                "blocked_reason": "probe_no_15m_direction_veto",
+                                "signal_quality": "degraded_no_15m_reduced_veto",
+                                "override_reason": "high_score_15m_override_graded_veto",
+                                "portfolio_equity": _float(portfolio.get("equity", portfolio.get("account_equity", portfolio.get("available_balance"))), 0.0),
+                                "min_entry_notional_usdt": self.config.min_entry_notional_usdt,
+                                "min_entry_margin_usdt": self.config.min_entry_margin_usdt,
+                                "leverage_cap": leverage,
+                                "leverage": leverage,
+                                "base_target_portion": base_portion,
+                                "target_portion": target_portion,
+                                "high_score_15m_override_threshold": self.config.high_score_15m_override_threshold,
+                            }
+                        )
+                        return QuadrantSignal(
+                            allowed=True,
+                            symbol=symbol,
+                            direction=direction,
+                            quadrant=quadrant,
+                            resonance_score=score,
+                            threshold=threshold,
+                            factor_scores=factor_scores,
+                            entry_price_ref=price,
+                            atr_stop_distance=atr_stop_distance,
+                            target_portion=target_portion,
+                            leverage=leverage,
+                            stop_loss_price=stop_loss,
+                            take_profit_levels=self._take_profit_levels(price, atr_stop_distance, direction),
+                            reason="quadrant_resonance_probe_no_15m_reduced_veto",
+                            metadata=metadata,
+                        )
+                    intent = self._watchlist_intent(
+                        symbol=symbol,
+                        direction=direction,
+                        score=score,
+                        reason="probe_no_15m_direction_veto",
+                        metadata=metadata,
+                        veto_reasons=veto_reasons,
+                    )
+                    if intent:
+                        metadata["watchlist_intent"] = intent
+                    metadata.update(
+                        {
+                            "blocked_reason": "probe_no_15m_direction_veto",
+                            "override_reason": "high_score_15m_override_vetoed",
+                        }
+                    )
+                    return QuadrantSignal(
+                        allowed=False,
+                        symbol=symbol,
+                        direction=direction,
+                        quadrant=quadrant,
+                        resonance_score=score,
+                        threshold=threshold,
+                        factor_scores=factor_scores,
+                        entry_price_ref=price,
+                        atr_stop_distance=self._atr_stop_distance(tf15),
+                        reason="probe_no_15m_direction_veto",
+                        metadata=metadata,
+                    )
                 atr_stop_distance = self._atr_stop_distance(tf15)
                 leverage = max(1, min(3, int(self.config.max_leverage)))
                 target_portion = self._probe_position_portion(portfolio)
@@ -236,12 +431,14 @@ class QuadrantResonanceEngine:
                         "blocked_reason": "missing_15m_entry_pattern",
                         "signal_quality": "degraded_no_15m",
                         "override_reason": "high_score_15m_override",
+                        "portfolio_equity": _float(portfolio.get("equity", portfolio.get("account_equity", portfolio.get("available_balance"))), 0.0),
                         "min_entry_notional_usdt": self.config.min_entry_notional_usdt,
                         "min_entry_margin_usdt": self.config.min_entry_margin_usdt,
                         "leverage_cap": leverage,
                         "leverage": leverage,
                         "target_portion": target_portion,
                         "high_score_15m_override_threshold": self.config.high_score_15m_override_threshold,
+                        "probe_no_15m_veto_reasons": [],
                     }
                 )
                 return QuadrantSignal(
@@ -261,6 +458,15 @@ class QuadrantResonanceEngine:
                     reason="quadrant_resonance_probe_no_15m",
                     metadata=metadata,
                 )
+            intent = self._watchlist_intent(
+                symbol=symbol,
+                direction=direction,
+                score=score,
+                reason="missing_15m_entry_pattern",
+                metadata=metadata,
+            )
+            if intent:
+                metadata["watchlist_intent"] = intent
             return QuadrantSignal(
                 allowed=False,
                 symbol=symbol,
@@ -272,26 +478,6 @@ class QuadrantResonanceEngine:
                 entry_price_ref=price,
                 atr_stop_distance=self._atr_stop_distance(tf15),
                 reason="missing_15m_entry_pattern",
-                metadata=metadata,
-            )
-        if (
-            self.config.mid_score_requires_3bar_macd
-            and threshold <= score < float(self.config.mid_score_upper_bound)
-            and not self._hist_strengthening(self._series(tf1h, "macd_hist_series", "macd_hist_array", "macd_hist"), direction, bars=3)
-        ):
-            metadata = self._metadata(quadrant, direction, score, threshold, factor_scores, tf15, tf1h)
-            metadata.update(metadata_extra)
-            return QuadrantSignal(
-                allowed=False,
-                symbol=symbol,
-                direction=direction,
-                quadrant=quadrant,
-                resonance_score=score,
-                threshold=threshold,
-                factor_scores=factor_scores,
-                entry_price_ref=price,
-                atr_stop_distance=self._atr_stop_distance(tf15),
-                reason="mid_score_needs_3bar_macd",
                 metadata=metadata,
             )
         if score + 1e-12 < threshold:
@@ -320,6 +506,7 @@ class QuadrantResonanceEngine:
         metadata.update(
             {
                 "allowed_reason": "quadrant_resonance_pass",
+                "portfolio_equity": _float(portfolio.get("equity", portfolio.get("account_equity", portfolio.get("available_balance"))), 0.0),
                 "min_entry_notional_usdt": self.config.min_entry_notional_usdt,
                 "min_entry_margin_usdt": self.config.min_entry_margin_usdt,
                 "leverage_cap": leverage,
@@ -432,11 +619,117 @@ class QuadrantResonanceEngine:
         hist_bars = 3 if quadrant in (Quadrant.Q2, Quadrant.Q4) else 2
         if self._hist_strengthening(self._series(tf1h, "macd_hist_series", "macd_hist_array", "macd_hist"), direction, bars=hist_bars):
             out["macd_1h"] = self.config.score_1h_macd
-        if self._entry_pattern_ok(direction, tf15):
+        if self._entry_pattern_ok(direction, tf15) or self._entry_quality_live_open(direction, tf15):
             out["entry_15m"] = self.config.score_15m_entry
         if self._rsi_zone_ok(direction, quadrant, tf15):
             out["rsi_15m"] = self.config.score_15m_rsi
         return out
+
+    def _entry_quality_live_open(self, direction: str, tf15: Dict[str, Any]) -> bool:
+        if str(self.config.entry_15m_quality_mode or "").strip().lower() != "live":
+            return False
+        quality = self._entry_15m_quality(direction, tf15)
+        return float(quality.get("score", 0.0)) + 1e-12 >= float(self.config.entry_15m_quality_open_min)
+
+    def _recovering_state_signal(
+        self,
+        *,
+        symbol: str,
+        price: float,
+        tf15: Dict[str, Any],
+        tf1h: Dict[str, Any],
+        portfolio: Dict[str, Any],
+        state_debug: Dict[str, Any],
+        metadata_extra: Dict[str, Any],
+    ) -> QuadrantSignal:
+        direction = str(state_debug.get("quadrant_recovering_direction") or "").lower()
+        if direction not in {"long", "short"}:
+            return self._blocked(symbol, "quadrant_defense_no_entry", metadata_extra=metadata_extra)
+        quadrant = Quadrant.Q1 if direction == "long" else Quadrant.Q3
+        hard_rsi_reason = self._hard_rsi_reason(direction, tf1h)
+        if hard_rsi_reason:
+            metadata_extra.update({"quadrant_state": "recovering", "blocked_reason": hard_rsi_reason})
+            return self._blocked(symbol, hard_rsi_reason, quadrant=quadrant, direction=direction, metadata_extra=metadata_extra)
+        if self._too_far_from_ema20(direction, price, tf1h):
+            metadata_extra.update({"quadrant_state": "recovering", "blocked_reason": "ema20_distance_chase_block"})
+            return self._blocked(symbol, "ema20_distance_chase_block", quadrant=quadrant, direction=direction, metadata_extra=metadata_extra)
+
+        factor_scores = self._score_factors(direction, quadrant, tf15, tf1h)
+        divergence = self._rsi_divergence_bonus(direction, tf15, tf1h)
+        if divergence > 0:
+            factor_scores["rsi_divergence"] = divergence
+        score = sum(factor_scores.values())
+        threshold = float(self.config.recovering_state_score_threshold)
+        metadata = self._metadata(quadrant, direction, score, threshold, factor_scores, tf15, tf1h)
+        metadata.update(metadata_extra)
+        metadata.update(
+            {
+                "quadrant_state": "recovering",
+                "quadrant_recovering_direction": direction,
+                "portfolio_equity": _float(portfolio.get("equity", portfolio.get("account_equity", portfolio.get("available_balance"))), 0.0),
+                "recovering_state_score_threshold": threshold,
+                "recovering_state_portion_multiplier": float(self.config.recovering_state_portion_multiplier),
+            }
+        )
+        if score + 1e-12 < threshold:
+            intent = self._watchlist_intent(
+                symbol=symbol,
+                direction=direction,
+                score=score,
+                reason="quadrant_recovering_watchlist",
+                metadata=metadata,
+            )
+            if intent:
+                metadata["watchlist_intent"] = intent
+            return QuadrantSignal(
+                allowed=False,
+                symbol=symbol,
+                direction=direction,
+                quadrant=quadrant,
+                resonance_score=score,
+                threshold=threshold,
+                factor_scores=factor_scores,
+                entry_price_ref=price,
+                atr_stop_distance=self._atr_stop_distance(tf15),
+                reason="quadrant_recovering_watchlist",
+                metadata=metadata,
+            )
+
+        atr_stop_distance = self._atr_stop_distance(tf15)
+        leverage = max(1, min(3, int(self.config.max_leverage)))
+        base_portion = self._position_portion(price, atr_stop_distance, portfolio)
+        multiplier = max(0.0, min(1.0, float(self.config.recovering_state_portion_multiplier)))
+        target_portion = base_portion * multiplier
+        stop_loss = price - atr_stop_distance if direction == "long" else price + atr_stop_distance
+        metadata.update(
+            {
+                "allowed_reason": "quadrant_recovering_reduced",
+                "signal_quality": "recovering_reduced",
+                "base_target_portion": base_portion,
+                "target_portion": target_portion,
+                "min_entry_notional_usdt": self.config.min_entry_notional_usdt,
+                "min_entry_margin_usdt": self.config.min_entry_margin_usdt,
+                "leverage_cap": leverage,
+                "leverage": leverage,
+            }
+        )
+        return QuadrantSignal(
+            allowed=True,
+            symbol=symbol,
+            direction=direction,
+            quadrant=quadrant,
+            resonance_score=score,
+            threshold=threshold,
+            factor_scores=factor_scores,
+            entry_price_ref=price,
+            atr_stop_distance=atr_stop_distance,
+            target_portion=target_portion,
+            leverage=leverage,
+            stop_loss_price=stop_loss,
+            take_profit_levels=self._take_profit_levels(price, atr_stop_distance, direction),
+            reason="quadrant_resonance_recovering_reduced",
+            metadata=metadata,
+        )
 
     def _allow_high_score_missing_15m_probe(self, score: float, threshold: float) -> bool:
         score_value = float(score)
@@ -445,6 +738,220 @@ class QuadrantResonanceEngine:
             and score_value + 1e-12 >= float(threshold)
             and score_value + 1e-12 >= float(self.config.high_score_15m_override_threshold)
         )
+
+    def _requires_mid_score_macd_confirmation(self, score: float, threshold: float, direction: str, tf1h: Dict[str, Any]) -> bool:
+        return (
+            bool(self.config.mid_score_requires_3bar_macd)
+            and float(threshold) <= float(score)
+            and float(score) <= float(self.config.mid_score_upper_bound) + 1e-12
+            and not self._hist_strengthening(
+                self._series(tf1h, "macd_hist_series", "macd_hist_array", "macd_hist"),
+                direction,
+                bars=3,
+            )
+        )
+
+    def _probe_no_15m_veto_reasons(
+        self,
+        direction: str,
+        quadrant: Quadrant,
+        tf15: Dict[str, Any],
+        tf1h: Dict[str, Any],
+        market_context: Optional[Dict[str, Any]],
+        *,
+        probe_resonance_score: float,
+        flow_alignment_score: float,
+    ) -> list[str]:
+        if not bool(self.config.probe_no_15m_veto_enabled):
+            return []
+        ctx = market_context if isinstance(market_context, dict) else {}
+        reasons: list[str] = []
+
+        if bool(self.config.probe_min_15m_resonance_enabled):
+            reason = self._minimum_15m_resonance_veto_reason(direction, tf15, tf1h)
+            if reason:
+                reasons.append(reason)
+
+        if bool(self.config.probe_resonance_score_enabled):
+            min_resonance = (
+                self.config.probe_resonance_min_threshold_short
+                if direction == "short"
+                else self.config.probe_resonance_min_threshold
+            )
+            if float(probe_resonance_score) + 1e-12 < float(min_resonance):
+                reasons.append("probe_veto_low_resonance_score")
+
+        if bool(self.config.probe_no_15m_breadth_veto_enabled):
+            breadth = ctx.get("market_breadth") if isinstance(ctx.get("market_breadth"), dict) else {}
+            confirm_count = int(_float(breadth.get("confirm_count"), 0.0))
+            invalid_count = int(_float(breadth.get("invalid_count"), 0.0))
+            invalid_min = max(1, int(self.config.probe_breadth_zero_confirm_invalid_min or 2))
+            if confirm_count == 0 and invalid_count >= invalid_min:
+                reasons.append(f"breadth_zero_confirm_invalid_{invalid_count}")
+            if bool(self.config.probe_direction_breadth_veto_enabled):
+                reason = self._direction_aware_breadth_veto(direction, breadth)
+                if reason:
+                    reasons.append(reason)
+
+        if bool(self.config.probe_no_15m_flow_veto_enabled):
+            flow = ctx.get("flow") if isinstance(ctx.get("flow"), dict) else ctx
+            cvd = _float(flow.get("cvd"), 0.0)
+            oi_delta = _float(flow.get("oi_delta"), 0.0)
+            imbalance = _float(flow.get("imbalance"), 0.0)
+            liq_norm = _float(flow.get("liq_norm"), 0.0)
+            if direction == "long" and cvd < 0.0 and oi_delta < 0.0 and imbalance < 0.0:
+                reasons.append("long_flow_all_bearish")
+            if direction == "short" and cvd > 0.0 and oi_delta > 0.0 and imbalance > 0.0:
+                reasons.append("short_flow_all_bullish")
+            if direction == "long" and liq_norm < 0.0 and cvd < 0.0 and imbalance < 0.0:
+                reasons.append("long_liq_flow_bearish")
+            if direction == "short" and liq_norm > 0.0 and cvd > 0.0 and imbalance > 0.0:
+                reasons.append("short_liq_flow_bullish")
+
+        if bool(self.config.probe_flow_alignment_score_enabled):
+            min_flow = (
+                self.config.probe_min_flow_alignment_short
+                if direction == "short"
+                else self.config.probe_min_flow_alignment
+            )
+            if float(flow_alignment_score) + 1e-12 < float(min_flow):
+                reasons.append("probe_veto_flow_misaligned")
+
+        if bool(self.config.probe_no_15m_rsi_macd_veto_enabled):
+            rsi15 = _float(tf15.get("rsi"), 50.0)
+            rsi1h = _float(tf1h.get("rsi"), 50.0)
+            hist15 = self._series(tf15, "macd_hist_series", "macd_hist_array", "macd_hist")
+            hist1h = self._series(tf1h, "macd_hist_series", "macd_hist_array", "macd_hist")
+            hist15_strengthening = self._hist_strengthening(hist15, direction, bars=3)
+            hist1h_strengthening = self._hist_strengthening(hist1h, direction, bars=3)
+            if direction == "long" and (rsi15 > self.config.long_rsi_max or rsi1h > 68.0) and not hist15_strengthening and not hist1h_strengthening:
+                reasons.append("long_rsi_hot_macd_not_strengthening")
+            if direction == "short" and (rsi15 < self.config.short_rsi_min or rsi1h < 32.0) and not hist15_strengthening and not hist1h_strengthening:
+                reasons.append("short_rsi_cold_macd_not_strengthening")
+
+        return reasons
+
+    def _minimum_15m_resonance_veto_reason(self, direction: str, tf15: Dict[str, Any], tf1h: Dict[str, Any]) -> str:
+        if not bool(self.config.probe_require_macd_15m_or_1h_near_ema):
+            return ""
+        hist15 = self._series(tf15, "macd_hist_series", "macd_hist_array", "macd_hist")
+        hist1h = self._series(tf1h, "macd_hist_series", "macd_hist_array", "macd_hist")
+        macd15 = self._hist_strengthening(hist15, direction, bars=3)
+        macd1h = self._hist_strengthening(hist1h, direction, bars=3)
+        near_ema = bool(self._entry_pattern_detail(direction, tf15).get("near_ema", False))
+        if macd15 or (macd1h and near_ema):
+            return ""
+        return "probe_veto_no_15m_resonance"
+
+    def _direction_aware_breadth_veto(self, direction: str, breadth: Dict[str, Any]) -> str:
+        btc_30m = _float(breadth.get("btc_ret_30m"), 0.0)
+        btc_60m = _float(breadth.get("btc_ret_60m"), 0.0)
+        alt_med = _float(breadth.get("alt_median_60m"), 0.0)
+        if direction == "short":
+            if (
+                btc_30m > self.config.short_probe_btc_30m_veto_pct
+                or btc_60m > self.config.short_probe_btc_60m_veto_pct
+                or alt_med > self.config.short_probe_alt_med_veto_pct
+            ):
+                return f"probe_veto_short_against_breadth:btc_30m={btc_30m:.4f},btc_60m={btc_60m:.4f},alt_med={alt_med:.4f}"
+        elif (
+            btc_30m < -self.config.long_probe_btc_30m_veto_pct
+            or btc_60m < -self.config.long_probe_btc_60m_veto_pct
+            or alt_med < -self.config.long_probe_alt_med_veto_pct
+        ):
+            return f"probe_veto_long_against_breadth:btc_30m={btc_30m:.4f},btc_60m={btc_60m:.4f},alt_med={alt_med:.4f}"
+        return ""
+
+    def _compute_probe_resonance_score(self, direction: str, quadrant: Quadrant, tf15: Dict[str, Any], tf1h: Dict[str, Any]) -> float:
+        hist15 = self._series(tf15, "macd_hist_series", "macd_hist_array", "macd_hist")
+        hist1h = self._series(tf1h, "macd_hist_series", "macd_hist_array", "macd_hist")
+        score = 0.30 if quadrant in (Quadrant.Q1, Quadrant.Q2, Quadrant.Q3, Quadrant.Q4) else 0.0
+        if self._hist_strengthening(hist1h, direction, bars=3):
+            score += 0.30
+        if self._hist_strengthening(hist15, direction, bars=3):
+            score += 0.25
+        if bool(self._entry_pattern_detail(direction, tf15).get("near_ema", False)):
+            score += 0.10
+        if len(hist1h) >= 2:
+            if direction == "long" and hist1h[-2] <= 0.0 < hist1h[-1]:
+                score += 0.05
+            if direction == "short" and hist1h[-2] >= 0.0 > hist1h[-1]:
+                score += 0.05
+        return max(0.0, min(1.0, score))
+
+    def _flow_alignment_score(self, direction: str, market_context: Optional[Dict[str, Any]]) -> float:
+        ctx = market_context if isinstance(market_context, dict) else {}
+        flow = ctx.get("flow") if isinstance(ctx.get("flow"), dict) else ctx
+        side = 1.0 if direction == "long" else -1.0
+        components = (
+            (_float(flow.get("cvd"), 0.0) * side, 0.35),
+            (_float(flow.get("oi_delta"), 0.0) * side, 0.25),
+            (_float(flow.get("imbalance"), 0.0) * side, 0.25),
+            (_float(flow.get("liq_norm"), 0.0) * side, 0.15),
+        )
+        raw = sum(value * weight for value, weight in components)
+        return math.tanh(raw * 3.0)
+
+    def _grade_probe_veto(
+        self,
+        veto_reasons: list[str],
+        direction: str,
+        tf15: Dict[str, Any],
+        tf1h: Dict[str, Any],
+        market_context: Optional[Dict[str, Any]],
+        flow_alignment_score: float,
+    ) -> Dict[str, Any]:
+        if not bool(self.config.probe_veto_graded_enabled):
+            return {"action": "reject", "portion_multiplier": 0.0, "reason": "graded_disabled"}
+        ctx = market_context if isinstance(market_context, dict) else {}
+        breadth = ctx.get("market_breadth") if isinstance(ctx.get("market_breadth"), dict) else {}
+        hist15 = self._series(tf15, "macd_hist_series", "macd_hist_array", "macd_hist")
+        hist1h = self._series(tf1h, "macd_hist_series", "macd_hist_array", "macd_hist")
+        macd15 = self._hist_strengthening(hist15, direction, bars=3)
+        macd1h = self._hist_strengthening(hist1h, direction, bars=3)
+        hard_reasons: list[str] = []
+        multipliers: list[float] = []
+
+        for reason in veto_reasons:
+            item = str(reason or "")
+            if item == "probe_veto_no_15m_resonance":
+                if macd15 or macd1h:
+                    multipliers.append(float(self.config.probe_veto_breadth_reduced_multiplier))
+                else:
+                    hard_reasons.append(item)
+                continue
+            if item.startswith("probe_veto_long_against_breadth") or item.startswith("probe_veto_short_against_breadth"):
+                against = self._btc_against_breadth_abs(direction, breadth)
+                if against < float(self.config.probe_veto_hard_reject_btc_against_pct):
+                    multipliers.append(float(self.config.probe_veto_direction_reduced_multiplier))
+                else:
+                    hard_reasons.append(item)
+                continue
+            if item.startswith("breadth_zero_confirm_invalid"):
+                multipliers.append(float(self.config.probe_veto_breadth_reduced_multiplier))
+                continue
+            if item == "probe_veto_flow_misaligned":
+                if float(flow_alignment_score) > float(self.config.probe_veto_hard_reject_flow_score):
+                    multipliers.append(float(self.config.probe_veto_direction_reduced_multiplier))
+                else:
+                    hard_reasons.append(item)
+                continue
+            hard_reasons.append(item)
+
+        if hard_reasons:
+            return {"action": "reject", "portion_multiplier": 0.0, "hard_reasons": hard_reasons}
+        if multipliers:
+            return {"action": "open_reduced", "portion_multiplier": max(0.0, min(1.0, min(multipliers)))}
+        return {"action": "reject", "portion_multiplier": 0.0, "reason": "no_reducible_veto"}
+
+    @staticmethod
+    def _btc_against_breadth_abs(direction: str, breadth: Dict[str, Any]) -> float:
+        btc_30m = _float(breadth.get("btc_ret_30m"), 0.0)
+        btc_60m = _float(breadth.get("btc_ret_60m"), 0.0)
+        alt_med = _float(breadth.get("alt_median_60m"), 0.0)
+        if direction == "short":
+            return max(0.0, btc_30m, btc_60m, alt_med)
+        return max(0.0, -btc_30m, -btc_60m, -alt_med)
 
     def _probe_position_portion(self, portfolio: Dict[str, Any]) -> float:
         equity = _float(portfolio.get("equity", portfolio.get("account_equity", portfolio.get("available_balance"))), 0.0)
@@ -474,6 +981,10 @@ class QuadrantResonanceEngine:
         tf15: Dict[str, Any],
         tf1h: Dict[str, Any],
     ) -> Dict[str, Any]:
+        hist15 = self._series(tf15, "macd_hist_series", "macd_hist_array", "macd_hist")
+        hist1h = self._series(tf1h, "macd_hist_series", "macd_hist_array", "macd_hist")
+        entry_detail = self._entry_pattern_detail(direction, tf15)
+        entry_quality = self._entry_15m_quality(direction, tf15, detail=entry_detail)
         return {
             "strategy_mode": "quadrant_resonance",
             "strategy_source": "ema_macd_rsi_quadrant_resonance",
@@ -488,6 +999,20 @@ class QuadrantResonanceEngine:
             "entry_ema20_1h": _float(tf1h.get("ema20"), 0.0),
             "entry_ema50_1h": _float(tf1h.get("ema50"), 0.0),
             "entry_atr_15m": _float(tf15.get("atr"), 0.0),
+            "macd_hist_15m_last3": hist15[-3:],
+            "macd_hist_1h_last3": hist1h[-3:],
+            "macd_hist_15m_strengthening": self._hist_strengthening(hist15, direction, bars=3),
+            "macd_hist_1h_strengthening": self._hist_strengthening(hist1h, direction, bars=3),
+            "entry_15m_detail": entry_detail,
+            "entry_15m_quality_score": entry_quality["score"],
+            "entry_15m_quality_bucket": entry_quality["bucket"],
+            "entry_15m_missing_conditions": entry_quality["missing_conditions"],
+            "entry_15m_quality_live_pass": (
+                str(self.config.entry_15m_quality_mode or "").strip().lower() == "live"
+                and float(entry_quality["score"]) + 1e-12 >= float(self.config.entry_15m_quality_open_min)
+            ),
+            "min_entry_notional_usdt": self.config.min_entry_notional_usdt,
+            "min_entry_margin_usdt": self.config.min_entry_margin_usdt,
             "stage": "final",
         }
 
@@ -570,6 +1095,71 @@ class QuadrantResonanceEngine:
             debug["missing_indicator_fields"] = missing_fields
         return {"blocked_reason_detail": detail, "quadrant_debug": debug}
 
+    def _quadrant_state_debug(self, tf4h: Dict[str, Any]) -> Dict[str, Any]:
+        ema_state = self._ema_state(tf4h)
+        hist = self._series(tf4h, "macd_hist_series", "macd_hist_array", "macd_hist")
+        if not bool(self.config.quadrant_4h_three_state_enabled) or ema_state == 0 or len(hist) < 3:
+            return {"quadrant_state": "defense", "quadrant_recovering_direction": ""}
+        slope_improving = hist[-1] > hist[-2] > hist[-3]
+        slope_weakening = hist[-1] < hist[-2] < hist[-3]
+        if ema_state == 1 and slope_improving:
+            return {"quadrant_state": "recovering", "quadrant_recovering_direction": "long"}
+        if ema_state == -1 and slope_weakening:
+            return {"quadrant_state": "recovering", "quadrant_recovering_direction": "short"}
+        return {"quadrant_state": "defense", "quadrant_recovering_direction": ""}
+
+    def _watchlist_intent(
+        self,
+        *,
+        symbol: str,
+        direction: str,
+        score: float,
+        reason: str,
+        metadata: Dict[str, Any],
+        veto_reasons: Optional[list[str]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        if not bool(self.config.watchlist_intent_enabled):
+            return None
+        if float(score) + 1e-12 < float(self.config.watchlist_min_signal_score):
+            return None
+        quality = _float(metadata.get("entry_15m_quality_score"), 0.0)
+        bucket = str(metadata.get("entry_15m_quality_bucket") or "")
+        if reason == "missing_15m_entry_pattern" and bucket == "hold":
+            return None
+        missing = metadata.get("entry_15m_missing_conditions")
+        if not isinstance(missing, list):
+            missing = []
+        veto_reasons = veto_reasons or []
+        reversible = any(
+            str(reason_item).startswith("breadth_zero_confirm_invalid")
+            or str(reason_item).startswith("probe_veto_long_against_breadth")
+            or str(reason_item).startswith("probe_veto_short_against_breadth")
+            for reason_item in veto_reasons
+        )
+        if reason == "probe_no_15m_direction_veto" and not (
+            bool(self.config.watchlist_include_probe_veto) and reversible
+        ):
+            return None
+        candidate_reason = "reversible_probe_veto" if reason == "probe_no_15m_direction_veto" else reason
+        ttl = (
+            self.config.watchlist_probe_veto_ttl_bars
+            if candidate_reason == "reversible_probe_veto"
+            else self.config.watchlist_ttl_bars
+        )
+        return {
+            "enabled": True,
+            "dry_run": bool(self.config.watchlist_intent_dry_run),
+            "symbol": str(symbol or "").upper(),
+            "side": direction,
+            "score": float(score),
+            "entry_15m_quality_score": quality,
+            "entry_15m_quality_bucket": bucket,
+            "candidate_reason": candidate_reason,
+            "missing_conditions": list(missing),
+            "veto_reasons": list(veto_reasons),
+            "ttl_bars": max(1, int(ttl)),
+        }
+
     @staticmethod
     def _series(tf: Dict[str, Any], *keys: str) -> list[float]:
         for key in keys:
@@ -626,26 +1216,95 @@ class QuadrantResonanceEngine:
             return e20 > e50 and (close >= e20 or (len(hist) >= 2 and hist[-1] > hist[-2]))
         return e20 < e50 and close <= e20
 
-    def _entry_pattern_ok(self, direction: str, tf15: Dict[str, Any]) -> bool:
+    def _entry_pattern_detail(self, direction: str, tf15: Dict[str, Any]) -> Dict[str, Any]:
         close = _float(tf15.get("close"), 0.0)
+        open_price = _float(tf15.get("open"), close)
+        high = _float(tf15.get("high"), close)
+        low = _float(tf15.get("low"), close)
         ema20 = _float(tf15.get("ema20"), close)
         atr = max(_float(tf15.get("atr"), 0.0), close * 0.001, 1e-9)
         near_ema = abs(close - ema20) <= atr
         hist = self._series(tf15, "macd_hist_series", "macd_hist_array", "macd_hist")
-        if len(hist) >= 2:
-            if direction == "long" and hist[-2] <= 0 < hist[-1]:
-                return near_ema
-            if direction == "short" and hist[-2] >= 0 > hist[-1]:
-                return near_ema
-        open_price = _float(tf15.get("open"), close)
-        high = _float(tf15.get("high"), close)
-        low = _float(tf15.get("low"), close)
+        hist_prev = hist[-2] if len(hist) >= 2 else 0.0
+        hist_current = hist[-1] if hist else 0.0
+        if direction == "long":
+            hist_cross = hist_prev <= 0 < hist_current
+            direction_candle = close > open_price
+        else:
+            hist_cross = hist_prev >= 0 > hist_current
+            direction_candle = close < open_price
         body = abs(close - open_price)
         wick = high - low
         pin_bar = wick > 0 and body / wick <= 0.35
-        bullish = close > open_price
-        bearish = close < open_price
-        return near_ema and ((direction == "long" and (bullish or pin_bar)) or (direction == "short" and (bearish or pin_bar)))
+        ok = near_ema and (hist_cross or direction_candle or pin_bar)
+        return {
+            "ok": bool(ok),
+            "near_ema": bool(near_ema),
+            "hist_cross": bool(hist_cross),
+            "direction_candle": bool(direction_candle),
+            "pin_bar": bool(pin_bar),
+            "close": close,
+            "ema20": ema20,
+            "atr": atr,
+            "ema_distance_atr_ratio": abs(close - ema20) / atr,
+            "hist_prev": hist_prev,
+            "hist_current": hist_current,
+        }
+
+    def _entry_15m_quality(
+        self,
+        direction: str,
+        tf15: Dict[str, Any],
+        *,
+        detail: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        detail = detail or self._entry_pattern_detail(direction, tf15)
+        hist = self._series(tf15, "macd_hist_series", "macd_hist_array", "macd_hist")
+        macd_strengthening = self._hist_strengthening(hist, direction, bars=3)
+        ema_ratio = _float(detail.get("ema_distance_atr_ratio"), 99.0)
+        score = 0.0
+        missing: list[str] = []
+
+        if bool(detail.get("near_ema", False)):
+            score += 0.25
+            if ema_ratio < 0.5:
+                score += 0.10
+        else:
+            missing.append("near_ema")
+
+        if macd_strengthening:
+            score += 0.20
+        else:
+            missing.append("macd_15m_strengthening")
+
+        if bool(detail.get("hist_cross", False)):
+            score += 0.15
+        else:
+            missing.append("hist_cross")
+
+        if bool(detail.get("direction_candle", False)):
+            score += 0.15
+        else:
+            missing.append("direction_candle")
+
+        if bool(detail.get("pin_bar", False)):
+            score += 0.10
+        else:
+            missing.append("pin_bar")
+
+        score = max(0.0, min(1.0, score))
+        if bool(detail.get("ok", False)) and score < float(self.config.entry_15m_quality_open_min):
+            score = float(self.config.entry_15m_quality_open_min)
+        if score >= float(self.config.entry_15m_quality_open_min):
+            bucket = "open"
+        elif score >= float(self.config.entry_15m_quality_watch_min):
+            bucket = "watch"
+        else:
+            bucket = "hold"
+        return {"score": score, "bucket": bucket, "missing_conditions": missing}
+
+    def _entry_pattern_ok(self, direction: str, tf15: Dict[str, Any]) -> bool:
+        return bool(self._entry_pattern_detail(direction, tf15).get("ok"))
 
     def _rsi_zone_ok(self, direction: str, quadrant: Quadrant, tf15: Dict[str, Any]) -> bool:
         rsi = _float(tf15.get("rsi"), 50.0)

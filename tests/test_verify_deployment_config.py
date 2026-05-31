@@ -149,10 +149,10 @@ def test_verify_deployment_rejects_unsafe_ioc_execution_settings(tmp_path: Path)
     assert "entry_market_fallback_min_score" in result.stdout
 
 
-def test_verify_deployment_rejects_quadrant_bucket_total_cap_below_five(tmp_path: Path) -> None:
+def test_verify_deployment_rejects_quadrant_bucket_total_cap_below_four(tmp_path: Path) -> None:
     cfg = json.loads(Path("config/trading_config_fund_flow.json").read_text(encoding="utf-8"))
-    cfg["fund_flow"]["max_active_symbols"] = 4
-    cfg["fund_flow"]["dynamic_max_active_symbols"]["max_active_symbols"] = 4
+    cfg["fund_flow"]["max_active_symbols"] = 3
+    cfg["fund_flow"]["dynamic_max_active_symbols"]["max_active_symbols"] = 3
     bad_cfg = tmp_path / "bad_config.json"
     bad_cfg.write_text(json.dumps(cfg), encoding="utf-8")
 
@@ -210,8 +210,8 @@ def test_verify_deployment_rejects_disabled_btc_beta_risk(tmp_path: Path) -> Non
     cfg["fund_flow"]["btc_beta_risk"] = {
         "enabled": False,
         "min_corr_for_btc_weight": 0.20,
-        "risk_score_reduce_threshold": 2,
-        "risk_score_close_threshold": 4,
+        "risk_score_reduce_threshold": 3,
+        "risk_score_close_threshold": 5,
     }
     bad_cfg = tmp_path / "bad_config.json"
     bad_cfg.write_text(json.dumps(cfg), encoding="utf-8")
@@ -235,8 +235,8 @@ def test_verify_deployment_rejects_unsafe_btc_beta_thresholds(tmp_path: Path) ->
         "fast_fail_window_bars": 3,
         "fast_fail_mae_threshold": -0.001,
         "fast_fail_mfe_threshold": 0.003,
-        "risk_score_reduce_threshold": 3,
-        "risk_score_close_threshold": 3,
+        "risk_score_reduce_threshold": 2,
+        "risk_score_close_threshold": 4,
     }
     bad_cfg = tmp_path / "bad_config.json"
     bad_cfg.write_text(json.dumps(cfg), encoding="utf-8")

@@ -292,8 +292,9 @@ def assert_position_count_limit_by_margin(ff: Dict[str, Any]) -> List[str]:
         errors.append("position_count_limit_by_margin.enabled must be true")
     if _as_float(limit.get("small_margin_threshold_usdt"), 0.0) != 5.0:
         errors.append("position_count_limit_by_margin.small_margin_threshold_usdt must be 5.0")
-    if int(_as_float(limit.get("max_small_margin_positions"), 0.0)) != 5:
-        errors.append("position_count_limit_by_margin.max_small_margin_positions must be 5")
+    expected_small = 4 if is_quadrant else 5
+    if int(_as_float(limit.get("max_small_margin_positions"), 0.0)) != expected_small:
+        errors.append(f"position_count_limit_by_margin.max_small_margin_positions must be {expected_small}")
     expected_large = 0 if is_quadrant else 4
     expected_small_leverage = 9
     if int(_as_float(limit.get("max_large_margin_positions"), 0.0)) != expected_large:
@@ -359,16 +360,16 @@ def assert_btc_beta_risk(ff: Dict[str, Any]) -> List[str]:
         errors.append("btc_beta_risk.fast_fail_mae_threshold must be <= -0.0035")
     if _as_float(beta.get("fast_fail_mfe_threshold"), 0.0) > 0.002 + 1e-12:
         errors.append("btc_beta_risk.fast_fail_mfe_threshold must be <= 0.002")
-    if int(_as_float(beta.get("risk_score_reduce_threshold"), 0.0)) != 2:
-        errors.append("btc_beta_risk.risk_score_reduce_threshold must be 2")
-    if int(_as_float(beta.get("risk_score_close_threshold"), 0.0)) != 4:
-        errors.append("btc_beta_risk.risk_score_close_threshold must be 4")
+    if int(_as_float(beta.get("risk_score_reduce_threshold"), 0.0)) != 3:
+        errors.append("btc_beta_risk.risk_score_reduce_threshold must be 3")
+    if int(_as_float(beta.get("risk_score_close_threshold"), 0.0)) != 5:
+        errors.append("btc_beta_risk.risk_score_close_threshold must be 5")
     if _as_float(beta.get("small_notional_close_threshold"), 0.0) > 5.0:
         errors.append("btc_beta_risk.small_notional_close_threshold must be <= 5")
-    if _as_float(beta.get("small_notional_close_equity_pct"), 0.0) < 0.02:
-        errors.append("btc_beta_risk.small_notional_close_equity_pct must be >= 0.02")
-    if _as_float(beta.get("tiny_notional_skip_threshold"), 0.0) < 1.0:
-        errors.append("btc_beta_risk.tiny_notional_skip_threshold must be >= 1")
+    if _as_float(beta.get("small_notional_close_equity_pct"), 0.0) < 0.015:
+        errors.append("btc_beta_risk.small_notional_close_equity_pct must be >= 0.015")
+    if _as_float(beta.get("tiny_notional_skip_threshold"), 0.0) < 0.5:
+        errors.append("btc_beta_risk.tiny_notional_skip_threshold must be >= 0.5")
     return errors
 
 

@@ -52,6 +52,36 @@ def _risk_with_symbols(*symbols: str) -> FundFlowRiskEngine:
     )
 
 
+def test_risk_engine_caps_entry_portion_by_max_single_position_notional() -> None:
+    risk = FundFlowRiskEngine(
+        {
+            "fund_flow": {
+                "min_leverage": 1,
+                "default_leverage": 3,
+                "max_leverage": 3,
+                "max_open_portion": 1.0,
+                "max_single_position_notional": 40.0,
+                "min_open_notional": {"default_usdt": 0.0},
+                "final_signal_notional_floor": {"enabled": False},
+            }
+        },
+        symbol_whitelist=["ATOMUSDT"],
+    )
+    decision = FundFlowDecision(
+        operation=Operation.BUY,
+        symbol="ATOMUSDT",
+        target_portion_of_balance=0.50,
+        leverage=3,
+        metadata={"account_equity": 100.0},
+    )
+
+    validated = risk.validate_decision(decision)
+
+    assert validated.target_portion_of_balance == pytest.approx(40.0 / (100.0 * 3.0))
+    assert validated.metadata["max_single_position_notional_cap_applied"] is True
+    assert validated.metadata["max_single_position_notional"] == pytest.approx(40.0)
+
+
 def test_risk_engine_allows_atom_probe_when_notional_exceeds_default_minimum() -> None:
     decision = FundFlowDecision(
         operation=Operation.BUY,
