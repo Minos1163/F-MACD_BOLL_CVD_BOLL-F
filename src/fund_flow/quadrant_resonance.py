@@ -66,9 +66,22 @@ class QuadrantResonanceConfig:
     probe_flow_alignment_score_enabled: bool = False
     probe_min_flow_alignment: float = -0.20
     probe_min_flow_alignment_short: float = -0.15
+    probe_min_entry_score_enabled: bool = False
+    probe_min_entry_score: float = 0.45
     entry_15m_quality_mode: str = "audit"
     entry_15m_quality_open_min: float = 0.75
     entry_15m_quality_watch_min: float = 0.55
+    direction_model: str = "legacy"
+    direction_4h_lookback_bars: int = 50
+    direction_1h_lookback_bars: int = 50
+    direction_15m_lookback_bars: int = 30
+    direction_open_min_abs: float = 0.30
+    direction_strong_conflict_min_abs: float = 0.30
+    direction_transition_mode_enabled: bool = False
+    direction_transition_1h_min_abs: float = 0.05
+    direction_generates_both: bool = False
+    quadrant_4h_role: str = "legacy_direction"
+    ema_conflict_entry_penalty: float = 0.10
     watchlist_intent_enabled: bool = False
     watchlist_intent_dry_run: bool = True
     watchlist_min_signal_score: float = 0.75
@@ -170,9 +183,22 @@ class QuadrantResonanceConfig:
             probe_flow_alignment_score_enabled=bool(entry.get("probe_flow_alignment_act_enabled", entry.get("probe_flow_alignment_score_enabled", False))),
             probe_min_flow_alignment=_float(entry.get("probe_min_flow_alignment"), -0.20),
             probe_min_flow_alignment_short=_float(entry.get("probe_min_flow_alignment_short"), -0.15),
+            probe_min_entry_score_enabled=bool(entry.get("probe_min_entry_score_enabled", False)),
+            probe_min_entry_score=_float(entry.get("probe_min_entry_score"), 0.45),
             entry_15m_quality_mode=str(entry.get("entry_15m_quality_mode", "audit") or "audit"),
             entry_15m_quality_open_min=_float(entry.get("entry_15m_quality_open_min"), 0.75),
             entry_15m_quality_watch_min=_float(entry.get("entry_15m_quality_watch_min"), 0.55),
+            direction_model=str(entry.get("direction_model", "legacy") or "legacy"),
+            direction_4h_lookback_bars=int(_float(entry.get("direction_4h_lookback_bars"), 50)),
+            direction_1h_lookback_bars=int(_float(entry.get("direction_1h_lookback_bars"), 50)),
+            direction_15m_lookback_bars=int(_float(entry.get("direction_15m_lookback_bars"), 30)),
+            direction_open_min_abs=_float(entry.get("direction_open_min_abs"), 0.30),
+            direction_strong_conflict_min_abs=_float(entry.get("direction_strong_conflict_min_abs"), 0.30),
+            direction_transition_mode_enabled=bool(entry.get("direction_transition_mode_enabled", False)),
+            direction_transition_1h_min_abs=_float(entry.get("direction_transition_1h_min_abs"), 0.05),
+            direction_generates_both=bool(entry.get("direction_generates_both", False)),
+            quadrant_4h_role=str(entry.get("quadrant_4h_role", "legacy_direction") or "legacy_direction"),
+            ema_conflict_entry_penalty=_float(entry.get("ema_conflict_entry_penalty"), 0.10),
             watchlist_intent_enabled=bool(entry.get("watchlist_intent_enabled", False)),
             watchlist_intent_dry_run=bool(entry.get("watchlist_intent_dry_run", True)),
             watchlist_min_signal_score=_float(entry.get("watchlist_min_signal_score"), 0.75),
@@ -278,6 +304,19 @@ class QuadrantResonanceEngine:
         tf4h = timeframes.get("4h", {}) if isinstance(timeframes, dict) else {}
         if not tf15 or not tf1h or not tf4h:
             return self._blocked(symbol, "missing_timeframes")
+        if (
+            str(self.config.direction_model or "").strip().lower() == "multi_bar_slope"
+            and bool(self.config.direction_generates_both)
+        ):
+            return self._analyze_multi_bar_direction_generated(
+                symbol=symbol,
+                price=price,
+                tf15=tf15,
+                tf1h=tf1h,
+                tf4h=tf4h,
+                portfolio=portfolio,
+                market_context=market_context,
+            )
 
         quadrant = self.detect_quadrant(tf4h)
         if quadrant is Quadrant.DEFENSE:
@@ -303,6 +342,16 @@ class QuadrantResonanceEngine:
         if self._too_far_from_ema20(direction, price, tf1h):
             return self._blocked(symbol, "ema20_distance_chase_block", quadrant=quadrant, direction=direction)
 
+        direction_gate = self._multi_bar_direction_gate(direction, tf4h, tf1h, tf15)
+        if not bool(direction_gate.get("ok", True)):
+            return self._blocked(
+                symbol,
+                str(direction_gate.get("reason") or "multi_bar_direction_no_entry"),
+                quadrant=quadrant,
+                direction=direction,
+                metadata_extra={"direction_gate": direction_gate},
+            )
+
         factor_scores = self._score_factors(direction, quadrant, tf15, tf1h)
         divergence = self._rsi_divergence_bonus(direction, tf15, tf1h)
         if divergence > 0:
@@ -315,6 +364,8 @@ class QuadrantResonanceEngine:
         metadata_extra: Dict[str, Any] = {}
         if penalty > 0:
             metadata_extra["extreme_4h_rsi_penalty"] = penalty
+        if direction_gate:
+            metadata_extra["direction_gate"] = direction_gate
         if self._requires_mid_score_macd_confirmation(score, threshold, direction, tf1h):
             metadata = self._metadata(quadrant, direction, score, threshold, factor_scores, tf15, tf1h)
             metadata.update(metadata_extra)
@@ -335,6 +386,7 @@ class QuadrantResonanceEngine:
             metadata = self._metadata(quadrant, direction, score, threshold, factor_scores, tf15, tf1h)
             metadata.update(metadata_extra)
             if self._allow_high_score_missing_15m_probe(score, threshold):
+                entry_quality_score = _float(metadata.get("entry_15m_quality_score"), 0.0)
                 probe_resonance_score = self._compute_probe_resonance_score(direction, quadrant, tf15, tf1h)
                 flow_alignment_score = self._flow_alignment_score(direction, market_context)
                 metadata["probe_resonance_score"] = probe_resonance_score
@@ -347,6 +399,7 @@ class QuadrantResonanceEngine:
                     market_context,
                     probe_resonance_score=probe_resonance_score,
                     flow_alignment_score=flow_alignment_score,
+                    entry_quality_score=entry_quality_score,
                 )
                 metadata["probe_no_15m_veto_reasons"] = veto_reasons
                 if veto_reasons:
@@ -529,6 +582,138 @@ class QuadrantResonanceEngine:
             stop_loss_price=stop_loss,
             take_profit_levels=self._take_profit_levels(price, atr_stop_distance, direction),
             reason="quadrant_resonance_pass",
+            metadata=metadata,
+        )
+
+    def _analyze_multi_bar_direction_generated(
+        self,
+        *,
+        symbol: str,
+        price: float,
+        tf15: Dict[str, Any],
+        tf1h: Dict[str, Any],
+        tf4h: Dict[str, Any],
+        portfolio: Dict[str, Any],
+        market_context: Optional[Dict[str, Any]],
+    ) -> QuadrantSignal:
+        quadrant = self.detect_quadrant(tf4h)
+        direction_gate = self._select_multi_bar_direction(tf4h, tf1h, tf15)
+        if not bool(direction_gate.get("ok", False)):
+            return self._blocked(
+                symbol,
+                str(direction_gate.get("reason") or "multi_bar_no_direction"),
+                quadrant=quadrant,
+                metadata_extra={
+                    "direction_gate": direction_gate,
+                    "quadrant_debug": self._quadrant_debug(tf4h, quadrant).get("quadrant_debug"),
+                },
+            )
+
+        direction = str(direction_gate.get("direction") or direction_gate.get("selected_direction") or "").lower()
+        if direction not in {"long", "short"}:
+            return self._blocked(symbol, "multi_bar_no_direction", quadrant=quadrant, metadata_extra={"direction_gate": direction_gate})
+
+        ema_state = self._ema_state(tf4h)
+        ema_conflict = not self._ema_consistent_with_direction(ema_state, direction)
+        quadrant_filter = {
+            "role": str(self.config.quadrant_4h_role or "ema_filter"),
+            "quadrant_4h": quadrant.value,
+            "ema_state_4h": ema_state,
+            "ema_conflict": bool(ema_conflict),
+            "ema_conflict_entry_penalty": float(self.config.ema_conflict_entry_penalty),
+        }
+
+        hard_rsi_reason = self._hard_rsi_reason(direction, tf1h)
+        if hard_rsi_reason:
+            return self._blocked(
+                symbol,
+                hard_rsi_reason,
+                quadrant=quadrant,
+                direction=direction,
+                metadata_extra={"direction_gate": direction_gate, "quadrant_filter": quadrant_filter},
+            )
+        if self._too_far_from_ema20(direction, price, tf1h):
+            return self._blocked(
+                symbol,
+                "ema20_distance_chase_block",
+                quadrant=quadrant,
+                direction=direction,
+                metadata_extra={"direction_gate": direction_gate, "quadrant_filter": quadrant_filter},
+            )
+
+        factor_scores = self._score_factors(direction, quadrant, tf15, tf1h)
+        divergence = self._rsi_divergence_bonus(direction, tf15, tf1h)
+        if divergence > 0:
+            factor_scores["rsi_divergence"] = divergence
+        score = sum(factor_scores.values())
+        threshold = self.config.standard_threshold if quadrant in (Quadrant.Q1, Quadrant.Q3) else self.config.transition_threshold
+        metadata = self._metadata(quadrant, direction, score, threshold, factor_scores, tf15, tf1h)
+        metadata["direction_gate"] = direction_gate
+        metadata["quadrant_filter"] = quadrant_filter
+
+        base_open_min = float(self.config.entry_15m_quality_open_min)
+        effective_open_min = base_open_min + (float(self.config.ema_conflict_entry_penalty) if ema_conflict else 0.0)
+        metadata["entry_15m_effective_open_min"] = effective_open_min
+        entry_score = _float(metadata.get("entry_15m_quality_score"), 0.0)
+
+        if self.config.require_15m_entry_pattern and entry_score + 1e-12 < effective_open_min:
+            intent = self._watchlist_intent(
+                symbol=symbol,
+                direction=direction,
+                score=max(score, _float(direction_gate.get("direction_score"), 0.0)),
+                reason="direction_ok_entry_watch",
+                metadata=metadata,
+            )
+            if intent:
+                metadata["watchlist_intent"] = intent
+            return QuadrantSignal(
+                allowed=False,
+                symbol=symbol,
+                direction=direction,
+                quadrant=quadrant,
+                resonance_score=score,
+                threshold=threshold,
+                factor_scores=factor_scores,
+                entry_price_ref=price,
+                atr_stop_distance=self._atr_stop_distance(tf15),
+                reason="direction_ok_entry_watch" if entry_score >= float(self.config.entry_15m_quality_watch_min) else "direction_ok_entry_too_low",
+                metadata=metadata,
+            )
+
+        legacy_threshold_bypassed = score + 1e-12 < threshold
+        if legacy_threshold_bypassed:
+            metadata["legacy_resonance_threshold_bypassed"] = True
+            metadata["legacy_resonance_score"] = score
+            metadata["legacy_resonance_threshold"] = threshold
+
+        atr_stop_distance = self._atr_stop_distance(tf15)
+        leverage = max(1, min(3, int(self.config.max_leverage)))
+        target_portion = self._position_portion(price, atr_stop_distance, portfolio)
+        stop_loss = price - atr_stop_distance if direction == "long" else price + atr_stop_distance
+        metadata.update(
+            {
+                "allowed_reason": "multi_bar_direction_generated_pass",
+                "portfolio_equity": _float(portfolio.get("equity", portfolio.get("account_equity", portfolio.get("available_balance"))), 0.0),
+                "leverage": leverage,
+                "target_portion": target_portion,
+                "legacy_resonance_threshold_bypassed": bool(legacy_threshold_bypassed),
+            }
+        )
+        return QuadrantSignal(
+            allowed=True,
+            symbol=symbol,
+            direction=direction,
+            quadrant=quadrant,
+            resonance_score=score,
+            threshold=threshold,
+            factor_scores=factor_scores,
+            entry_price_ref=price,
+            atr_stop_distance=atr_stop_distance,
+            target_portion=target_portion,
+            leverage=leverage,
+            stop_loss_price=stop_loss,
+            take_profit_levels=self._take_profit_levels(price, atr_stop_distance, direction),
+            reason="multi_bar_direction_generated_pass",
             metadata=metadata,
         )
 
@@ -761,6 +946,7 @@ class QuadrantResonanceEngine:
         *,
         probe_resonance_score: float,
         flow_alignment_score: float,
+        entry_quality_score: float = 1.0,
     ) -> list[str]:
         if not bool(self.config.probe_no_15m_veto_enabled):
             return []
@@ -816,6 +1002,10 @@ class QuadrantResonanceEngine:
             )
             if float(flow_alignment_score) + 1e-12 < float(min_flow):
                 reasons.append("probe_veto_flow_misaligned")
+
+        if bool(self.config.probe_min_entry_score_enabled):
+            if float(entry_quality_score) + 1e-12 < float(self.config.probe_min_entry_score):
+                reasons.append("probe_veto_entry_quality_hold")
 
         if bool(self.config.probe_no_15m_rsi_macd_veto_enabled):
             rsi15 = _float(tf15.get("rsi"), 50.0)
@@ -928,7 +1118,7 @@ class QuadrantResonanceEngine:
                     hard_reasons.append(item)
                 continue
             if item.startswith("breadth_zero_confirm_invalid"):
-                multipliers.append(float(self.config.probe_veto_breadth_reduced_multiplier))
+                hard_reasons.append(item)
                 continue
             if item == "probe_veto_flow_misaligned":
                 if float(flow_alignment_score) > float(self.config.probe_veto_hard_reject_flow_score):
@@ -959,6 +1149,162 @@ class QuadrantResonanceEngine:
         if equity > 0:
             base = max(base, max(0.0, float(self.config.min_entry_margin_usdt)) / equity)
         return min(base, max(0.0, float(self.config.max_total_exposure_pct)))
+
+    def _multi_bar_direction_gate(self, direction: str, tf4h: Dict[str, Any], tf1h: Dict[str, Any], tf15: Dict[str, Any]) -> Dict[str, Any]:
+        if str(self.config.direction_model or "").strip().lower() != "multi_bar_slope":
+            return {}
+
+        lookbacks = {
+            "4h": max(2, int(self.config.direction_4h_lookback_bars)),
+            "1h": max(2, int(self.config.direction_1h_lookback_bars)),
+            "15m": max(2, int(self.config.direction_15m_lookback_bars)),
+        }
+        series = {
+            "4h": self._close_series(tf4h),
+            "1h": self._close_series(tf1h),
+            "15m": self._close_series(tf15),
+        }
+        counts = {tf: len(values) for tf, values in series.items()}
+        missing = [tf for tf, required in lookbacks.items() if counts.get(tf, 0) < required]
+        if missing:
+            return {
+                "ok": False,
+                "reason": "multi_bar_direction_insufficient_history",
+                "blocked_reason": "insufficient_history",
+                "direction_model": "multi_bar_slope",
+                "history_counts": counts,
+                "required_history_counts": lookbacks,
+                "missing_timeframes": missing,
+            }
+
+        scores = {
+            "4h": self._trend_score_from_closes(series["4h"][-lookbacks["4h"] :]),
+            "1h": self._trend_score_from_closes(series["1h"][-lookbacks["1h"] :]),
+            "15m": self._trend_score_from_closes(series["15m"][-lookbacks["15m"] :]),
+        }
+        expected_sign = 1.0 if direction == "long" else -1.0
+        aligned_4h = scores["4h"] * expected_sign
+        aligned_1h = scores["1h"] * expected_sign
+        aligned_15m = scores["15m"] * expected_sign
+        conflict_min = max(0.0, float(self.config.direction_strong_conflict_min_abs))
+        open_min = max(0.0, float(self.config.direction_open_min_abs))
+        weighted = (aligned_4h * 0.50) + (aligned_1h * 0.30) + (aligned_15m * 0.20)
+
+        soft_1h_min = max(0.0, float(self.config.direction_transition_1h_min_abs))
+        transition_candidate = (
+            bool(self.config.direction_transition_mode_enabled)
+            and aligned_4h >= open_min
+            and soft_1h_min <= aligned_1h < open_min
+            and aligned_15m > -conflict_min
+            and weighted >= open_min
+        )
+        if (aligned_4h < open_min or aligned_1h < open_min) and not transition_candidate:
+            return {
+                "ok": False,
+                "reason": "multi_bar_direction_no_entry",
+                "blocked_reason": "anchor_timeframe_not_aligned",
+                "direction_model": "multi_bar_slope",
+                "direction": direction,
+                "direction_score": weighted,
+                "scores": scores,
+                "aligned_scores": {"4h": aligned_4h, "1h": aligned_1h, "15m": aligned_15m},
+                "history_counts": counts,
+            }
+        if aligned_15m <= -conflict_min:
+            return {
+                "ok": False,
+                "reason": "multi_bar_direction_no_entry",
+                "blocked_reason": "15m_strong_countertrend",
+                "direction_model": "multi_bar_slope",
+                "direction": direction,
+                "direction_score": weighted,
+                "scores": scores,
+                "aligned_scores": {"4h": aligned_4h, "1h": aligned_1h, "15m": aligned_15m},
+                "history_counts": counts,
+            }
+        if weighted < open_min:
+            return {
+                "ok": False,
+                "reason": "multi_bar_direction_no_entry",
+                "blocked_reason": "direction_score_below_threshold",
+                "direction_model": "multi_bar_slope",
+                "direction": direction,
+                "direction_score": weighted,
+                "scores": scores,
+                "aligned_scores": {"4h": aligned_4h, "1h": aligned_1h, "15m": aligned_15m},
+                "history_counts": counts,
+            }
+        return {
+            "ok": True,
+            "reason": "multi_bar_direction_transition_pass" if transition_candidate else "multi_bar_direction_pass",
+            "direction_model": "multi_bar_slope",
+            "direction": direction,
+            "direction_score": weighted,
+            "scores": scores,
+            "aligned_scores": {"4h": aligned_4h, "1h": aligned_1h, "15m": aligned_15m},
+            "history_counts": counts,
+            "transition_mode": bool(transition_candidate),
+        }
+
+    def _multi_bar_direction_scores(self, tf4h: Dict[str, Any], tf1h: Dict[str, Any], tf15: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+        long_gate = self._multi_bar_direction_gate("long", tf4h, tf1h, tf15)
+        short_gate = self._multi_bar_direction_gate("short", tf4h, tf1h, tf15)
+        if not long_gate:
+            long_gate = {"ok": False, "reason": "multi_bar_direction_disabled", "direction": "long", "direction_score": 0.0}
+        if not short_gate:
+            short_gate = {"ok": False, "reason": "multi_bar_direction_disabled", "direction": "short", "direction_score": 0.0}
+        long_gate.setdefault("direction", "long")
+        short_gate.setdefault("direction", "short")
+        return {"long": long_gate, "short": short_gate}
+
+    def _select_multi_bar_direction(self, tf4h: Dict[str, Any], tf1h: Dict[str, Any], tf15: Dict[str, Any]) -> Dict[str, Any]:
+        candidates = self._multi_bar_direction_scores(tf4h, tf1h, tf15)
+        passing = [gate for gate in candidates.values() if bool(gate.get("ok", False))]
+        if not passing:
+            return {
+                "ok": False,
+                "reason": "multi_bar_no_direction",
+                "blocked_reason": "both_sides_below_threshold",
+                "direction": "",
+                "direction_model": "multi_bar_slope",
+                "candidates": candidates,
+            }
+        selected = max(passing, key=lambda gate: abs(_float(gate.get("direction_score"), 0.0)))
+        out = dict(selected)
+        out["ok"] = True
+        out["reason"] = "multi_bar_direction_selected"
+        out["selected_direction"] = out.get("direction")
+        out["candidates"] = candidates
+        return out
+
+    @staticmethod
+    def _close_series(tf: Dict[str, Any]) -> list[float]:
+        for key in ("close_series", "close_array", "closes"):
+            value = tf.get(key)
+            if isinstance(value, (list, tuple)):
+                return [_float(v) for v in value if math.isfinite(_float(v, float("nan"))) and _float(v, 0.0) > 0.0]
+        close = _float(tf.get("close"), 0.0)
+        return [close] if close > 0.0 and math.isfinite(close) else []
+
+    @staticmethod
+    def _trend_score_from_closes(closes: list[float]) -> float:
+        n = len(closes)
+        if n < 2:
+            return 0.0
+        y = [float(v) for v in closes]
+        x_mean = (n - 1) / 2.0
+        y_mean = sum(y) / n
+        denom = sum((i - x_mean) ** 2 for i in range(n))
+        if denom <= 0.0 or y_mean <= 0.0:
+            return 0.0
+        slope = sum((i - x_mean) * (y[i] - y_mean) for i in range(n)) / denom
+        fitted = [y_mean + slope * (i - x_mean) for i in range(n)]
+        ss_tot = sum((v - y_mean) ** 2 for v in y)
+        ss_res = sum((y[i] - fitted[i]) ** 2 for i in range(n))
+        r2 = 0.0 if ss_tot <= 0.0 else max(0.0, min(1.0, 1.0 - (ss_res / ss_tot)))
+        normalized_move = (slope * n) / y_mean
+        score = math.tanh(normalized_move * 12.0) * (0.35 + 0.65 * r2)
+        return max(-1.0, min(1.0, score))
 
     def _extreme_4h_rsi_penalty(self, direction: str, tf4h: Dict[str, Any]) -> float:
         penalty = max(0.0, float(self.config.extreme_4h_rsi_penalty or 0.0))
@@ -1141,6 +1487,10 @@ class QuadrantResonanceEngine:
         ):
             return None
         candidate_reason = "reversible_probe_veto" if reason == "probe_no_15m_direction_veto" else reason
+        if candidate_reason == "reversible_probe_veto" and any(
+            str(reason_item).startswith("breadth_zero_confirm_invalid") for reason_item in veto_reasons
+        ):
+            return None
         ttl = (
             self.config.watchlist_probe_veto_ttl_bars
             if candidate_reason == "reversible_probe_veto"
@@ -1180,6 +1530,16 @@ class QuadrantResonanceEngine:
         if e20 < e50 < e200:
             return -1
         return 0
+
+    @staticmethod
+    def _ema_consistent_with_direction(ema_state: int, direction: str) -> bool:
+        if ema_state == 0:
+            return False
+        if direction == "long":
+            return ema_state == 1
+        if direction == "short":
+            return ema_state == -1
+        return False
 
     @staticmethod
     def _positive_finite(value: float) -> bool:
