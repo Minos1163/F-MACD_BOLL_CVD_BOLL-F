@@ -6,7 +6,7 @@ from collections import deque
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Deque, Dict, Optional, Sequence, Tuple
+from typing import Any, Deque, Dict, List, Optional, Sequence, Tuple
 import pandas as pd
 
 from src.config.config_loader import ConfigLoader
@@ -18,6 +18,7 @@ from src.fund_flow.macd_strategy import MACDStrategyEngine, MACDStrategyConfig, 
 # MACD多时间框架策略 V2.0 (VWAP + BOLL 增强版)
 from src.fund_flow.macd_strategy_v2 import MACDStrategyV2Engine, MACDStrategyV2Config, MACDSignalV2, VetoType
 from src.fund_flow.quadrant_resonance import (
+    Quadrant,
     QuadrantSignal,
     QuadrantResonanceConfig,
     QuadrantResonanceEngine,
@@ -1893,36 +1894,40 @@ class FundFlowDecisionEngine:
 
     def _macd_v2_engine_for_symbol(self, symbol: str) -> Tuple[MACDStrategyV2Engine, Dict[str, Any]]:
         override = self._get_symbol_signal_override(symbol)
-        if not override or self.macd_v2_engine is None or self.macd_v2_config is None:
-            return self.macd_v2_engine, {}
+        macd_v2_engine = self.macd_v2_engine
+        macd_v2_config = self.macd_v2_config
+        if macd_v2_engine is None or macd_v2_config is None:
+            raise RuntimeError("MACD V2 engine is unavailable")
+        if not override:
+            return macd_v2_engine, {}
 
-        local_config = self.macd_v2_config
+        local_config = macd_v2_config
         override_updates: Dict[str, Any] = {}
         if "disable_flip_bullish" in override:
             disable_flip_bullish = bool(override.get("disable_flip_bullish"))
-            if disable_flip_bullish != self.macd_v2_config.disable_flip_bullish_entries:
+            if disable_flip_bullish != macd_v2_config.disable_flip_bullish_entries:
                 override_updates["disable_flip_bullish_entries"] = disable_flip_bullish
         if "disable_green_bar_growing" in override:
             disable_green_bar_growing = bool(override.get("disable_green_bar_growing"))
-            if disable_green_bar_growing != self.macd_v2_config.disable_green_bar_growing_entries:
+            if disable_green_bar_growing != macd_v2_config.disable_green_bar_growing_entries:
                 override_updates["disable_green_bar_growing_entries"] = disable_green_bar_growing
         if "min_signal_score_override" in override:
             min_signal_score = self._to_float(
                 override.get("min_signal_score_override"),
-                self.macd_v2_config.min_signal_score,
+                macd_v2_config.min_signal_score,
             )
-            if min_signal_score != self.macd_v2_config.min_signal_score:
+            if min_signal_score != macd_v2_config.min_signal_score:
                 override_updates["min_signal_score"] = min_signal_score
         if "min_vwap_score_override" in override:
             min_vwap_score = self._to_float(
                 override.get("min_vwap_score_override"),
-                self.macd_v2_config.flip_bullish_min_vwap_score,
+                macd_v2_config.flip_bullish_min_vwap_score,
             )
-            if min_vwap_score != self.macd_v2_config.flip_bullish_min_vwap_score:
+            if min_vwap_score != macd_v2_config.flip_bullish_min_vwap_score:
                 override_updates["flip_bullish_min_vwap_score"] = min_vwap_score
 
         if not override_updates:
-            return self.macd_v2_engine, override
+            return macd_v2_engine, override
 
         local_config = replace(local_config, **override_updates)
         return MACDStrategyV2Engine(local_config), override
@@ -2557,13 +2562,13 @@ class FundFlowDecisionEngine:
         engine_config = self._macd_v2_engine_config(macd_v2_engine)
         resolver = getattr(engine_config, "resolve_competition_score", None)
         if callable(resolver):
-            return float(
-                resolver(
-                    getattr(signal, "signal_type_1h", None),
-                    float(signal.signal_score),
-                    getattr(signal, "entry_type_15m", None),
-                )
+            base_score = float(signal.signal_score)
+            resolved_score = resolver(
+                getattr(signal, "signal_type_1h", None),
+                base_score,
+                getattr(signal, "entry_type_15m", None),
             )
+            return self._to_float(resolved_score, base_score)
         signal_type = str(getattr(signal, "signal_type_1h", "") or "").strip().lower()
         entry_type = str(getattr(signal, "entry_type_15m", "") or "").strip().lower()
         score = float(signal.signal_score)
@@ -2631,7 +2636,8 @@ class FundFlowDecisionEngine:
         if not isinstance(market_flow_context, dict):
             return 0.0, 0.0
         timeframes = market_flow_context.get("timeframes")
-        tf15 = timeframes.get("15m") if isinstance(timeframes, dict) and isinstance(timeframes.get("15m"), dict) else {}
+        raw_tf15 = timeframes.get("15m") if isinstance(timeframes, dict) else None
+        tf15: Dict[str, Any] = raw_tf15 if isinstance(raw_tf15, dict) else {}
         close_series = tf15.get("close_series", tf15.get("close_array"))
         try:
             values = [float(v) for v in close_series] if close_series is not None else []
@@ -2651,7 +2657,8 @@ class FundFlowDecisionEngine:
         close_15m: float,
     ) -> Dict[str, float]:
         timeframes = market_flow_context.get("timeframes") if isinstance(market_flow_context, dict) else {}
-        tf15 = timeframes.get("15m") if isinstance(timeframes, dict) and isinstance(timeframes.get("15m"), dict) else {}
+        raw_tf15 = timeframes.get("15m") if isinstance(timeframes, dict) else None
+        tf15: Dict[str, Any] = raw_tf15 if isinstance(raw_tf15, dict) else {}
         close_series = tf15.get("close_series", tf15.get("close_array"))
         values = []
         try:
@@ -3585,7 +3592,8 @@ class FundFlowDecisionEngine:
         )
         atr_mult = max(0.1, self._to_float(cfg.get("short_stop_loss_atr_mult"), 1.2))
         timeframes = market_flow_context.get("timeframes") if isinstance(market_flow_context, dict) else {}
-        tf15 = timeframes.get("15m") if isinstance(timeframes, dict) and isinstance(timeframes.get("15m"), dict) else {}
+        raw_tf15 = timeframes.get("15m") if isinstance(timeframes, dict) else None
+        tf15: Dict[str, Any] = raw_tf15 if isinstance(raw_tf15, dict) else {}
         atr_pct = max(
             0.0,
             self._to_float(
@@ -5062,8 +5070,8 @@ class FundFlowDecisionEngine:
             adx_1h=adx_1h,
             adx_4h=adx_4h,
             market_regime=str(regime_info.get("regime") or regime_info.get("name") or ""),
-            cvd_upper_wick_ratio=self._to_float(tf_15m.get("upper_wick_ratio"), None),
-            cvd_1h_delta_ratio=self._to_float(tf_1h.get("cvd_delta_ratio"), None),
+            cvd_upper_wick_ratio=self._to_optional_float(tf_15m.get("upper_wick_ratio")),
+            cvd_1h_delta_ratio=self._to_optional_float(tf_1h.get("cvd_delta_ratio")),
             atr_1h=atr_1h,
             funding_rate=funding_rate,
             oi_delta_ratio=oi_delta_ratio,
@@ -5763,6 +5771,17 @@ class FundFlowDecisionEngine:
         base_portion = self._to_float(review.get("base_portion"), self._to_float(getattr(signal, "target_portion", 0.0), 0.0))
         multiplier = self._to_float(review.get("portion_multiplier"), 0.75)
         target_portion = max(0.0, base_portion * max(0.0, min(1.0, multiplier)))
+        sizing_fallback_applied = False
+        sizing_fallback_reason = ""
+        if target_portion <= 0.0:
+            fallback_portion = self._quadrant_watchlist_base_portion(
+                metadata=metadata,
+                leverage=self._to_float(getattr(signal, "leverage", self.default_leverage), self.default_leverage),
+            )
+            base_portion = fallback_portion
+            target_portion = max(0.0, fallback_portion * max(0.0, min(1.0, multiplier)))
+            sizing_fallback_applied = target_portion > 0.0
+            sizing_fallback_reason = "target_portion_non_positive"
         atr_stop_distance = self._to_float(getattr(signal, "atr_stop_distance", 0.0), 0.0)
         stop_loss = None
         if atr_stop_distance > 0:
@@ -5776,13 +5795,17 @@ class FundFlowDecisionEngine:
                 "target_portion": target_portion,
                 "base_target_portion": base_portion,
                 "watchlist_promoted_portion_mult": multiplier,
+                "watchlist_sizing_fallback_applied": sizing_fallback_applied,
+                "watchlist_sizing_fallback_reason": sizing_fallback_reason,
             }
         )
+        raw_quadrant = getattr(signal, "quadrant", None)
+        quadrant = raw_quadrant if isinstance(raw_quadrant, Quadrant) else Quadrant.DEFENSE
         return QuadrantSignal(
             allowed=True,
             symbol=symbol,
             direction=direction,
-            quadrant=getattr(signal, "quadrant", None),
+            quadrant=quadrant,
             resonance_score=self._to_float(review.get("score_at_candidate"), self._to_float(getattr(signal, "resonance_score", 0.0), 0.0)),
             threshold=self._to_float(getattr(signal, "threshold", 0.0), 0.0),
             factor_scores=dict(getattr(signal, "factor_scores", {}) or {}),
@@ -5796,14 +5819,37 @@ class FundFlowDecisionEngine:
             metadata=promoted_md,
         )
 
+    @staticmethod
+    def _quadrant_watchlist_key(symbol: str, side: str) -> str:
+        return f"{str(symbol or '').upper()}:{str(side or '').lower()}"
+
     def _review_quadrant_watchlist(self, *, symbol: str, signal: Any) -> Optional[Dict[str, Any]]:
-        key = str(symbol or "").upper()
+        symbol_key = str(symbol or "").upper()
+        if not symbol_key:
+            return None
+        current_side = str(getattr(signal, "direction", "") or "").lower()
+        candidate_keys = []
+        if current_side in {"long", "short"}:
+            candidate_keys.append(self._quadrant_watchlist_key(symbol_key, current_side))
+        candidate_keys.extend(
+            self._quadrant_watchlist_key(symbol_key, side)
+            for side in ("long", "short")
+            if self._quadrant_watchlist_key(symbol_key, side) not in candidate_keys
+        )
+        key = next((item for item in candidate_keys if item in self._quadrant_watchlist), "")
         if not key:
             return None
         candidate = self._quadrant_watchlist.get(key)
         if not isinstance(candidate, dict):
             return None
         side = str(candidate.get("side") or "").lower()
+        candidate_symbol = str(candidate.get("symbol") or symbol_key).upper()
+        metadata = getattr(signal, "metadata", {}) if isinstance(getattr(signal, "metadata", {}), dict) else {}
+        entry_score_now = self._to_float(
+            metadata.get("entry_15m_quality_score"),
+            self._to_float(candidate.get("entry_15m_quality_score"), 0.0),
+        )
+        ttl_bars = int(self._to_float(candidate.get("ttl_bars"), 0))
         now_ts = datetime.now(timezone.utc).isoformat()
         if bool(getattr(signal, "allowed", False)):
             current_side = str(getattr(signal, "direction", "") or "").lower()
@@ -5811,21 +5857,27 @@ class FundFlowDecisionEngine:
                 self._quadrant_watchlist.pop(key, None)
                 return {
                     "result": "promoted_by_standard_entry",
-                    "symbol": key,
+                    "symbol": candidate_symbol,
                     "side": side,
                     "candidate_reason": candidate.get("candidate_reason"),
                     "score_at_candidate": candidate.get("score"),
                     "current_reason": getattr(signal, "reason", ""),
+                    "ttl_bars": ttl_bars,
+                    "ttl_remaining_bars": int(self._to_float(candidate.get("ttl_remaining_bars"), 0)),
+                    "entry_score_now": entry_score_now,
                     "reviewed_at": now_ts,
                 }
             self._quadrant_watchlist.pop(key, None)
             return {
                 "result": "invalidated_by_opposite_entry",
-                "symbol": key,
+                "symbol": candidate_symbol,
                 "side": side,
                 "current_side": current_side,
                 "candidate_reason": candidate.get("candidate_reason"),
                 "current_reason": getattr(signal, "reason", ""),
+                "ttl_bars": ttl_bars,
+                "ttl_remaining_bars": int(self._to_float(candidate.get("ttl_remaining_bars"), 0)),
+                "entry_score_now": entry_score_now,
                 "reviewed_at": now_ts,
             }
         direct_review = self._review_quadrant_watchlist_direct(candidate=candidate, signal=signal, reviewed_at=now_ts)
@@ -5837,9 +5889,12 @@ class FundFlowDecisionEngine:
             self._quadrant_watchlist.pop(key, None)
             return {
                 "result": "expired",
-                "symbol": key,
+                "symbol": candidate_symbol,
                 "side": side,
                 "candidate_reason": candidate.get("candidate_reason"),
+                "ttl_bars": ttl_bars,
+                "ttl_remaining_bars": 0,
+                "entry_score_now": entry_score_now,
                 "reviewed_at": now_ts,
             }
         candidate["ttl_remaining_bars"] = remaining
@@ -5847,10 +5902,12 @@ class FundFlowDecisionEngine:
         self._quadrant_watchlist[key] = candidate
         return {
             "result": "pending",
-            "symbol": key,
+            "symbol": candidate_symbol,
             "side": side,
             "candidate_reason": candidate.get("candidate_reason"),
+            "ttl_bars": ttl_bars,
             "ttl_remaining_bars": remaining,
+            "entry_score_now": entry_score_now,
             "reviewed_at": now_ts,
         }
 
@@ -5869,23 +5926,29 @@ class FundFlowDecisionEngine:
         if side not in {"long", "short"} or current_side != side:
             return None
         metadata = getattr(signal, "metadata", {}) if isinstance(getattr(signal, "metadata", {}), dict) else {}
-        candidate_missing = list(candidate.get("missing_conditions") or [])
+        candidate_reason = str(candidate.get("candidate_reason") or "")
+        factor_scores = metadata.get("factor_scores")
+        if (
+            candidate_reason == "multi_bar_nontrend_ema_without_1h_macd_watch"
+            and not (isinstance(factor_scores, dict) and "macd_1h" in factor_scores)
+        ):
+            return None
         quality_score = self._to_float(metadata.get("entry_15m_quality_score"), 0.0)
         quality_bucket = str(metadata.get("entry_15m_quality_bucket") or "")
-        detail = metadata.get("entry_15m_detail") if isinstance(metadata.get("entry_15m_detail"), dict) else {}
-        if candidate_missing and not (bool(detail.get("ok", False)) or quality_bucket == "open"):
+        watch_min = self._to_float(getattr(cfg, "entry_15m_quality_watch_min", 0.50), 0.50)
+        if quality_score + 1e-12 < watch_min:
             return None
         base_portion = self._to_float(
             candidate.get("base_portion"),
             self._to_float(getattr(signal, "target_portion", 0.0), 0.0),
         )
         if base_portion <= 0.0:
-            equity = self._to_float(candidate.get("portfolio_equity"), 0.0)
-            min_margin = self._to_float(metadata.get("min_entry_margin_usdt"), 1.0)
-            min_notional = self._to_float(metadata.get("min_entry_notional_usdt"), 0.0)
-            leverage = max(1.0, self._to_float(getattr(signal, "leverage", 1), 1.0))
-            if equity > 0.0:
-                base_portion = max(min_margin / equity, min_notional / (equity * leverage) if min_notional > 0 else 0.0)
+            candidate_md = dict(metadata)
+            candidate_md["portfolio_equity"] = candidate.get("portfolio_equity", metadata.get("portfolio_equity"))
+            base_portion = self._quadrant_watchlist_base_portion(
+                metadata=candidate_md,
+                leverage=max(1.0, self._to_float(getattr(signal, "leverage", 1), 1.0)),
+            )
         multiplier = max(0.0, min(1.0, self._to_float(getattr(cfg, "watchlist_promoted_portion_mult", 0.75), 0.75)))
         return {
             "result": "promoted_direct",
@@ -5901,21 +5964,45 @@ class FundFlowDecisionEngine:
             "reviewed_at": reviewed_at,
         }
 
+    def _quadrant_watchlist_base_portion(self, *, metadata: Dict[str, Any], leverage: float) -> float:
+        cfg = getattr(self, "quadrant_resonance_config", None)
+        target_portion = self._to_float(metadata.get("target_portion"), 0.0)
+        if target_portion > 0.0:
+            return target_portion
+        base_target_portion = self._to_float(metadata.get("base_target_portion"), 0.0)
+        if base_target_portion > 0.0:
+            return base_target_portion
+        equity = self._to_float(metadata.get("portfolio_equity"), 0.0)
+        if equity <= 0.0:
+            return max(0.0, self._to_float(getattr(cfg, "watchlist_fallback_min_portion", 0.033), 0.033))
+        min_margin = self._to_float(getattr(cfg, "min_entry_margin_usdt", 1.0), 1.0)
+        min_notional = self._to_float(getattr(cfg, "min_entry_notional_usdt", 0.0), 0.0)
+        probe_portion = self._to_float(getattr(cfg, "high_score_probe_portion", 0.042), 0.042)
+        max_exposure = self._to_float(getattr(cfg, "max_total_exposure_pct", 0.75), 0.75)
+        lev = max(1.0, float(leverage or 1.0))
+        portion = max(
+            probe_portion,
+            min_margin / equity if min_margin > 0.0 else 0.0,
+            min_notional / (equity * lev) if min_notional > 0.0 else 0.0,
+        )
+        return max(0.0, min(max_exposure, portion))
+
     def _apply_quadrant_watchlist_intent(self, *, symbol: str, metadata: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         intent = metadata.get("watchlist_intent")
         if not isinstance(intent, dict):
             return None
         if bool(intent.get("dry_run", True)):
             return None
-        key = str(intent.get("symbol") or symbol or "").upper()
+        symbol_key = str(intent.get("symbol") or symbol or "").upper()
         side = str(intent.get("side") or "").lower()
-        if not key or side not in {"long", "short"}:
+        if not symbol_key or side not in {"long", "short"}:
             return None
+        key = self._quadrant_watchlist_key(symbol_key, side)
         ttl = max(1, int(self._to_float(intent.get("ttl_bars"), 1)))
         now_ts = datetime.now(timezone.utc).isoformat()
         result = "refreshed" if key in self._quadrant_watchlist else "added"
         candidate = {
-            "symbol": key,
+            "symbol": symbol_key,
             "side": side,
             "score": intent.get("score"),
             "candidate_reason": intent.get("candidate_reason"),
@@ -5923,7 +6010,10 @@ class FundFlowDecisionEngine:
             "veto_reasons": list(intent.get("veto_reasons") or []),
             "entry_15m_quality_score": intent.get("entry_15m_quality_score"),
             "entry_15m_quality_bucket": intent.get("entry_15m_quality_bucket"),
-            "base_portion": self._to_float(metadata.get("target_portion"), 0.0),
+            "base_portion": self._quadrant_watchlist_base_portion(
+                metadata=metadata,
+                leverage=max(1.0, self._to_float(metadata.get("leverage"), self.default_leverage)),
+            ),
             "portfolio_equity": self._to_float(metadata.get("portfolio_equity"), 0.0),
             "ttl_bars": ttl,
             "ttl_remaining_bars": ttl,

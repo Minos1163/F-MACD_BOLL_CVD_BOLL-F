@@ -26,6 +26,8 @@ def _tf(
     ema50: float = 95.0,
     ema200: float = 90.0,
     close_series: list[float] | None = None,
+    high_series: list[float] | None = None,
+    low_series: list[float] | None = None,
     macd_hist_series: list[float] | None = None,
     rsi: float = 55.0,
     atr: float = 2.0,
@@ -44,6 +46,10 @@ def _tf(
     }
     if close_series is not None:
         out["close_series"] = close_series
+    if high_series is not None:
+        out["high_series"] = high_series
+    if low_series is not None:
+        out["low_series"] = low_series
     return out
 
 
@@ -550,6 +556,216 @@ def test_entry_15m_quality_live_mode_hold_bucket_stays_hold() -> None:
     assert "watchlist_intent" not in result.metadata
 
 
+def test_structural_entry_quality_opens_trend_continuation_without_single_bar_pattern() -> None:
+    engine = _engine(
+        entry={
+            "entry_15m_quality_model": "structural_v2",
+            "entry_15m_quality_open_min": 0.60,
+            "entry_15m_quality_watch_min": 0.40,
+        }
+    )
+    tf15 = _tf(
+        close=115.0,
+        open=115.4,
+        high=115.3,
+        low=114.8,
+        ema20=114.8,
+        atr=1.0,
+        close_series=[
+            110.0,
+            111.0,
+            112.0,
+            113.0,
+            114.0,
+            115.0,
+            116.0,
+            116.7,
+            116.2,
+            115.8,
+            115.2,
+            114.8,
+            114.4,
+            114.1,
+            114.6,
+            115.0,
+            115.4,
+            115.8,
+            115.3,
+            115.0,
+        ],
+        high_series=[
+            110.5,
+            111.5,
+            112.5,
+            113.5,
+            114.5,
+            115.5,
+            116.4,
+            116.9,
+            116.5,
+            116.0,
+            115.7,
+            115.3,
+            115.0,
+            114.8,
+            115.1,
+            115.4,
+            115.8,
+            116.0,
+            115.6,
+            115.3,
+        ],
+        low_series=[
+            109.7,
+            110.7,
+            111.7,
+            112.7,
+            113.7,
+            114.5,
+            115.2,
+            115.9,
+            115.4,
+            115.0,
+            114.7,
+            114.3,
+            114.0,
+            113.8,
+            114.2,
+            114.6,
+            115.0,
+            115.3,
+            115.0,
+            114.8,
+        ],
+        macd_hist_series=[0.01, 0.012, 0.014, 0.018, 0.024],
+    )
+
+    detail = engine._entry_pattern_detail("long", tf15)
+    quality = engine._entry_15m_quality("long", tf15, detail=detail)
+
+    assert detail["hist_cross"] is False
+    assert detail["direction_candle"] is False
+    assert detail["pin_bar"] is False
+    assert quality["score"] >= 0.60
+    assert quality["bucket"] == "open"
+    assert "direction_candle" not in quality["missing_conditions"]
+
+
+def test_structural_entry_quality_penalizes_long_chase_far_from_ema() -> None:
+    engine = _engine(
+        entry={
+            "entry_15m_quality_model": "structural_v2",
+            "entry_15m_quality_open_min": 0.60,
+            "entry_15m_quality_watch_min": 0.40,
+        }
+    )
+    tf15 = _tf(
+        close=120.0,
+        open=119.7,
+        high=120.4,
+        low=119.5,
+        ema20=116.0,
+        atr=1.0,
+        close_series=[
+            110.0,
+            110.5,
+            111.0,
+            111.5,
+            112.0,
+            112.5,
+            113.0,
+            113.5,
+            114.0,
+            114.5,
+            115.0,
+            115.5,
+            116.0,
+            116.5,
+            117.0,
+            117.5,
+            118.0,
+            118.5,
+            119.0,
+            120.0,
+        ],
+        high_series=[
+            110.3,
+            110.8,
+            111.3,
+            111.8,
+            112.3,
+            112.8,
+            113.3,
+            113.8,
+            114.3,
+            114.8,
+            115.3,
+            115.8,
+            116.3,
+            116.8,
+            117.3,
+            117.8,
+            118.3,
+            118.8,
+            119.3,
+            120.4,
+        ],
+        low_series=[
+            109.8,
+            110.3,
+            110.8,
+            111.3,
+            111.8,
+            112.3,
+            112.8,
+            113.3,
+            113.8,
+            114.3,
+            114.8,
+            115.3,
+            115.8,
+            116.3,
+            116.8,
+            117.3,
+            117.8,
+            118.3,
+            118.8,
+            119.5,
+        ],
+        macd_hist_series=[0.01, 0.012, 0.014, 0.018, 0.024],
+    )
+
+    quality = engine._entry_15m_quality("long", tf15)
+
+    assert quality["score"] < 0.30
+    assert quality["bucket"] == "hold"
+
+
+def test_structural_entry_quality_requires_multi_bar_history() -> None:
+    engine = _engine(
+        entry={
+            "entry_15m_quality_model": "structural_v2",
+            "entry_15m_quality_open_min": 0.60,
+            "entry_15m_quality_watch_min": 0.40,
+        }
+    )
+    tf15 = _tf(
+        close=100.0,
+        open=99.8,
+        high=100.3,
+        low=99.7,
+        ema20=99.9,
+        atr=1.0,
+        macd_hist_series=[0.01, 0.012, 0.014, 0.018, 0.024],
+    )
+
+    quality = engine._entry_15m_quality("long", tf15)
+
+    assert quality["score"] == pytest.approx(0.0)
+    assert quality["bucket"] == "hold"
+    assert "structural_history" in quality["missing_conditions"]
+
+
 def test_probe_veto_reversible_breadth_emits_watchlist_intent() -> None:
     engine = _engine(
         entry={
@@ -737,6 +953,41 @@ def test_high_score_missing_15m_probe_blocks_bad_breadth_and_bearish_flow() -> N
     assert result.metadata["blocked_reason"] == "probe_no_15m_direction_veto"
     assert "breadth_zero_confirm_invalid_2" in result.metadata["probe_no_15m_veto_reasons"]
     assert "long_flow_all_bearish" in result.metadata["probe_no_15m_veto_reasons"]
+
+
+def test_high_score_missing_15m_probe_reads_live_flow_aliases() -> None:
+    engine = _engine(
+        entry={
+            "standard_threshold": 0.85,
+            "require_15m_entry_pattern": True,
+            "high_score_15m_override": True,
+            "high_score_15m_override_threshold": 0.90,
+            "probe_no_15m_veto_enabled": True,
+            "probe_no_15m_breadth_veto_enabled": True,
+            "probe_no_15m_flow_veto_enabled": True,
+        }
+    )
+    result = engine.analyze(
+        symbol="HYPEUSDT",
+        price=100.0,
+        timeframes=_timeframes(
+            tf1h=_tf(macd_hist_series=[0.01, 0.02, 0.03], rsi=55),
+            tf15m=_tf(close=100, open=100.2, high=100.25, low=99.95, ema20=99.5, macd_hist_series=[0.03, 0.02, 0.01], rsi=55),
+        ),
+        portfolio={"equity": 100.0},
+        market_context={
+            "market_breadth": {"confirm_count": 2, "invalid_count": 0},
+            "cvd_ratio": -0.0665,
+            "oi_delta_ratio": -0.0020,
+            "imbalance": -0.2635,
+            "liquidity_delta_norm": -0.1919,
+        },
+    )
+
+    assert result.allowed is False
+    assert result.reason == "probe_no_15m_direction_veto"
+    assert "long_flow_all_bearish" in result.metadata["probe_no_15m_veto_reasons"]
+    assert "long_liq_flow_bearish" in result.metadata["probe_no_15m_veto_reasons"]
 
 
 def test_high_score_missing_15m_probe_still_allows_confirmed_flow_context() -> None:
@@ -1251,7 +1502,10 @@ def test_multi_bar_direction_generator_can_select_short_despite_legacy_long_quad
     assert result.metadata["direction_gate"]["selected_direction"] == "short"
     assert result.metadata["direction_gate"]["candidates"]["short"]["ok"] is True
     assert result.metadata["quadrant_filter"]["ema_conflict"] is True
+    assert result.metadata["ema_conflict"] is True
+    assert result.metadata["entry_15m_base_open_min"] == pytest.approx(0.70)
     assert result.metadata["entry_15m_effective_open_min"] == pytest.approx(0.80)
+    assert result.metadata["entry_15m_quality_bucket_effective"] in {"hold", "watch", "open"}
 
 
 def test_multi_bar_direction_generated_open_entry_bypasses_legacy_resonance_threshold() -> None:
@@ -1311,7 +1565,266 @@ def test_multi_bar_direction_generated_open_entry_bypasses_legacy_resonance_thre
     assert result.reason == "multi_bar_direction_generated_pass"
     assert result.resonance_score < result.threshold
     assert result.metadata["legacy_resonance_threshold_bypassed"] is True
+    assert result.metadata["direction_score"] == pytest.approx(result.metadata["direction_gate"]["direction_score"])
+    assert result.metadata["signal_score"] == pytest.approx(result.metadata["direction_gate"]["direction_score"])
+    assert result.metadata["competition_score"] == pytest.approx(result.metadata["direction_gate"]["direction_score"])
+    assert result.metadata["legacy_resonance_score"] == pytest.approx(result.resonance_score)
     assert result.metadata["entry_15m_quality_bucket"] == "open"
+
+
+def test_multi_bar_direction_generated_nontrend_ema_without_1h_macd_waits() -> None:
+    engine = _engine(
+        entry={
+            "standard_threshold": 0.85,
+            "transition_threshold": 0.85,
+            "require_15m_entry_pattern": True,
+            "entry_15m_quality_mode": "live",
+            "entry_15m_quality_open_min": 0.70,
+            "entry_15m_quality_watch_min": 0.50,
+            "direction_model": "multi_bar_slope",
+            "direction_generates_both": True,
+            "quadrant_4h_role": "ema_filter",
+            "direction_4h_lookback_bars": 50,
+            "direction_1h_lookback_bars": 50,
+            "direction_15m_lookback_bars": 30,
+            "direction_open_min_abs": 0.30,
+            "watchlist_intent_enabled": True,
+            "watchlist_intent_dry_run": False,
+            "watchlist_min_signal_score": 0.30,
+        }
+    )
+
+    result = engine.analyze(
+        symbol="HYPEUSDT",
+        price=100.0,
+        timeframes=_timeframes(
+            q4h=_tf(
+                ema20=105,
+                ema50=100,
+                ema200=90,
+                close_series=[100.0 + i * 0.2 for i in range(50)],
+                macd_hist_series=[-0.01, -0.02, -0.03],
+            ),
+            tf1h=_tf(
+                close=100.0,
+                ema20=99.0,
+                ema50=95.0,
+                ema200=90.0,
+                close_series=[100.0 + i * 0.2 for i in range(50)],
+                macd_hist_series=[0.03, 0.02, 0.01],
+                rsi=50,
+            ),
+            tf15m=_tf(
+                close=100.0,
+                open=99.8,
+                high=100.25,
+                low=99.95,
+                ema20=99.7,
+                atr=1.0,
+                close_series=[100.0 + i * 0.12 for i in range(30)],
+                macd_hist_series=[-0.02, -0.01, 0.03],
+                rsi=50,
+            ),
+        ),
+        portfolio={"equity": 100.0},
+    )
+
+    assert result.allowed is False
+    assert result.reason == "multi_bar_nontrend_ema_without_1h_macd_watch"
+    assert result.metadata["quadrant_4h"] == "Q4"
+    assert result.metadata["direction_gate"]["ok"] is True
+    assert "ema_1h" in result.factor_scores
+    assert "macd_1h" not in result.factor_scores
+    assert result.metadata["watchlist_intent"]["candidate_reason"] == "multi_bar_nontrend_ema_without_1h_macd_watch"
+
+
+def test_multi_bar_direction_generated_respects_breadth_hard_reject() -> None:
+    engine = _engine(
+        entry={
+            "standard_threshold": 0.85,
+            "require_15m_entry_pattern": True,
+            "entry_15m_quality_mode": "live",
+            "entry_15m_quality_open_min": 0.70,
+            "entry_15m_quality_watch_min": 0.50,
+            "direction_model": "multi_bar_slope",
+            "direction_generates_both": True,
+            "quadrant_4h_role": "ema_filter",
+            "direction_4h_lookback_bars": 50,
+            "direction_1h_lookback_bars": 50,
+            "direction_15m_lookback_bars": 30,
+            "direction_open_min_abs": 0.30,
+            "probe_no_15m_breadth_veto_enabled": True,
+            "probe_breadth_zero_confirm_invalid_min": 2,
+        }
+    )
+
+    result = engine.analyze(
+        symbol="HYPEUSDT",
+        price=100.0,
+        timeframes=_timeframes(
+            q4h=_tf(
+                ema20=105,
+                ema50=100,
+                ema200=90,
+                close_series=[100.0 + i * 0.2 for i in range(50)],
+                macd_hist_series=[-0.03, -0.02, -0.01],
+            ),
+            tf1h=_tf(
+                close=100.0,
+                ema20=99.0,
+                ema50=101.0,
+                ema200=103.0,
+                close_series=[100.0 + i * 0.2 for i in range(50)],
+                macd_hist_series=[0.01, 0.02, 0.03],
+                rsi=50,
+            ),
+            tf15m=_tf(
+                close=100.0,
+                open=100.2,
+                high=100.25,
+                low=99.95,
+                ema20=99.7,
+                atr=1.0,
+                close_series=[100.0 + i * 0.12 for i in range(30)],
+                macd_hist_series=[-0.01, -0.005, 0.03],
+                rsi=50,
+            ),
+        ),
+        portfolio={"equity": 100.0},
+        market_context={"market_breadth": {"confirm_count": 0, "invalid_count": 2}},
+    )
+
+    assert result.allowed is False
+    assert result.reason == "market_participation_hard_reject"
+    assert result.metadata["direction_gate"]["ok"] is True
+    assert result.metadata["market_participation"]["blocked_reason"] == "breadth_zero_confirm_invalid_2"
+
+
+def test_multi_bar_direction_generated_respects_live_flow_alias_hard_reject() -> None:
+    engine = _engine(
+        entry={
+            "standard_threshold": 0.85,
+            "require_15m_entry_pattern": True,
+            "entry_15m_quality_mode": "live",
+            "entry_15m_quality_open_min": 0.70,
+            "entry_15m_quality_watch_min": 0.50,
+            "direction_model": "multi_bar_slope",
+            "direction_generates_both": True,
+            "quadrant_4h_role": "ema_filter",
+            "direction_4h_lookback_bars": 50,
+            "direction_1h_lookback_bars": 50,
+            "direction_15m_lookback_bars": 30,
+            "direction_open_min_abs": 0.30,
+            "probe_no_15m_breadth_veto_enabled": True,
+            "probe_no_15m_flow_veto_enabled": True,
+        }
+    )
+
+    result = engine.analyze(
+        symbol="HYPEUSDT",
+        price=100.0,
+        timeframes=_timeframes(
+            q4h=_tf(
+                ema20=105,
+                ema50=100,
+                ema200=90,
+                close_series=[100.0 + i * 0.2 for i in range(50)],
+                macd_hist_series=[-0.03, -0.02, -0.01],
+            ),
+            tf1h=_tf(
+                close=100.0,
+                ema20=99.0,
+                ema50=101.0,
+                ema200=103.0,
+                close_series=[100.0 + i * 0.2 for i in range(50)],
+                macd_hist_series=[0.01, 0.02, 0.03],
+                rsi=50,
+            ),
+            tf15m=_tf(
+                close=100.0,
+                open=100.2,
+                high=100.25,
+                low=99.95,
+                ema20=99.7,
+                atr=1.0,
+                close_series=[100.0 + i * 0.12 for i in range(30)],
+                macd_hist_series=[-0.01, -0.005, 0.03],
+                rsi=50,
+            ),
+        ),
+        portfolio={"equity": 100.0},
+        market_context={
+            "market_breadth": {"confirm_count": 2, "invalid_count": 0},
+            "cvd_ratio": -0.0665,
+            "oi_delta_ratio": -0.0020,
+            "imbalance": -0.2635,
+            "liquidity_delta_norm": -0.1919,
+        },
+    )
+
+    assert result.allowed is False
+    assert result.reason == "market_participation_hard_reject"
+    assert result.metadata["market_participation"]["blocked_reason"] == "long_flow_all_bearish"
+
+
+def test_multi_bar_direction_generated_sizes_from_bot_total_assets_portfolio() -> None:
+    engine = _engine(
+        entry={
+            "standard_threshold": 0.85,
+            "require_15m_entry_pattern": True,
+            "entry_15m_quality_mode": "live",
+            "entry_15m_quality_open_min": 0.70,
+            "entry_15m_quality_watch_min": 0.50,
+            "direction_model": "multi_bar_slope",
+            "direction_generates_both": True,
+            "quadrant_4h_role": "ema_filter",
+            "direction_4h_lookback_bars": 50,
+            "direction_1h_lookback_bars": 50,
+            "direction_15m_lookback_bars": 30,
+            "direction_open_min_abs": 0.30,
+        },
+        risk={"min_entry_margin_usdt": 1.0, "min_entry_notional_usdt": 12.0},
+    )
+
+    result = engine.analyze(
+        symbol="HYPEUSDT",
+        price=100.0,
+        timeframes=_timeframes(
+            q4h=_tf(
+                ema20=105,
+                ema50=100,
+                ema200=90,
+                close_series=[100.0 + i * 0.2 for i in range(50)],
+                macd_hist_series=[-0.03, -0.02, -0.01],
+            ),
+            tf1h=_tf(
+                close=100.0,
+                ema20=99.0,
+                ema50=101.0,
+                ema200=103.0,
+                close_series=[100.0 + i * 0.2 for i in range(50)],
+                macd_hist_series=[0.01, 0.02, 0.03],
+                rsi=50,
+            ),
+            tf15m=_tf(
+                close=100.0,
+                open=100.2,
+                high=100.25,
+                low=99.95,
+                ema20=99.7,
+                atr=1.0,
+                close_series=[100.0 + i * 0.12 for i in range(30)],
+                macd_hist_series=[-0.01, -0.005, 0.03],
+                rsi=50,
+            ),
+        ),
+        portfolio={"cash": 100.0, "total_assets": 100.0, "positions": {}},
+    )
+
+    assert result.allowed is True
+    assert result.reason == "multi_bar_direction_generated_pass"
+    assert result.target_portion > 0.0
+    assert result.metadata["portfolio_equity"] == pytest.approx(100.0)
 
 
 def test_probe_veto_graded_direction_against_under_hard_threshold_opens_quarter_probe() -> None:
@@ -1669,6 +2182,61 @@ def test_decision_engine_live_watchlist_records_candidate_without_entry() -> Non
     assert engine._quadrant_watchlist["JSTUSDT:long"]["side"] == "long"
 
 
+def test_decision_engine_live_watchlist_sizes_candidate_from_bot_total_assets_portfolio() -> None:
+    engine = FundFlowDecisionEngine(
+        {
+            "fund_flow": {
+                "strategy_mode": "quadrant_resonance",
+                "min_leverage": 1,
+                "default_leverage": 3,
+                "max_leverage": 9,
+                "quadrant_resonance": {
+                    "entry": {
+                        "standard_threshold": 0.85,
+                        "require_15m_entry_pattern": True,
+                        "high_score_15m_override": True,
+                        "high_score_15m_override_threshold": 0.95,
+                        "high_score_probe_portion": 0.02,
+                        "watchlist_intent_enabled": True,
+                        "watchlist_intent_dry_run": False,
+                        "watchlist_min_signal_score": 0.75,
+                        "watchlist_ttl_bars": 4,
+                    },
+                    "risk": {"min_entry_notional_usdt": 12.0, "min_entry_margin_usdt": 1.0},
+                },
+            }
+        }
+    )
+
+    decision = engine.decide(
+        "JSTUSDT",
+        {"cash": 100.0, "total_assets": 100.0, "positions": {}},
+        100.0,
+        {
+            "timeframes": _timeframes(
+                tf15m=_tf(
+                    close=100.0,
+                    open=100.2,
+                    high=100.25,
+                    low=99.95,
+                    ema20=99.7,
+                    atr=1.0,
+                    macd_hist_series=[0.01, 0.02, 0.03],
+                    rsi=55,
+                )
+            )
+        },
+        use_weight_router=False,
+        use_ai_weights=False,
+    )
+
+    candidate = engine._quadrant_watchlist["JSTUSDT:long"]
+    assert decision.operation is Operation.HOLD
+    assert decision.metadata["portfolio_equity"] == pytest.approx(100.0)
+    assert candidate["portfolio_equity"] == pytest.approx(100.0)
+    assert candidate["base_portion"] >= (12.0 / (100.0 * 3.0)) - 1e-12
+
+
 def test_decision_engine_watchlist_keeps_long_and_short_candidates_separate() -> None:
     engine = FundFlowDecisionEngine(
         {
@@ -1897,6 +2465,229 @@ def test_decision_engine_watchlist_direct_promotion_requires_watch_entry_score()
     )
 
     assert review is None
+
+
+def test_decision_engine_watchlist_direct_promotes_watch_score_even_with_legacy_missing_conditions() -> None:
+    engine = FundFlowDecisionEngine(
+        {
+            "fund_flow": {
+                "strategy_mode": "quadrant_resonance",
+                "min_leverage": 1,
+                "default_leverage": 3,
+                "max_leverage": 9,
+                "quadrant_resonance": {
+                    "entry": {
+                        "watchlist_direct_open_enabled": True,
+                        "watchlist_promoted_portion_mult": 0.75,
+                        "entry_15m_quality_watch_min": 0.50,
+                    },
+                    "risk": {"min_entry_notional_usdt": 12.0},
+                },
+            }
+        }
+    )
+    candidate = {
+        "symbol": "JUPUSDT",
+        "side": "long",
+        "score": 0.8,
+        "candidate_reason": "direction_ok_entry_watch",
+        "missing_conditions": ["hist_cross", "direction_candle", "pin_bar"],
+        "base_portion": 0.10,
+    }
+    signal = type(
+        "Signal",
+        (),
+        {
+            "direction": "long",
+            "reason": "direction_ok_entry_watch",
+            "metadata": {
+                "entry_15m_quality_score": 0.55,
+                "entry_15m_quality_bucket": "watch",
+                "entry_15m_detail": {"ok": False},
+            },
+            "target_portion": 0.0,
+            "leverage": 3,
+            "atr_stop_distance": 1.0,
+        },
+    )()
+
+    review = engine._review_quadrant_watchlist_direct(
+        candidate=candidate,
+        signal=signal,
+        reviewed_at="2026-06-01T00:00:00+00:00",
+    )
+
+    assert review["result"] == "promoted_direct"
+    assert review["quality_score"] == pytest.approx(0.55)
+    assert review["base_portion"] == pytest.approx(0.10)
+
+
+def test_decision_engine_watchlist_direct_does_not_promote_nontrend_without_1h_macd() -> None:
+    engine = FundFlowDecisionEngine(
+        {
+            "fund_flow": {
+                "strategy_mode": "quadrant_resonance",
+                "min_leverage": 1,
+                "default_leverage": 3,
+                "max_leverage": 9,
+                "quadrant_resonance": {
+                    "entry": {
+                        "watchlist_direct_open_enabled": True,
+                        "watchlist_promoted_portion_mult": 0.75,
+                        "entry_15m_quality_watch_min": 0.50,
+                    },
+                    "risk": {"min_entry_notional_usdt": 12.0},
+                },
+            }
+        }
+    )
+    candidate = {
+        "symbol": "JUPUSDT",
+        "side": "long",
+        "score": 0.8,
+        "candidate_reason": "multi_bar_nontrend_ema_without_1h_macd_watch",
+        "base_portion": 0.10,
+    }
+    signal = type(
+        "Signal",
+        (),
+        {
+            "direction": "long",
+            "reason": "multi_bar_nontrend_ema_without_1h_macd_watch",
+            "metadata": {
+                "entry_15m_quality_score": 0.55,
+                "entry_15m_quality_bucket": "watch",
+                "factor_scores": {"quadrant_4h": 0.20, "ema_1h": 0.20, "entry_15m": 0.10, "rsi_15m": 0.05},
+            },
+            "target_portion": 0.0,
+            "leverage": 3,
+            "atr_stop_distance": 1.0,
+        },
+    )()
+
+    review = engine._review_quadrant_watchlist_direct(
+        candidate=candidate,
+        signal=signal,
+        reviewed_at="2026-06-01T00:00:00+00:00",
+    )
+
+    assert review is None
+
+
+def test_decision_engine_watchlist_candidate_base_portion_uses_min_notional_when_hold_metadata_has_no_target() -> None:
+    engine = FundFlowDecisionEngine(
+        {
+            "fund_flow": {
+                "strategy_mode": "quadrant_resonance",
+                "min_leverage": 1,
+                "default_leverage": 3,
+                "max_leverage": 9,
+                "quadrant_resonance": {
+                    "entry": {
+                        "high_score_probe_portion": 0.02,
+                        "watchlist_intent_enabled": True,
+                        "watchlist_intent_dry_run": False,
+                    },
+                    "risk": {
+                        "min_entry_notional_usdt": 12.0,
+                        "min_entry_margin_usdt": 1.0,
+                        "max_leverage": 3,
+                    },
+                },
+            }
+        }
+    )
+
+    update = engine._apply_quadrant_watchlist_intent(
+        symbol="JUPUSDT",
+        metadata={
+            "portfolio_equity": 100.0,
+            "leverage": 3,
+            "watchlist_intent": {
+                "dry_run": False,
+                "symbol": "JUPUSDT",
+                "side": "long",
+                "score": 0.8,
+                "candidate_reason": "direction_ok_entry_watch",
+                "ttl_bars": 4,
+            },
+        },
+    )
+
+    candidate = engine._quadrant_watchlist["JUPUSDT:long"]
+    assert update["result"] == "added"
+    assert candidate["base_portion"] > 0.0
+    assert candidate["base_portion"] >= (12.0 / (100.0 * 3.0)) - 1e-12
+
+
+def test_decision_engine_watchlist_base_portion_falls_back_when_equity_missing() -> None:
+    engine = FundFlowDecisionEngine(
+        {
+            "fund_flow": {
+                "strategy_mode": "quadrant_resonance",
+                "default_leverage": 3,
+                "quadrant_resonance": {
+                    "entry": {
+                        "high_score_probe_portion": 0.02,
+                        "watchlist_fallback_min_portion": 0.033,
+                    },
+                    "risk": {
+                        "min_entry_notional_usdt": 12.0,
+                        "min_entry_margin_usdt": 1.0,
+                        "max_leverage": 3,
+                    },
+                },
+            }
+        }
+    )
+
+    portion = engine._quadrant_watchlist_base_portion(metadata={}, leverage=3)
+
+    assert portion == pytest.approx(0.033)
+
+
+def test_decision_engine_watchlist_promoted_signal_never_returns_zero_target_portion() -> None:
+    engine = FundFlowDecisionEngine(
+        {
+            "fund_flow": {
+                "strategy_mode": "quadrant_resonance",
+                "default_leverage": 3,
+                "quadrant_resonance": {
+                    "entry": {
+                        "watchlist_fallback_min_portion": 0.033,
+                        "watchlist_promoted_portion_mult": 0.75,
+                    }
+                },
+            }
+        }
+    )
+    signal = type(
+        "Signal",
+        (),
+        {
+            "direction": "long",
+            "target_portion": 0.0,
+            "leverage": 3,
+            "atr_stop_distance": 0.0,
+            "quadrant": Quadrant.Q1,
+            "resonance_score": 0.0,
+            "threshold": 0.0,
+            "factor_scores": {},
+            "take_profit_levels": [],
+        },
+    )()
+
+    promoted = engine._quadrant_watchlist_promoted_signal(
+        symbol="HYPEUSDT",
+        price=10.0,
+        signal=signal,
+        review={"result": "promoted_direct", "side": "long", "base_portion": 0.0, "portion_multiplier": 0.75},
+        metadata={},
+    )
+
+    assert promoted is not None
+    assert promoted.target_portion > 0.0
+    assert promoted.metadata["watchlist_sizing_fallback_applied"] is True
 
 
 def test_decision_engine_watchlist_review_reports_age_and_ttl() -> None:

@@ -156,3 +156,37 @@ def test_runtime_log_sink_can_be_disabled(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert created == []
     assert bot._runtime_out_fp is None
     assert bot._runtime_err_fp is None
+
+
+def test_startup_manifest_static_includes_version_and_quadrant_keys() -> None:
+    config = {
+        "fund_flow": {
+            "quadrant_resonance": {
+                "entry": {
+                    "entry_15m_quality_model": "structural_v2",
+                    "entry_15m_quality_open_min": 0.60,
+                    "entry_15m_quality_watch_min": 0.40,
+                    "watchlist_direct_open_enabled": True,
+                    "watchlist_fallback_min_portion": 0.033,
+                    "ema_conflict_entry_penalty": 0.05,
+                }
+            }
+        }
+    }
+
+    manifest = TradingBot._build_startup_manifest_static(
+        config=config,
+        config_path="config/trading_config_fund_flow.json",
+    )
+
+    assert manifest["event"] == "STARTUP_MANIFEST"
+    assert manifest["config_path"] == "config/trading_config_fund_flow.json"
+    assert manifest["config_hash"]
+    assert "git_commit" in manifest
+    assert "git_dirty" in manifest
+    assert manifest["quadrant_resonance"]["entry_15m_quality_model"] == "structural_v2"
+    assert manifest["quadrant_resonance"]["entry_15m_quality_open_min"] == pytest.approx(0.60)
+    assert manifest["quadrant_resonance"]["entry_15m_quality_watch_min"] == pytest.approx(0.40)
+    assert manifest["quadrant_resonance"]["watchlist_direct_open_enabled"] is True
+    assert manifest["quadrant_resonance"]["watchlist_fallback_min_portion"] == pytest.approx(0.033)
+    assert manifest["quadrant_resonance"]["ema_conflict_entry_penalty"] == pytest.approx(0.05)

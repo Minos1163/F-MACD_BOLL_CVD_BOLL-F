@@ -69,6 +69,7 @@ class QuadrantResonanceConfig:
     probe_min_entry_score_enabled: bool = False
     probe_min_entry_score: float = 0.45
     entry_15m_quality_mode: str = "audit"
+    entry_15m_quality_model: str = "legacy"
     entry_15m_quality_open_min: float = 0.75
     entry_15m_quality_watch_min: float = 0.55
     direction_model: str = "legacy"
@@ -90,6 +91,7 @@ class QuadrantResonanceConfig:
     watchlist_include_probe_veto: bool = True
     watchlist_direct_open_enabled: bool = False
     watchlist_promoted_portion_mult: float = 0.75
+    watchlist_fallback_min_portion: float = 0.033
     quadrant_4h_three_state_enabled: bool = False
     quadrant_4h_three_state_act_on_recovering: bool = False
     recovering_state_portion_multiplier: float = 0.50
@@ -186,6 +188,7 @@ class QuadrantResonanceConfig:
             probe_min_entry_score_enabled=bool(entry.get("probe_min_entry_score_enabled", False)),
             probe_min_entry_score=_float(entry.get("probe_min_entry_score"), 0.45),
             entry_15m_quality_mode=str(entry.get("entry_15m_quality_mode", "audit") or "audit"),
+            entry_15m_quality_model=str(entry.get("entry_15m_quality_model", "legacy") or "legacy"),
             entry_15m_quality_open_min=_float(entry.get("entry_15m_quality_open_min"), 0.75),
             entry_15m_quality_watch_min=_float(entry.get("entry_15m_quality_watch_min"), 0.55),
             direction_model=str(entry.get("direction_model", "legacy") or "legacy"),
@@ -207,6 +210,7 @@ class QuadrantResonanceConfig:
             watchlist_include_probe_veto=bool(entry.get("watchlist_include_probe_veto", True)),
             watchlist_direct_open_enabled=bool(entry.get("watchlist_direct_open_enabled", False)),
             watchlist_promoted_portion_mult=_float(entry.get("watchlist_promoted_portion_mult"), 0.75),
+            watchlist_fallback_min_portion=max(0.0, _float(entry.get("watchlist_fallback_min_portion"), 0.033)),
             quadrant_4h_three_state_enabled=bool(entry.get("quadrant_4h_three_state_enabled", False)),
             quadrant_4h_three_state_act_on_recovering=bool(entry.get("quadrant_4h_three_state_act_on_recovering", False)),
             recovering_state_portion_multiplier=_float(entry.get("recovering_state_portion_multiplier"), 0.50),
@@ -268,6 +272,22 @@ def _float(raw: Any, default: float = 0.0) -> float:
         return float(raw)
     except (TypeError, ValueError):
         return float(default)
+
+
+def _portfolio_equity(portfolio: Dict[str, Any]) -> float:
+    return _float(
+        portfolio.get(
+            "equity",
+            portfolio.get(
+                "account_equity",
+                portfolio.get(
+                    "available_balance",
+                    portfolio.get("total_assets", portfolio.get("cash")),
+                ),
+            ),
+        ),
+        0.0,
+    )
 
 
 class QuadrantResonanceEngine:
@@ -385,6 +405,7 @@ class QuadrantResonanceEngine:
         if self.config.require_15m_entry_pattern and "entry_15m" not in factor_scores:
             metadata = self._metadata(quadrant, direction, score, threshold, factor_scores, tf15, tf1h)
             metadata.update(metadata_extra)
+            metadata.setdefault("portfolio_equity", _portfolio_equity(portfolio))
             if self._allow_high_score_missing_15m_probe(score, threshold):
                 entry_quality_score = _float(metadata.get("entry_15m_quality_score"), 0.0)
                 probe_resonance_score = self._compute_probe_resonance_score(direction, quadrant, tf15, tf1h)
@@ -418,7 +439,7 @@ class QuadrantResonanceEngine:
                                 "blocked_reason": "probe_no_15m_direction_veto",
                                 "signal_quality": "degraded_no_15m_reduced_veto",
                                 "override_reason": "high_score_15m_override_graded_veto",
-                                "portfolio_equity": _float(portfolio.get("equity", portfolio.get("account_equity", portfolio.get("available_balance"))), 0.0),
+                                "portfolio_equity": _portfolio_equity(portfolio),
                                 "min_entry_notional_usdt": self.config.min_entry_notional_usdt,
                                 "min_entry_margin_usdt": self.config.min_entry_margin_usdt,
                                 "leverage_cap": leverage,
@@ -484,7 +505,7 @@ class QuadrantResonanceEngine:
                         "blocked_reason": "missing_15m_entry_pattern",
                         "signal_quality": "degraded_no_15m",
                         "override_reason": "high_score_15m_override",
-                        "portfolio_equity": _float(portfolio.get("equity", portfolio.get("account_equity", portfolio.get("available_balance"))), 0.0),
+                        "portfolio_equity": _portfolio_equity(portfolio),
                         "min_entry_notional_usdt": self.config.min_entry_notional_usdt,
                         "min_entry_margin_usdt": self.config.min_entry_margin_usdt,
                         "leverage_cap": leverage,
@@ -559,7 +580,7 @@ class QuadrantResonanceEngine:
         metadata.update(
             {
                 "allowed_reason": "quadrant_resonance_pass",
-                "portfolio_equity": _float(portfolio.get("equity", portfolio.get("account_equity", portfolio.get("available_balance"))), 0.0),
+                "portfolio_equity": _portfolio_equity(portfolio),
                 "min_entry_notional_usdt": self.config.min_entry_notional_usdt,
                 "min_entry_margin_usdt": self.config.min_entry_margin_usdt,
                 "leverage_cap": leverage,
@@ -649,18 +670,85 @@ class QuadrantResonanceEngine:
         threshold = self.config.standard_threshold if quadrant in (Quadrant.Q1, Quadrant.Q3) else self.config.transition_threshold
         metadata = self._metadata(quadrant, direction, score, threshold, factor_scores, tf15, tf1h)
         metadata["direction_gate"] = direction_gate
+        direction_score = _float(direction_gate.get("direction_score"), 0.0)
+        metadata["direction_score"] = direction_score
+        metadata["signal_score"] = direction_score
+        metadata["competition_score"] = direction_score
+        metadata["legacy_resonance_score"] = score
         metadata["quadrant_filter"] = quadrant_filter
+        metadata.setdefault("portfolio_equity", _portfolio_equity(portfolio))
 
         base_open_min = float(self.config.entry_15m_quality_open_min)
         effective_open_min = base_open_min + (float(self.config.ema_conflict_entry_penalty) if ema_conflict else 0.0)
-        metadata["entry_15m_effective_open_min"] = effective_open_min
         entry_score = _float(metadata.get("entry_15m_quality_score"), 0.0)
+        metadata["ema_conflict"] = bool(ema_conflict)
+        metadata["entry_15m_base_open_min"] = base_open_min
+        metadata["entry_15m_effective_open_min"] = effective_open_min
+        metadata["entry_15m_quality_bucket_effective"] = self._entry_quality_bucket_for_threshold(entry_score, effective_open_min)
+        legacy_threshold_bypassed = score + 1e-12 < threshold
+
+        market_reject = self._market_participation_hard_reject(direction, market_context)
+        if market_reject:
+            metadata["market_participation"] = {"ok": False, "blocked_reason": market_reject}
+            return QuadrantSignal(
+                allowed=False,
+                symbol=symbol,
+                direction=direction,
+                quadrant=quadrant,
+                resonance_score=score,
+                threshold=threshold,
+                factor_scores=factor_scores,
+                entry_price_ref=price,
+                atr_stop_distance=self._atr_stop_distance(tf15),
+                reason="market_participation_hard_reject",
+                metadata=metadata,
+            )
+        metadata["market_participation"] = {"ok": True, "blocked_reason": ""}
+
+        nontrend_ema_without_macd = (
+            quadrant not in (Quadrant.Q1, Quadrant.Q3)
+            and bool(legacy_threshold_bypassed)
+            and "ema_1h" in factor_scores
+            and "macd_1h" not in factor_scores
+        )
+        if nontrend_ema_without_macd:
+            reason = "multi_bar_nontrend_ema_without_1h_macd_watch"
+            metadata["legacy_resonance_threshold_bypassed"] = True
+            metadata["legacy_resonance_score"] = score
+            metadata["legacy_resonance_threshold"] = threshold
+            metadata["nontrend_ema_macd_filter"] = {
+                "ok": False,
+                "blocked_reason": reason,
+                "requires_1h_macd": True,
+            }
+            intent = self._watchlist_intent(
+                symbol=symbol,
+                direction=direction,
+                score=direction_score,
+                reason=reason,
+                metadata=metadata,
+            )
+            if intent:
+                metadata["watchlist_intent"] = intent
+            return QuadrantSignal(
+                allowed=False,
+                symbol=symbol,
+                direction=direction,
+                quadrant=quadrant,
+                resonance_score=score,
+                threshold=threshold,
+                factor_scores=factor_scores,
+                entry_price_ref=price,
+                atr_stop_distance=self._atr_stop_distance(tf15),
+                reason=reason,
+                metadata=metadata,
+            )
 
         if self.config.require_15m_entry_pattern and entry_score + 1e-12 < effective_open_min:
             intent = self._watchlist_intent(
                 symbol=symbol,
                 direction=direction,
-                score=max(score, _float(direction_gate.get("direction_score"), 0.0)),
+                score=direction_score,
                 reason="direction_ok_entry_watch",
                 metadata=metadata,
             )
@@ -680,7 +768,6 @@ class QuadrantResonanceEngine:
                 metadata=metadata,
             )
 
-        legacy_threshold_bypassed = score + 1e-12 < threshold
         if legacy_threshold_bypassed:
             metadata["legacy_resonance_threshold_bypassed"] = True
             metadata["legacy_resonance_score"] = score
@@ -693,7 +780,7 @@ class QuadrantResonanceEngine:
         metadata.update(
             {
                 "allowed_reason": "multi_bar_direction_generated_pass",
-                "portfolio_equity": _float(portfolio.get("equity", portfolio.get("account_equity", portfolio.get("available_balance"))), 0.0),
+                "portfolio_equity": _portfolio_equity(portfolio),
                 "leverage": leverage,
                 "target_portion": target_portion,
                 "legacy_resonance_threshold_bypassed": bool(legacy_threshold_bypassed),
@@ -851,7 +938,7 @@ class QuadrantResonanceEngine:
             {
                 "quadrant_state": "recovering",
                 "quadrant_recovering_direction": direction,
-                "portfolio_equity": _float(portfolio.get("equity", portfolio.get("account_equity", portfolio.get("available_balance"))), 0.0),
+                "portfolio_equity": _portfolio_equity(portfolio),
                 "recovering_state_score_threshold": threshold,
                 "recovering_state_portion_multiplier": float(self.config.recovering_state_portion_multiplier),
             }
@@ -968,7 +1055,8 @@ class QuadrantResonanceEngine:
                 reasons.append("probe_veto_low_resonance_score")
 
         if bool(self.config.probe_no_15m_breadth_veto_enabled):
-            breadth = ctx.get("market_breadth") if isinstance(ctx.get("market_breadth"), dict) else {}
+            breadth_raw = ctx.get("market_breadth")
+            breadth: Dict[str, Any] = breadth_raw if isinstance(breadth_raw, dict) else {}
             confirm_count = int(_float(breadth.get("confirm_count"), 0.0))
             invalid_count = int(_float(breadth.get("invalid_count"), 0.0))
             invalid_min = max(1, int(self.config.probe_breadth_zero_confirm_invalid_min or 2))
@@ -980,7 +1068,7 @@ class QuadrantResonanceEngine:
                     reasons.append(reason)
 
         if bool(self.config.probe_no_15m_flow_veto_enabled):
-            flow = ctx.get("flow") if isinstance(ctx.get("flow"), dict) else ctx
+            flow = self._normalized_flow_context(ctx)
             cvd = _float(flow.get("cvd"), 0.0)
             oi_delta = _float(flow.get("oi_delta"), 0.0)
             imbalance = _float(flow.get("imbalance"), 0.0)
@@ -1052,6 +1140,54 @@ class QuadrantResonanceEngine:
             return f"probe_veto_long_against_breadth:btc_30m={btc_30m:.4f},btc_60m={btc_60m:.4f},alt_med={alt_med:.4f}"
         return ""
 
+    def _market_participation_hard_reject(self, direction: str, market_context: Optional[Dict[str, Any]]) -> str:
+        ctx = market_context if isinstance(market_context, dict) else {}
+        breadth_raw = ctx.get("market_breadth")
+        breadth: Dict[str, Any] = breadth_raw if isinstance(breadth_raw, dict) else {}
+        if bool(self.config.probe_no_15m_breadth_veto_enabled):
+            confirm_count = int(_float(breadth.get("confirm_count"), 0.0))
+            invalid_count = int(_float(breadth.get("invalid_count"), 0.0))
+            invalid_min = max(1, int(self.config.probe_breadth_zero_confirm_invalid_min or 2))
+            if confirm_count == 0 and invalid_count >= invalid_min:
+                return f"breadth_zero_confirm_invalid_{invalid_count}"
+        if bool(self.config.probe_direction_breadth_veto_enabled):
+            reason = self._direction_aware_breadth_veto(direction, breadth)
+            if reason:
+                return reason
+        if bool(self.config.probe_no_15m_flow_veto_enabled):
+            flow = self._normalized_flow_context(ctx)
+            cvd = _float(flow.get("cvd"), 0.0)
+            oi_delta = _float(flow.get("oi_delta"), 0.0)
+            imbalance = _float(flow.get("imbalance"), 0.0)
+            liq_norm = _float(flow.get("liq_norm"), 0.0)
+            if direction == "long" and cvd < 0.0 and oi_delta < 0.0 and imbalance < 0.0:
+                return "long_flow_all_bearish"
+            if direction == "short" and cvd > 0.0 and oi_delta > 0.0 and imbalance > 0.0:
+                return "short_flow_all_bullish"
+            if direction == "long" and liq_norm < 0.0 and cvd < 0.0 and imbalance < 0.0:
+                return "long_liq_flow_bearish"
+            if direction == "short" and liq_norm > 0.0 and cvd > 0.0 and imbalance > 0.0:
+                return "short_liq_flow_bullish"
+        return ""
+
+    @staticmethod
+    def _flow_value(flow: Dict[str, Any], *keys: str) -> float:
+        for key in keys:
+            if key in flow:
+                return _float(flow.get(key), 0.0)
+        return 0.0
+
+    def _normalized_flow_context(self, market_context: Optional[Dict[str, Any]]) -> Dict[str, float]:
+        ctx = market_context if isinstance(market_context, dict) else {}
+        flow_raw = ctx.get("flow")
+        flow: Dict[str, Any] = flow_raw if isinstance(flow_raw, dict) else ctx
+        return {
+            "cvd": self._flow_value(flow, "cvd", "cvd_ratio", "cvd_momentum", "orderflow_cvd_ratio", "orderflow_cvd_momentum"),
+            "oi_delta": self._flow_value(flow, "oi_delta", "oi_delta_ratio"),
+            "imbalance": self._flow_value(flow, "imbalance", "trade_imbalance", "volume_imbalance"),
+            "liq_norm": self._flow_value(flow, "liq_norm", "liquidity_delta_norm", "liquidity_delta"),
+        }
+
     def _compute_probe_resonance_score(self, direction: str, quadrant: Quadrant, tf15: Dict[str, Any], tf1h: Dict[str, Any]) -> float:
         hist15 = self._series(tf15, "macd_hist_series", "macd_hist_array", "macd_hist")
         hist1h = self._series(tf1h, "macd_hist_series", "macd_hist_array", "macd_hist")
@@ -1070,8 +1206,7 @@ class QuadrantResonanceEngine:
         return max(0.0, min(1.0, score))
 
     def _flow_alignment_score(self, direction: str, market_context: Optional[Dict[str, Any]]) -> float:
-        ctx = market_context if isinstance(market_context, dict) else {}
-        flow = ctx.get("flow") if isinstance(ctx.get("flow"), dict) else ctx
+        flow = self._normalized_flow_context(market_context)
         side = 1.0 if direction == "long" else -1.0
         components = (
             (_float(flow.get("cvd"), 0.0) * side, 0.35),
@@ -1094,7 +1229,8 @@ class QuadrantResonanceEngine:
         if not bool(self.config.probe_veto_graded_enabled):
             return {"action": "reject", "portion_multiplier": 0.0, "reason": "graded_disabled"}
         ctx = market_context if isinstance(market_context, dict) else {}
-        breadth = ctx.get("market_breadth") if isinstance(ctx.get("market_breadth"), dict) else {}
+        breadth_raw = ctx.get("market_breadth")
+        breadth: Dict[str, Any] = breadth_raw if isinstance(breadth_raw, dict) else {}
         hist15 = self._series(tf15, "macd_hist_series", "macd_hist_array", "macd_hist")
         hist1h = self._series(tf1h, "macd_hist_series", "macd_hist_array", "macd_hist")
         macd15 = self._hist_strengthening(hist15, direction, bars=3)
@@ -1144,7 +1280,7 @@ class QuadrantResonanceEngine:
         return max(0.0, -btc_30m, -btc_60m, -alt_med)
 
     def _probe_position_portion(self, portfolio: Dict[str, Any]) -> float:
-        equity = _float(portfolio.get("equity", portfolio.get("account_equity", portfolio.get("available_balance"))), 0.0)
+        equity = _portfolio_equity(portfolio)
         base = max(0.0, float(self.config.high_score_probe_portion))
         if equity > 0:
             base = max(base, max(0.0, float(self.config.min_entry_margin_usdt)) / equity)
@@ -1521,6 +1657,26 @@ class QuadrantResonanceEngine:
         return []
 
     @staticmethod
+    def _price_series(tf: Dict[str, Any], *keys: str) -> list[float]:
+        for key in keys:
+            value = tf.get(key)
+            if isinstance(value, (list, tuple)):
+                return [_float(v) for v in value if math.isfinite(_float(v, float("nan"))) and _float(v, 0.0) > 0.0]
+            if value is not None and key == keys[-1]:
+                item = _float(value)
+                return [item] if math.isfinite(item) and item > 0.0 else []
+        return []
+
+    @staticmethod
+    def _percentile(values: list[float], pct: float) -> float:
+        clean = [float(v) for v in values if math.isfinite(float(v))]
+        if not clean:
+            return 0.0
+        clean.sort()
+        idx = int(max(0, min(len(clean) - 1, math.floor(len(clean) * pct))))
+        return clean[idx]
+
+    @staticmethod
     def _ema_state(tf: Dict[str, Any]) -> int:
         e20 = _float(tf.get("ema20"), 0.0)
         e50 = _float(tf.get("ema50"), 0.0)
@@ -1619,6 +1775,8 @@ class QuadrantResonanceEngine:
         detail: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         detail = detail or self._entry_pattern_detail(direction, tf15)
+        if str(self.config.entry_15m_quality_model or "").strip().lower() == "structural_v2":
+            return self._entry_15m_quality_structural_v2(direction, tf15, detail=detail)
         hist = self._series(tf15, "macd_hist_series", "macd_hist_array", "macd_hist")
         macd_strengthening = self._hist_strengthening(hist, direction, bars=3)
         ema_ratio = _float(detail.get("ema_distance_atr_ratio"), 99.0)
@@ -1663,6 +1821,138 @@ class QuadrantResonanceEngine:
             bucket = "hold"
         return {"score": score, "bucket": bucket, "missing_conditions": missing}
 
+    def _entry_quality_bucket_for_threshold(self, score: float, open_min: float) -> str:
+        if float(score) + 1e-12 >= float(open_min):
+            return "open"
+        if float(score) + 1e-12 >= float(self.config.entry_15m_quality_watch_min):
+            return "watch"
+        return "hold"
+
+    def _entry_15m_quality_structural_v2(
+        self,
+        direction: str,
+        tf15: Dict[str, Any],
+        *,
+        detail: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        close = _float(tf15.get("close"), _float(detail.get("close"), 0.0))
+        ema20 = _float(tf15.get("ema20"), _float(detail.get("ema20"), close))
+        atr = max(_float(tf15.get("atr"), _float(detail.get("atr"), 0.0)), close * 0.001, 1e-9)
+        closes = self._close_series(tf15)
+        highs = self._price_series(tf15, "high_series", "high_array", "highs", "high")
+        lows = self._price_series(tf15, "low_series", "low_array", "lows", "low")
+        if len(closes) < 20:
+            return {
+                "score": 0.0,
+                "bucket": "hold",
+                "missing_conditions": ["structural_history"],
+                "model": "structural_v2",
+                "components": {"history_counts": {"close": len(closes), "high": len(highs), "low": len(lows)}},
+            }
+        if not highs:
+            highs = list(closes)
+        if not lows:
+            lows = list(closes)
+        if close > 0.0 and (not closes or closes[-1] != close):
+            closes = list(closes[-19:]) + [close]
+        if close > 0.0 and (not highs or highs[-1] < close):
+            highs = list(highs[-19:]) + [max(close, _float(tf15.get("high"), close))]
+        if close > 0.0 and (not lows or lows[-1] > close):
+            lows = list(lows[-19:]) + [min(close, _float(tf15.get("low"), close))]
+
+        score = 0.0
+        missing: list[str] = []
+        components: Dict[str, Any] = {}
+
+        dist_atr = abs(close - ema20) / atr
+        if dist_atr <= 0.5:
+            ema_score = 0.35
+        elif dist_atr <= 1.0:
+            ema_score = 0.22
+        elif dist_atr <= 1.5:
+            ema_score = 0.10
+        else:
+            ema_score = 0.0
+            missing.append("ema_distance")
+        score += ema_score
+        components["ema_distance"] = {"score": ema_score, "dist_atr": dist_atr}
+
+        recent_highs = highs[-10:] if highs else []
+        recent_lows = lows[-10:] if lows else []
+        recent_high = max(recent_highs) if recent_highs else close
+        recent_low = min(recent_lows) if recent_lows else close
+        recent_range = max(recent_high - recent_low, 1e-9)
+        pullback_pct = (recent_high - close) / recent_range if direction == "long" else (close - recent_low) / recent_range
+        if 0.20 <= pullback_pct <= 0.65:
+            pullback_score = 0.25
+        elif 0.0 <= pullback_pct < 0.20:
+            pullback_score = 0.08
+            missing.append("pullback_depth")
+        else:
+            pullback_score = 0.0
+            missing.append("pullback_depth")
+        score += pullback_score
+        components["pullback_depth"] = {
+            "score": pullback_score,
+            "pullback_pct": pullback_pct,
+            "recent_high": recent_high,
+            "recent_low": recent_low,
+        }
+
+        hist = self._series(tf15, "macd_hist_series", "macd_hist_array", "macd_hist")
+        tail = hist[-5:]
+        if direction == "long":
+            same_side = sum(1 for item in tail if item > 0)
+            improving = len(tail) >= 2 and tail[-1] > tail[-2]
+        else:
+            same_side = sum(1 for item in tail if item < 0)
+            improving = len(tail) >= 2 and tail[-1] < tail[-2]
+        if same_side >= 3 and improving:
+            momentum_score = 0.25
+        elif same_side >= 2:
+            momentum_score = 0.12
+            missing.append("momentum_recovery")
+        else:
+            momentum_score = 0.0
+            missing.append("momentum_recovery")
+        score += momentum_score
+        components["momentum_recovery"] = {
+            "score": momentum_score,
+            "same_side_bars": same_side,
+            "improving": improving,
+        }
+
+        percentile_80 = self._percentile(closes[-20:], 0.80)
+        percentile_20 = self._percentile(closes[-20:], 0.20)
+        chasing = (direction == "long" and close > percentile_80) or (direction == "short" and close < percentile_20)
+        if chasing:
+            chase_score = -0.10
+            missing.append("not_chasing")
+        else:
+            chase_score = 0.15
+        score += chase_score
+        components["not_chasing"] = {
+            "score": chase_score,
+            "chasing": chasing,
+            "percentile_80": percentile_80,
+            "percentile_20": percentile_20,
+        }
+
+        score = max(0.0, min(1.0, score))
+        if score >= float(self.config.entry_15m_quality_open_min):
+            bucket = "open"
+        elif score >= float(self.config.entry_15m_quality_watch_min):
+            bucket = "watch"
+        else:
+            bucket = "hold"
+        return {
+            "score": score,
+            "bucket": bucket,
+            "missing_conditions": missing,
+            "model": "structural_v2",
+            "components": components,
+        }
+
     def _entry_pattern_ok(self, direction: str, tf15: Dict[str, Any]) -> bool:
         return bool(self._entry_pattern_detail(direction, tf15).get("ok"))
 
@@ -1701,7 +1991,7 @@ class QuadrantResonanceEngine:
         return max(atr * self.config.hard_stop_atr_mult, close * 0.001)
 
     def _position_portion(self, price: float, stop_distance: float, portfolio: Dict[str, Any]) -> float:
-        equity = _float(portfolio.get("equity", portfolio.get("account_equity", portfolio.get("available_balance"))), 0.0)
+        equity = _portfolio_equity(portfolio)
         if equity <= 0:
             return 0.0
         leverage = max(1.0, min(3.0, float(self.config.max_leverage or 1.0)))

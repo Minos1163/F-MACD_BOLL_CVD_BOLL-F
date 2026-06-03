@@ -16,9 +16,11 @@ import json
 import math
 import os
 import shutil
+import subprocess
 import sys
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
@@ -398,6 +400,7 @@ class TradingBot:
         
         self._load_risk_state()
         self._init_fund_flow_modules()
+        self._print_startup_manifest()
         self._preload_market_history_on_startup()
 
         self._print_startup_summary()
@@ -445,6 +448,55 @@ class TradingBot:
         ).hexdigest()[:8]
         parts = [f"{key}={value}" for key, value in snapshot.items()]
         print(f"[CONFIG_FINGERPRINT] hash={cfg_hash} | " + " | ".join(parts))
+
+    @staticmethod
+    def _git_output(args: List[str]) -> str:
+        try:
+            result = subprocess.run(
+                ["git", *args],
+                cwd=Path(__file__).resolve().parents[2],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+            if result.returncode == 0:
+                return str(result.stdout or "").strip()
+        except Exception:
+            return ""
+        return ""
+
+    @staticmethod
+    def _build_startup_manifest_static(*, config: Dict[str, Any], config_path: str) -> Dict[str, Any]:
+        ff_cfg = config.get("fund_flow", {}) if isinstance(config, dict) else {}
+        quadrant_cfg = ff_cfg.get("quadrant_resonance", {}) if isinstance(ff_cfg.get("quadrant_resonance"), dict) else {}
+        entry_cfg = quadrant_cfg.get("entry", {}) if isinstance(quadrant_cfg.get("entry"), dict) else {}
+        config_hash = hashlib.sha256(
+            json.dumps(config, sort_keys=True, ensure_ascii=True, default=str).encode("utf-8")
+        ).hexdigest()[:12]
+        dirty_output = TradingBot._git_output(["status", "--short"])
+        return {
+            "event": "STARTUP_MANIFEST",
+            "git_commit": TradingBot._git_output(["rev-parse", "--short", "HEAD"]) or "unknown",
+            "git_dirty": bool(dirty_output),
+            "config_path": str(config_path or ""),
+            "config_hash": config_hash,
+            "quadrant_resonance": {
+                "entry_15m_quality_model": str(entry_cfg.get("entry_15m_quality_model") or "legacy"),
+                "entry_15m_quality_open_min": entry_cfg.get("entry_15m_quality_open_min"),
+                "entry_15m_quality_watch_min": entry_cfg.get("entry_15m_quality_watch_min"),
+                "watchlist_direct_open_enabled": bool(entry_cfg.get("watchlist_direct_open_enabled", False)),
+                "watchlist_fallback_min_portion": entry_cfg.get("watchlist_fallback_min_portion"),
+                "ema_conflict_entry_penalty": entry_cfg.get("ema_conflict_entry_penalty"),
+            },
+        }
+
+    def _print_startup_manifest(self) -> None:
+        manifest = self._build_startup_manifest_static(
+            config=self.config if isinstance(self.config, dict) else {},
+            config_path=str(getattr(self, "config_path", "") or ""),
+        )
+        print("STARTUP_MANIFEST " + json.dumps(manifest, ensure_ascii=False, sort_keys=True))
 
     def _configure_runtime_log_sink(self) -> None:
         if not bool((self.config.get("logging", {}) or {}).get("runtime_file_enabled", True)):
@@ -966,7 +1018,8 @@ class TradingBot:
         trigger_context: Optional[Dict[str, Any]] = None,
         execution_result: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        md = decision.metadata if isinstance(getattr(decision, "metadata", None), dict) else {}
+        raw_md = getattr(decision, "metadata", None)
+        md: Dict[str, Any] = raw_md if isinstance(raw_md, dict) else {}
         equity = self._to_float((account_summary or {}).get("equity"), 0.0)
         target = self._to_float(getattr(decision, "target_portion_of_balance", 0.0), 0.0)
         estimated_notional = max(0.0, target * equity)
@@ -1031,6 +1084,24 @@ class TradingBot:
                 "competition_score": md.get("competition_score"),
                 "details": md.get("signal_details") or md.get("continuation_diagnostics") or md.get("slow_bull_continuation"),
                 "quadrant_debug": md.get("quadrant_debug"),
+                "factor_scores": md.get("factor_scores") if isinstance(md.get("factor_scores"), dict) else {},
+                "entry_rsi_15m": md.get("entry_rsi_15m"),
+                "entry_rsi_1h": md.get("entry_rsi_1h"),
+                "macd_hist_15m_last3": md.get("macd_hist_15m_last3"),
+                "macd_hist_1h_last3": md.get("macd_hist_1h_last3"),
+                "macd_hist_15m_strengthening": md.get("macd_hist_15m_strengthening"),
+                "macd_hist_1h_strengthening": md.get("macd_hist_1h_strengthening"),
+                "entry_15m_detail": md.get("entry_15m_detail"),
+                "entry_15m_quality_score": md.get("entry_15m_quality_score"),
+                "entry_15m_quality_bucket": md.get("entry_15m_quality_bucket"),
+                "entry_15m_missing_conditions": md.get("entry_15m_missing_conditions"),
+                "watchlist_intent": md.get("watchlist_intent"),
+                "watchlist_update": md.get("watchlist_update"),
+                "watchlist_review": md.get("watchlist_review"),
+                "quadrant_state": md.get("quadrant_state"),
+                "quadrant_recovering_direction": md.get("quadrant_recovering_direction"),
+                "signal_quality": md.get("signal_quality"),
+                "override_reason": md.get("override_reason"),
             },
             "gates": {
                 "btc_entry_regime_gate": md.get("btc_entry_regime_gate"),
@@ -1042,10 +1113,16 @@ class TradingBot:
                 "micro_margin_gate": micro_margin_gate,
                 "gate_cap_applied": md.get("gate_cap_applied"),
                 "gate_cap_portion": md.get("gate_cap_portion"),
+                "direction_gate": md.get("direction_gate"),
+                "probe_no_15m_veto_reasons": md.get("probe_no_15m_veto_reasons"),
+                "probe_resonance_score": md.get("probe_resonance_score"),
+                "probe_flow_alignment_score": md.get("probe_flow_alignment_score"),
             },
             "sizing": {
                 "target_portion_of_balance": target,
                 "leverage": leverage,
+                "requested_leverage": md.get("requested_leverage", md.get("leverage_cap")),
+                "effective_leverage": md.get("effective_leverage", leverage),
                 "estimated_notional_usdt": estimated_notional,
                 "estimated_margin_usdt": estimated_margin,
                 "account_equity_usdt": equity,
@@ -1096,9 +1173,45 @@ class TradingBot:
                 "quantity": result.get("quantity"),
                 "quantity_info": result.get("quantity_info"),
                 "order": result.get("order"),
+                "fills": result.get("fills"),
                 "post_protection_hook": result.get("post_protection_hook"),
             }
         return payload
+
+    def _build_pending_fill_reconciled_result(self, symbol: str, execution_result: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(execution_result, dict):
+            return {}
+        if str(execution_result.get("status", "")).lower() != "pending":
+            return {}
+        raw_order_obj = execution_result.get("order")
+        order_obj: Dict[str, Any] = raw_order_obj if isinstance(raw_order_obj, dict) else {}
+        order_id = self._to_int(order_obj.get("orderId"), -1)
+        if order_id <= 0:
+            return {}
+        try:
+            fills = self._fetch_order_trade_fills(symbol=symbol, order_id=order_id)
+        except Exception:
+            fills = []
+        visible_fills = []
+        for fill in fills:
+            if not isinstance(fill, dict):
+                continue
+            qty = self._to_float(fill.get("qty"), self._to_float(fill.get("executedQty"), 0.0))
+            if qty > 0.0:
+                visible_fills.append(fill)
+        if not visible_fills:
+            return {}
+        return {
+            "status": "success",
+            "message": "pending_order_fills_confirmed",
+            "order": order_obj,
+            "fills": visible_fills,
+            "quantity": sum(
+                self._to_float(fill.get("qty"), self._to_float(fill.get("executedQty"), 0.0))
+                for fill in visible_fills
+                if isinstance(fill, dict)
+            ),
+        }
 
     @staticmethod
     def _normalize_trade_fill_fee(fee: float) -> float:
@@ -2761,21 +2874,24 @@ class TradingBot:
         if not bool(cfg.get("enabled")) or decision.operation not in (FundFlowOperation.BUY, FundFlowOperation.SELL):
             return static_cap, metadata
 
-        md = decision.metadata if isinstance(getattr(decision, "metadata", None), dict) else {}
+        raw_md = getattr(decision, "metadata", None)
+        md: Dict[str, Any] = raw_md if isinstance(raw_md, dict) else {}
         engine_tag = str(md.get("engine") or md.get("regime") or "").strip().upper()
         signal_type_1h = str(md.get("signal_type_1h") or "").strip()
         ema_status = str(md.get("ema_structure_status") or "").strip().lower()
         signal_score = self._to_float(md.get("signal_score"), 0.0)
         vwap_score = self._to_float(md.get("vwap_score"), 0.0)
         regime_adx = self._to_float(md.get("regime_adx"), 0.0)
+        allowed_signal_types = cfg.get("signal_types") or set()
+        allowed_ema_status = cfg.get("ema_structure_status") or set()
 
         if cfg.get("require_engine") and engine_tag != cfg.get("require_engine"):
             metadata["reason"] = f"engine={engine_tag or 'NA'}"
             return static_cap, metadata
-        if cfg.get("signal_types") and signal_type_1h not in cfg.get("signal_types"):
+        if allowed_signal_types and signal_type_1h not in allowed_signal_types:
             metadata["reason"] = f"signal_type_1h={signal_type_1h or 'NA'}"
             return static_cap, metadata
-        if cfg.get("ema_structure_status") and ema_status not in cfg.get("ema_structure_status"):
+        if allowed_ema_status and ema_status not in allowed_ema_status:
             metadata["reason"] = f"ema_structure_status={ema_status or 'NA'}"
             return static_cap, metadata
         if signal_score < self._to_float(cfg.get("min_signal_score"), 0.90):
@@ -3534,7 +3650,7 @@ class TradingBot:
             self._save_risk_state()
             expiry = None
         blocked = isinstance(expiry, datetime) and expiry > now
-        remaining = int((expiry - now).total_seconds()) if blocked else 0
+        remaining = int((expiry - now).total_seconds()) if isinstance(expiry, datetime) and blocked else 0
         return {
             "enabled": bool(cfg.get("trend_only_mode", False)),
             "blocked": bool(blocked),
@@ -3671,7 +3787,8 @@ class TradingBot:
             meta["reason"] = "target_above_min_open"
             return decision, meta
 
-        md = dict(decision.metadata or {}) if isinstance(getattr(decision, "metadata", None), dict) else {}
+        raw_decision_md = getattr(decision, "metadata", None)
+        md = raw_decision_md.copy() if isinstance(raw_decision_md, dict) else {}
         signal_score = max(
             self._to_float(md.get("signal_score"), 0.0),
             self._to_float(md.get("competition_score"), 0.0),
@@ -3839,7 +3956,8 @@ class TradingBot:
         if decision.operation not in (FundFlowOperation.BUY, FundFlowOperation.SELL):
             meta["reason"] = "not_entry"
             return True, meta
-        md = decision.metadata if isinstance(getattr(decision, "metadata", None), dict) else {}
+        raw_md = getattr(decision, "metadata", None)
+        md: Dict[str, Any] = raw_md if isinstance(raw_md, dict) else {}
         is_probe = bool(md.get("is_trial_entry")) or str(md.get("stage") or "").lower() == "continuation_long"
         if not bool(meta["enabled"]) or not is_probe:
             meta["reason"] = "disabled_or_not_probe"
@@ -3906,7 +4024,8 @@ class TradingBot:
         if loss_ratio < min_loss:
             return False, decision, {"reason": f"loss_ratio={loss_ratio:.4f}", "loss_ratio": loss_ratio}
 
-        md = dict(decision.metadata or {}) if isinstance(getattr(decision, "metadata", None), dict) else {}
+        raw_decision_md = getattr(decision, "metadata", None)
+        md = raw_decision_md.copy() if isinstance(raw_decision_md, dict) else {}
         signal_score = max(
             self._to_float(md.get("signal_score"), 0.0),
             self._to_float(md.get("competition_score"), 0.0),
@@ -4613,7 +4732,8 @@ class TradingBot:
             return None
         action = FundFlowOperation.BUY if side == "LONG" else FundFlowOperation.SELL
 
-        md = base_decision.metadata if isinstance(getattr(base_decision, "metadata", None), dict) else {}
+        raw_md = getattr(base_decision, "metadata", None)
+        md: Dict[str, Any] = raw_md if isinstance(raw_md, dict) else {}
         metadata = {
             **md,
             "trigger": trigger_context,
@@ -4682,7 +4802,8 @@ class TradingBot:
         if pnl_ratio < min_pnl_ratio:
             return None
 
-        md = base_decision.metadata if isinstance(getattr(base_decision, "metadata", None), dict) else {}
+        raw_metadata = getattr(base_decision, "metadata", None)
+        md: Dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
         signal_type_1h = str(md.get("signal_type_1h") or "").strip()
         allowed_signal_types = cfg.get("signal_types") or set()
         if allowed_signal_types and signal_type_1h not in allowed_signal_types:
@@ -4705,16 +4826,18 @@ class TradingBot:
         if target_portion <= 0:
             return None
 
-        metadata = {
-            **md,
-            "trigger": trigger_context,
-            "winner_pyramiding_triggered": True,
-            "winner_pyramiding_stage_index": current_stage,
-            "winner_pyramiding_stage": current_stage + 1,
-            "winner_pyramiding_max_additions": max_additions,
-            "winner_pyramiding_min_pnl_ratio": min_pnl_ratio,
-            "winner_pyramiding_pnl_ratio": pnl_ratio,
-        }
+        metadata: Dict[str, Any] = md.copy()
+        metadata.update(
+            {
+                "trigger": trigger_context,
+                "winner_pyramiding_triggered": True,
+                "winner_pyramiding_stage_index": current_stage,
+                "winner_pyramiding_stage": current_stage + 1,
+                "winner_pyramiding_max_additions": max_additions,
+                "winner_pyramiding_min_pnl_ratio": min_pnl_ratio,
+                "winner_pyramiding_pnl_ratio": pnl_ratio,
+            }
+        )
         reason = (
             f"winner_pyramiding stage={current_stage + 1}/{max_additions} "
             f"pnl={pnl_ratio:.4f} signal={signal_type_1h or 'NA'} "
@@ -4820,11 +4943,8 @@ class TradingBot:
                         for item in tp_levels_raw:
                             if not isinstance(item, dict):
                                 continue
-                            try:
-                                price = float(item.get("price"))
-                                reduce_pct = float(item.get("reduce_pct"))
-                            except Exception:
-                                continue
+                            price = self._to_float(item.get("price"), 0.0)
+                            reduce_pct = self._to_float(item.get("reduce_pct"), 0.0)
                             if price > 0 and reduce_pct > 0:
                                 tp_levels.append({"price": price, "reduce_pct": reduce_pct})
                     protection_plan[k.upper()] = {
@@ -5795,6 +5915,20 @@ class TradingBot:
             (entry_timeframe, entry_limit),
             (regime_timeframe, trend_limit),
         ]
+        quadrant_entry_cfg = (
+            ff_cfg.get("quadrant_resonance", {}).get("entry", {})
+            if isinstance(ff_cfg.get("quadrant_resonance"), dict)
+            and isinstance(ff_cfg.get("quadrant_resonance", {}).get("entry"), dict)
+            else {}
+        )
+        if str(quadrant_entry_cfg.get("direction_model", "") or "").strip().lower() == "multi_bar_slope":
+            requested_timeframes.extend(
+                [
+                    ("15m", max(entry_limit, int(self._to_float(quadrant_entry_cfg.get("direction_15m_lookback_bars"), 30)))),
+                    ("1h", max(trend_limit, int(self._to_float(quadrant_entry_cfg.get("direction_1h_lookback_bars"), 50)))),
+                    ("4h", max(trend_limit, int(self._to_float(quadrant_entry_cfg.get("direction_4h_lookback_bars"), 50)))),
+                ]
+            )
         if dual_risk_enabled:
             requested_timeframes.append((dual_risk_timeframe, dual_risk_limit))
 
@@ -6988,13 +7122,22 @@ class TradingBot:
             tf_used = str(md.get("entry_timeframe") or "").strip().lower() or "15m"
             return tf_used, tf_ctx
         ctx = flow_context if isinstance(flow_context, dict) else {}
-        timeframes = ctx.get("timeframes") if isinstance(ctx.get("timeframes"), dict) else {}
+        raw_timeframes = ctx.get("timeframes")
+        timeframes: Dict[str, Any] = raw_timeframes if isinstance(raw_timeframes, dict) else {}
         candidates = []
-        ff_cfg = getattr(self, "config", {}).get("fund_flow", {}) if isinstance(getattr(self, "config", {}), dict) else {}
+        raw_config = getattr(self, "config", None)
+        config_dict: Dict[str, Any] = {}
+        if isinstance(raw_config, dict):
+            config_dict = raw_config
+        raw_ff_cfg = config_dict.get("fund_flow")
+        ff_cfg: Dict[str, Any] = {}
+        if isinstance(raw_ff_cfg, dict):
+            ff_cfg = raw_ff_cfg
+        configured_tf = str(ff_cfg.get("decision_timeframe") or ff_cfg.get("signal_timeframe") or "").strip().lower()
         for tf in (
             str(md.get("entry_timeframe") or "").strip().lower(),
             str(ctx.get("active_timeframe") or "").strip().lower(),
-            str(ff_cfg.get("decision_timeframe") or ff_cfg.get("signal_timeframe") or "").strip().lower(),
+            configured_tf,
             "15m",
         ):
             if tf and tf not in candidates:
@@ -7006,7 +7149,8 @@ class TradingBot:
         return str(ctx.get("active_timeframe") or md.get("entry_timeframe") or "unknown"), {}
 
     def _decision_signal_score(self, decision: Any, flow_context: Optional[Dict[str, Any]] = None) -> float:
-        md = decision.metadata if isinstance(getattr(decision, "metadata", None), dict) else {}
+        raw_md = getattr(decision, "metadata", None)
+        md: Dict[str, Any] = raw_md if isinstance(raw_md, dict) else {}
         strategy_mode = str(md.get("strategy_mode") or "").strip().lower()
         entry_logic = str(md.get("entry_logic") or "").strip().lower()
         is_rule_mode = (
@@ -7069,6 +7213,12 @@ class TradingBot:
             total = model_score + slope_score + macd_score + bb_score + risk_score
             return round(total, 6)
 
+        if strategy_mode == "quadrant_resonance":
+            direction_score = self._to_float(md.get("direction_score"), 0.0)
+            competition_score = self._to_float(md.get("competition_score"), direction_score)
+            signal_score = self._to_float(md.get("signal_score"), competition_score)
+            return round(max(direction_score, competition_score, signal_score), 6)
+
         if strategy_mode in {"macd_mtf_strategy", "macd_mtf_strategy_v2"}:
             signal_score = self._to_float(md.get("signal_score"), 0.0)
             if signal_score > 0:
@@ -7124,7 +7274,8 @@ class TradingBot:
         side: Optional[str] = None,
         extra: Optional[Dict[str, Any]] = None,
     ) -> None:
-        md = decision.metadata if isinstance(getattr(decision, "metadata", None), dict) else {}
+        raw_md = getattr(decision, "metadata", None)
+        md: Dict[str, Any] = raw_md if isinstance(raw_md, dict) else {}
         macd_v2_debug = md.get("macd_v2_debug") if isinstance(md.get("macd_v2_debug"), dict) else {}
         kline_tf, tf_ctx = self._decision_kline_context(flow_context, md)
         kline_ts = getattr(flow_snapshot, "timestamp", None)
@@ -7350,7 +7501,7 @@ class TradingBot:
         decision_json = compact_json_dumps(compact_decision_payload(decision))
         pre_close_side = self._extract_position_side(position) if decision.operation == FundFlowOperation.CLOSE else ""
         md = decision.metadata if isinstance(decision.metadata, dict) else {}
-        exec_trigger_context = dict(trigger_context or {})
+        exec_trigger_context = trigger_context.copy() if isinstance(trigger_context, dict) else {}
         if isinstance(md, dict):
             if isinstance(md.get("execution_quality_1m"), dict):
                 exec_trigger_context["execution_quality_1m"] = md.get("execution_quality_1m")
@@ -7429,6 +7580,24 @@ class TradingBot:
                 execution_result=execution_result if isinstance(execution_result, dict) else {},
             )
         )
+        reconciled_result = self._build_pending_fill_reconciled_result(
+            symbol,
+            execution_result if isinstance(execution_result, dict) else {},
+        )
+        if reconciled_result:
+            self._append_entry_exit_audit_log(
+                self._build_entry_exit_audit_payload(
+                    stage="fill_reconciled",
+                    symbol=symbol,
+                    decision=decision,
+                    account_summary=account_summary,
+                    current_price=current_price,
+                    position=position,
+                    flow_context=flow_context,
+                    trigger_context=exec_trigger_context,
+                    execution_result=reconciled_result,
+                )
+            )
         self._update_dca_state_after_execution(symbol=symbol, decision=decision, execution_result=execution_result)
         position_for_log = position
         if decision.operation in (FundFlowOperation.BUY, FundFlowOperation.SELL, FundFlowOperation.CLOSE):
@@ -7468,7 +7637,7 @@ class TradingBot:
                     registry = ExitCooldownRegistry(int(exit_cd_cfg.get("cooldown_seconds", 1800)))
                     self.exit_cooldown = registry
                 registry.register_exit(symbol, pre_close_side)
-            exec_meta = dict(md) if isinstance(md, dict) else {}
+            exec_meta = md.copy() if isinstance(md, dict) else {}
             exec_meta["execution_reason"] = str(decision.reason or "")
             try:
                 self.risk_manager.record_conflict_execution(
@@ -7873,11 +8042,12 @@ class TradingBot:
             protection_status = str(protection_obj.get("status", "")).lower()
             protection_message = str(protection_obj.get("message", "")).lower()
             if protection_status == "pending" and "entry not filled yet" in protection_message:
-                return {
-                    "status": "pending",
-                    "message": "entry_pending_protection_deferred",
-                    "protection": protection_obj,
-                }
+                if not self._entry_order_has_visible_fill(symbol, execution_result):
+                    return {
+                        "status": "pending",
+                        "message": "entry_pending_protection_deferred",
+                        "protection": protection_obj,
+                    }
         try:
             latest_position = self.position_data.get_current_position(symbol)
         except Exception:
@@ -7925,6 +8095,28 @@ class TradingBot:
         }
         print(f"   ⚠️ {symbol} 执行后保护钩子修复失败，继续SLA监控")
         return result
+
+    def _entry_order_has_visible_fill(self, symbol: str, execution_result: Dict[str, Any]) -> bool:
+        order_obj = execution_result.get("order") if isinstance(execution_result, dict) else {}
+        if not isinstance(order_obj, dict):
+            return False
+        executed_qty = self._to_float(order_obj.get("executedQty"), 0.0)
+        if executed_qty > 0.0:
+            return True
+        order_id = self._to_int(order_obj.get("orderId"), -1)
+        if order_id <= 0:
+            return False
+        try:
+            fills = self._fetch_order_trade_fills(symbol=symbol, order_id=order_id)
+        except Exception:
+            fills = []
+        for fill in fills:
+            if not isinstance(fill, dict):
+                continue
+            qty = self._to_float(fill.get("qty"), self._to_float(fill.get("executedQty"), 0.0))
+            if qty > 0.0:
+                return True
+        return False
 
     def run_cycle(
         self,
@@ -8597,6 +8789,9 @@ class TradingBot:
                     "entry_price": position.get("entry_price"),
                 }
             portfolio = {
+                "equity": self._to_float(account_summary.get("equity"), 0.0),
+                "account_equity": self._to_float(account_summary.get("equity"), 0.0),
+                "available_balance": self._to_float(account_summary.get("available_balance"), 0.0),
                 "cash": self._to_float(account_summary.get("available_balance"), 0.0),
                 "positions": positions_payload,
                 "total_assets": self._to_float(account_summary.get("equity"), 0.0),
@@ -8636,7 +8831,7 @@ class TradingBot:
                 and isinstance(position, dict)
                 and self._ai_review_mode_supports_position_review(ai_review_mode)
             ):
-                ai_trigger_context = dict(trigger_context)
+                ai_trigger_context = trigger_context.copy()
                 ai_trigger_context["ai_gate"] = "position_review"
                 ai_trigger_context["local_operation"] = decision.operation.value
                 ai_decision = self.fund_flow_decision_engine.decide(
@@ -9904,6 +10099,7 @@ class TradingBot:
                     0.0,
                     float(getattr(self.fund_flow_risk_engine, "min_open_portion", 0.0) or 0.0),
                 )
+                probe_meta: Dict[str, Any] = {}
                 if float(decision.target_portion_of_balance) < min_open_portion:
                     decision, probe_meta = self._apply_probe_floor_rescue(
                         decision=decision,
@@ -10348,7 +10544,7 @@ class TradingBot:
                             f"local={decision_i.operation.value.upper()} "
                             f"price={current_price_i:.6f}"
                         )
-                        ai_trigger_context = dict(trigger_context_i)
+                        ai_trigger_context = trigger_context_i.copy()
                         ai_trigger_context["ai_gate"] = "final"
                         ai_trigger_context["local_operation"] = decision_i.operation.value
                         ai_trigger_context["candidate_rank"] = rank
@@ -10397,9 +10593,8 @@ class TradingBot:
                             ai_review_cfg=ai_review_cfg,
                             position=item.get("position") if isinstance(item.get("position"), dict) else None,
                         )
-                        local_md = (
-                            decision_i.metadata if isinstance(getattr(decision_i, "metadata", None), dict) else {}
-                        )
+                        raw_local_md = getattr(decision_i, "metadata", None)
+                        local_md: Dict[str, Any] = raw_local_md if isinstance(raw_local_md, dict) else {}
                         local_md["ai_final_review"] = {
                             "mode": "enforced",
                             "shortlist_rank": shortlist_rank,
@@ -10413,7 +10608,8 @@ class TradingBot:
                             "ds_confidence": ai_conf,
                         }
                         decision_i.metadata = local_md
-                        ai_exec_md = ai_decision.metadata if isinstance(getattr(ai_decision, "metadata", None), dict) else {}
+                        raw_ai_exec_md = getattr(ai_decision, "metadata", None)
+                        ai_exec_md: Dict[str, Any] = raw_ai_exec_md if isinstance(raw_ai_exec_md, dict) else {}
                         ai_exec_md["ai_final_review"] = dict(local_md["ai_final_review"])
                         ai_decision.metadata = ai_exec_md
                         if not allow_ai_entry:
