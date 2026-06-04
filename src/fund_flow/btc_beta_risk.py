@@ -27,6 +27,9 @@ class BtcBetaRiskConfig:
     small_notional_close_threshold: float = 5.0
     small_notional_close_equity_pct: float = 0.02
     tiny_notional_skip_threshold: float = 1.0
+    single_position_hard_fail_enabled: bool = True
+    single_position_hard_fail_mae_threshold: float = -0.025
+    single_position_hard_fail_mfe_max: float = 0.005
 
 
 class BtcPriceCache:
@@ -173,6 +176,19 @@ class BtcBetaRiskScorer:
             elif no_mfe_gain:
                 risk_score += 1
                 reasons.append(f"fast_fail_no_mfe(age={age_bars}bars)")
+
+        single_position_hard_fail = (
+            bool(cfg.single_position_hard_fail_enabled)
+            and alt_against_15m
+            and alt_against_30m
+            and float(mae_pct) <= float(cfg.single_position_hard_fail_mae_threshold)
+            and float(mfe_pct) <= float(cfg.single_position_hard_fail_mfe_max)
+        )
+        if single_position_hard_fail:
+            risk_score = max(risk_score, int(cfg.risk_score_reduce_threshold))
+            reasons.append(
+                f"single_position_hard_fail(mfe={float(mfe_pct):.3%},mae={float(mae_pct):.3%})"
+            )
 
         reason = " | ".join(reasons) if reasons else "no_risk"
         small_notional_close = False

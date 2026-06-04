@@ -18,6 +18,7 @@ from scripts.backtest_macd_v2 import (
     SlowBullHoldAuditor,
     apply_backtest_profile,
     build_backtest_summary,
+    build_backtest_config,
     build_strategy_config,
     filter_market_data_by_time_range,
     load_experiment_config,
@@ -38,6 +39,7 @@ from scripts.validate_live_backtest_alignment import (
 )
 from scripts.analyze_live_strategy_chain_review import build_entries, match_entry_pnl, summarize_group
 from src.app.fund_flow_bot import format_macd_v2_score_line
+from src.fund_flow.quadrant_resonance import Quadrant, QuadrantSignal
 
 
 def test_macd_v2_score_line_prints_vwap_quality_and_alpha_separately() -> None:
@@ -1349,6 +1351,192 @@ def test_time_range_filter_can_preserve_start_history_for_strict_live_warmup() -
     assert kept["timestamp"].iloc[-1] == pd.Timestamp("2026-05-23 01:30:00")
 
 
+def test_quadrant_backtest_snapshot_includes_past_price_series_without_future_leak() -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2026-05-23 00:00:00", periods=60, freq="15min"),
+            "open": np.arange(60, dtype=float) + 99.5,
+            "high": np.arange(60, dtype=float) + 100.5,
+            "low": np.arange(60, dtype=float) + 99.0,
+            "close": np.arange(60, dtype=float) + 100.0,
+            "ema20": np.arange(60, dtype=float) + 99.0,
+            "ema50": np.arange(60, dtype=float) + 98.0,
+            "ema200": np.arange(60, dtype=float) + 90.0,
+            "macd_hist": np.linspace(-0.01, 0.02, 60),
+            "rsi": np.full(60, 55.0),
+            "atr": np.full(60, 1.0),
+        }
+    )
+
+    snapshot = BacktestEngine._quadrant_tf_snapshot(frame, 54)
+
+    assert len(snapshot["close_series"]) == 55
+    assert len(snapshot["high_series"]) == 55
+    assert len(snapshot["low_series"]) == 55
+    assert snapshot["close_series"][0] == pytest.approx(100.0)
+    assert snapshot["close_series"][-1] == pytest.approx(154.0)
+    assert 155.0 not in snapshot["close_series"]
+
+
+def test_quadrant_backtest_passes_latest_breadth_state_as_market_context() -> None:
+    def tf_frame(freq: str, periods: int) -> pd.DataFrame:
+        close = np.linspace(100.0, 112.0, periods)
+        return pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2026-05-23 00:00:00", periods=periods, freq=freq),
+                "open": close - 0.1,
+                "high": close + 0.4,
+                "low": close - 0.4,
+                "close": close,
+                "ema20": close - 0.2,
+                "ema50": close - 0.5,
+                "ema200": close - 2.0,
+                "macd_hist": np.linspace(-0.01, 0.02, periods),
+                "rsi": np.full(periods, 55.0),
+                "atr": np.full(periods, 1.0),
+                "cvd_ratio": np.linspace(-0.20, -0.01, periods),
+                "cvd_momentum": np.linspace(-0.10, -0.02, periods),
+                "oi_delta_ratio": np.linspace(-0.03, -0.01, periods),
+                "imbalance": np.linspace(-0.30, -0.05, periods),
+                "liquidity_delta_norm": np.linspace(-0.25, -0.05, periods),
+            }
+        )
+
+    engine = BacktestEngine(
+        BacktestConfig(symbols=["SOLUSDT"], initial_capital=100.0),
+        MACDStrategyV2Config(),
+        runtime_config={"fund_flow": {"strategy_mode": "quadrant_resonance"}},
+    )
+    engine._last_breadth_state = {"confirm_count": 0, "invalid_count": 2, "btc_ret_30m": -0.009}
+    captured: dict = {}
+
+    def fake_analyze(**kwargs):
+        captured.update(kwargs)
+        return QuadrantSignal(
+            allowed=False,
+            symbol=kwargs["symbol"],
+            quadrant=Quadrant.DEFENSE,
+            reason="test_hold",
+        )
+
+    engine.quadrant_engine.analyze = fake_analyze
+
+    analysis = engine.analyze_bar(
+        "SOLUSDT",
+        {"15m": tf_frame("15min", 60), "1h": tf_frame("1h", 20), "4h": tf_frame("4h", 10)},
+        55,
+    )
+
+    assert analysis is not None
+    assert captured["market_context"]["market_breadth"] == engine._last_breadth_state
+    assert captured["market_context"]["cvd_ratio"] == pytest.approx(-0.0228813559)
+    assert captured["market_context"]["oi_delta_ratio"] == pytest.approx(-0.0113559322)
+    assert captured["market_context"]["imbalance"] == pytest.approx(-0.0669491525)
+    assert captured["market_context"]["liquidity_delta_norm"] == pytest.approx(-0.0635593220)
+
+
+def test_quadrant_backtest_config_reads_max_single_position_notional() -> None:
+    cfg = build_backtest_config(
+        {
+            "trading": {"symbols": ["SOLUSDT"]},
+            "fund_flow": {
+                "strategy_mode": "quadrant_resonance",
+                "max_single_position_notional": 40.0,
+                "min_leverage": 3,
+                "default_leverage": 3,
+                "max_leverage": 3,
+            },
+        },
+        "inline.json",
+        initial_capital=100.0,
+        strict_live_mode=True,
+    )
+
+    assert cfg.max_single_position_notional == pytest.approx(40.0)
+
+
+def test_quadrant_backtest_entry_honors_max_single_position_notional_cap() -> None:
+    cfg = BacktestConfig(
+        symbols=["SOLUSDT"],
+        initial_capital=10000.0,
+        min_leverage=3,
+        default_leverage=3,
+        max_leverage=3,
+        max_positions=4,
+    )
+    cfg.max_single_position_notional = 40.0
+    engine = BacktestEngine(
+        cfg,
+        MACDStrategyV2Config(),
+        runtime_config={
+            "fund_flow": {
+                "strategy_mode": "quadrant_resonance",
+                "quadrant_resonance": {
+                    "risk": {
+                        "min_entry_notional_usdt": 8.0,
+                        "min_entry_margin_usdt": 1.0,
+                        "max_leverage": 3,
+                    }
+                },
+            }
+        },
+    )
+    signal = MACDSignalV2(
+        direction="long",
+        signal_score=0.90,
+        signal_type_1h="quadrant_Q1",
+        suggested_stop_price=95.0,
+        details={
+            "strategy_mode": "quadrant_resonance",
+            "entry_execution_policy": "quadrant_resonance",
+            "target_portion": 0.35,
+            "leverage": 3,
+            "quadrant_4h": "Q1",
+        },
+    )
+
+    accepted = engine.execute_trade("SOLUSDT", _analysis(signal=signal, price=100.0), {})
+
+    assert accepted is True
+    order = engine.pending_orders["SOLUSDT"]
+    assert order["margin"] * order["leverage"] == pytest.approx(40.0)
+    assert order["margin"] == pytest.approx(40.0 / 3.0)
+
+
+def test_quadrant_backtest_signal_uses_direction_score_for_execution_ranking() -> None:
+    engine = BacktestEngine(
+        BacktestConfig(symbols=["SOLUSDT"], initial_capital=100.0),
+        MACDStrategyV2Config(),
+        runtime_config={"fund_flow": {"strategy_mode": "quadrant_resonance"}},
+    )
+    signal = engine._quadrant_to_macd_signal(
+        QuadrantSignal(
+            allowed=True,
+            symbol="SOLUSDT",
+            direction="long",
+            quadrant=Quadrant.Q4,
+            resonance_score=0.55,
+            threshold=0.85,
+            factor_scores={"quadrant_4h": 0.20, "ema_1h": 0.20, "entry_15m": 0.10, "rsi_15m": 0.05},
+            entry_price_ref=100.0,
+            atr_stop_distance=1.0,
+            target_portion=0.10,
+            leverage=3,
+            metadata={
+                "signal_score": 0.7327,
+                "competition_score": 0.7327,
+                "direction_score": 0.7327,
+                "legacy_resonance_score": 0.55,
+            },
+        )
+    )
+
+    assert signal.signal_score == pytest.approx(0.7327)
+    assert signal.signal_strength_1h == pytest.approx(0.7327)
+    assert signal.details["competition_score"] == pytest.approx(0.7327)
+    assert signal.details["resonance_score"] == pytest.approx(0.55)
+
+
 def test_close_position_writes_mfe_mae_and_entry_diagnostics() -> None:
     engine = BacktestEngine(
         BacktestConfig(symbols=["SOLUSDT"], breakeven_enabled=False),
@@ -1620,6 +1808,43 @@ def test_continuation_ranking_score_drives_competition_score_without_using_shado
     assert signal.details["competition_score"] > 0.60
     assert signal.details["continuation_quality_score_shadow"] > 0.0
     assert signal.details["continuation_quality_score_shadow"] != pytest.approx(signal.details["competition_score"], rel=1e-6)
+
+
+def test_quadrant_to_macd_signal_prefers_multi_bar_execution_score_over_legacy_resonance() -> None:
+    engine = BacktestEngine(
+        BacktestConfig(symbols=["SOLUSDT"], breakeven_enabled=False),
+        MACDStrategyV2Config(),
+        runtime_config={"fund_flow": {"strategy_mode": "quadrant_resonance"}},
+    )
+    q_signal = QuadrantSignal(
+        allowed=True,
+        symbol="SOLUSDT",
+        direction="short",
+        quadrant=Quadrant.Q4,
+        resonance_score=0.20,
+        threshold=0.85,
+        factor_scores={"quadrant_4h": 0.20},
+        entry_price_ref=100.0,
+        atr_stop_distance=1.5,
+        target_portion=0.04,
+        leverage=3,
+        metadata={
+            "direction_score": 0.44,
+            "signal_score": 0.44,
+            "competition_score": 0.44,
+            "legacy_resonance_score": 0.20,
+            "direction_gate": {"direction": "short", "direction_score": 0.44},
+        },
+    )
+
+    signal = engine._quadrant_to_macd_signal(q_signal)
+
+    assert signal.signal_score == pytest.approx(0.44)
+    assert signal.signal_strength_1h == pytest.approx(0.44)
+    assert signal.details["competition_score"] == pytest.approx(0.44)
+    assert signal.details["signal_score"] == pytest.approx(0.44)
+    assert signal.details["direction_score"] == pytest.approx(0.44)
+    assert signal.details["resonance_score"] == pytest.approx(0.20)
 
 
 def test_backtest_continuation_strong_boll_cap_reduces_entry_scale_only_for_continuation() -> None:

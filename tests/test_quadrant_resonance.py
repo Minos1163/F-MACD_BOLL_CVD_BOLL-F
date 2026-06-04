@@ -1700,6 +1700,143 @@ def test_multi_bar_direction_generated_respects_breadth_hard_reject() -> None:
     assert result.metadata["market_participation"]["blocked_reason"] == "breadth_zero_confirm_invalid_2"
 
 
+def test_slow_bear_allows_short_despite_zero_confirm_invalid_breadth() -> None:
+    engine = _engine(
+        entry={
+            "standard_threshold": 0.85,
+            "require_15m_entry_pattern": True,
+            "entry_15m_quality_mode": "live",
+            "entry_15m_quality_open_min": 0.60,
+            "entry_15m_quality_watch_min": 0.40,
+            "direction_model": "multi_bar_slope",
+            "direction_generates_both": True,
+            "quadrant_4h_role": "ema_filter",
+            "direction_4h_lookback_bars": 50,
+            "direction_1h_lookback_bars": 50,
+            "direction_15m_lookback_bars": 30,
+            "direction_open_min_abs": 0.30,
+            "probe_no_15m_breadth_veto_enabled": True,
+        }
+    )
+
+    result = engine.analyze(
+        symbol="HYPEUSDT",
+        price=100.0,
+        timeframes=_timeframes(
+            q4h=_tf(
+                ema20=95,
+                ema50=100,
+                ema200=110,
+                close_series=[110.0 - i * 0.2 for i in range(60)],
+                macd_hist_series=[0.01, -0.01, -0.03],
+            ),
+            tf1h=_tf(
+                close=100.0,
+                ema20=101.0,
+                ema50=103.0,
+                ema200=105.0,
+                close_series=[106.0 - i * 0.15 for i in range(60)],
+                macd_hist_series=[0.01, -0.01, -0.03],
+                rsi=45,
+            ),
+            tf15m=_tf(
+                close=100.0,
+                open=100.2,
+                high=100.25,
+                low=99.8,
+                ema20=100.2,
+                atr=1.0,
+                close_series=[104.0 - i * 0.12 for i in range(60)],
+                macd_hist_series=[0.01, -0.01, -0.03],
+                rsi=45,
+            ),
+        ),
+        portfolio={"equity": 100.0},
+        market_context={
+            "market_breadth": {
+                "is_slow_bear": True,
+                "confirm_count": 0,
+                "invalid_count": 2,
+                "btc_ret_30m": -0.008,
+                "btc_ret_60m": -0.012,
+                "alt_median_60m": -0.009,
+            }
+        },
+    )
+
+    assert result.metadata["direction_gate"]["selected_direction"] == "short"
+    assert result.reason != "market_participation_hard_reject"
+    assert result.metadata["market_participation"]["blocked_reason"] == ""
+
+
+def test_slow_bear_rejects_long_before_generic_breadth_reason() -> None:
+    engine = _engine(
+        entry={
+            "standard_threshold": 0.85,
+            "require_15m_entry_pattern": True,
+            "entry_15m_quality_mode": "live",
+            "entry_15m_quality_open_min": 0.70,
+            "entry_15m_quality_watch_min": 0.50,
+            "direction_model": "multi_bar_slope",
+            "direction_generates_both": True,
+            "quadrant_4h_role": "ema_filter",
+            "direction_4h_lookback_bars": 50,
+            "direction_1h_lookback_bars": 50,
+            "direction_15m_lookback_bars": 30,
+            "direction_open_min_abs": 0.30,
+            "probe_no_15m_breadth_veto_enabled": True,
+        }
+    )
+
+    result = engine.analyze(
+        symbol="HYPEUSDT",
+        price=100.0,
+        timeframes=_timeframes(
+            q4h=_tf(
+                ema20=105,
+                ema50=100,
+                ema200=90,
+                close_series=[100.0 + i * 0.2 for i in range(60)],
+                macd_hist_series=[-0.03, -0.02, -0.01],
+            ),
+            tf1h=_tf(
+                close=100.0,
+                ema20=99.0,
+                ema50=101.0,
+                ema200=103.0,
+                close_series=[100.0 + i * 0.2 for i in range(60)],
+                macd_hist_series=[0.01, 0.02, 0.03],
+                rsi=50,
+            ),
+            tf15m=_tf(
+                close=100.0,
+                open=100.2,
+                high=100.25,
+                low=99.95,
+                ema20=99.7,
+                atr=1.0,
+                close_series=[100.0 + i * 0.12 for i in range(60)],
+                macd_hist_series=[-0.01, -0.005, 0.03],
+                rsi=50,
+            ),
+        ),
+        portfolio={"equity": 100.0},
+        market_context={
+            "market_breadth": {
+                "is_slow_bear": True,
+                "confirm_count": 0,
+                "invalid_count": 2,
+                "btc_ret_30m": -0.008,
+                "btc_ret_60m": -0.012,
+                "alt_median_60m": -0.009,
+            }
+        },
+    )
+
+    assert result.reason == "market_participation_hard_reject"
+    assert result.metadata["market_participation"]["blocked_reason"] == "slow_bear_rejects_long"
+
+
 def test_multi_bar_direction_generated_respects_live_flow_alias_hard_reject() -> None:
     engine = _engine(
         entry={

@@ -3,10 +3,12 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 from typing import Any, Dict, List
+from unittest.mock import Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.app.fund_flow_bot import TradingBot
+from src.fund_flow.models import FundFlowDecision, Operation
 from src.trading.intents import PositionSide
 
 
@@ -130,3 +132,38 @@ def test_stale_cleanup_does_not_cancel_opposite_side_when_both_legs_exist() -> N
     bot._cleanup_stale_protection_orders(["TESTUSDT"])
 
     assert client.cancel_existing_calls == []
+
+
+def test_pending_entry_with_visible_fills_repairs_protection_immediately() -> None:
+    bot = TradingBot.__new__(TradingBot)
+    bot.position_data = Mock()
+    bot.position_data.get_current_position.return_value = {"side": "LONG", "amount": 0.5, "entry_price": 62.46}
+    bot._fetch_order_trade_fills = Mock(return_value=[{"orderId": 8172959957, "qty": "0.5", "price": "62.4637"}])
+    bot._protection_coverage = Mock(side_effect=[
+        {"has_tp": False, "has_sl": False},
+        {"has_tp": True, "has_sl": True},
+    ])
+    bot._protection_is_covered = Mock(side_effect=[False, True])
+    bot._repair_missing_protection = Mock(return_value={"status": "success", "orders": [{"type": "STOP_MARKET", "orderId": 1}]})
+    bot._repair_result_satisfies_protection_requirements = Mock(return_value=True)
+
+    decision = FundFlowDecision(
+        operation=Operation.BUY,
+        symbol="HYPEUSDT",
+        target_portion_of_balance=0.042,
+        leverage=9,
+        reason="quadrant_resonance_probe_no_15m",
+    )
+    result = bot._post_execution_protection_hook(
+        symbol="HYPEUSDT",
+        decision=decision,
+        execution_result={
+            "status": "pending",
+            "order": {"orderId": 8172959957, "status": "NEW", "executedQty": "0.00"},
+            "protection": {"status": "pending", "message": "entry not filled yet"},
+        },
+    )
+
+    assert result["status"] == "repaired"
+    assert result["message"] == "protection_repaired"
+    bot._repair_missing_protection.assert_called_once()

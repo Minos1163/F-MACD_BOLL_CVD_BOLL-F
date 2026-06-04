@@ -285,6 +285,7 @@ class BacktestConfig:
     default_target_portion: float = 0.60
     max_symbol_position_portion: float = 0.60
     min_open_portion: float = 0.06
+    max_single_position_notional: float = 0.0
     
     # 杠杆配置
     min_leverage: int = 2
@@ -614,6 +615,7 @@ def build_backtest_summary(
             "default_target_portion": config.default_target_portion,
             "max_symbol_position_portion": config.max_symbol_position_portion,
             "min_open_portion": config.min_open_portion,
+            "max_single_position_notional": config.max_single_position_notional,
             "reserve_pct": config.reserve_pct,
             "min_leverage": config.min_leverage,
             "default_leverage": config.default_leverage,
@@ -682,6 +684,7 @@ def build_backtest_config(
         default_target_portion=float(fund_flow_cfg.get("default_target_portion", position_limits["max_percent"])),
         max_symbol_position_portion=float(fund_flow_cfg.get("max_symbol_position_portion", position_limits["max_percent"])),
         min_open_portion=float(fund_flow_cfg.get("min_open_portion", position_limits["min_percent"])),
+        max_single_position_notional=max(0.0, float(fund_flow_cfg.get("max_single_position_notional", 0.0) or 0.0)),
         min_leverage=int(leverage_cfg["min_leverage"]),
         default_leverage=int(leverage_cfg["default_leverage"]),
         max_leverage=int(leverage_cfg["max_leverage"]),
@@ -2162,14 +2165,28 @@ class BacktestEngine:
         return idx if idx >= 0 else -1
 
     @staticmethod
+    def _row_float(row: pd.Series, *keys: str, default: float = 0.0) -> float:
+        for key in keys:
+            if key in row.index:
+                try:
+                    return float(row.get(key, default) or default)
+                except (TypeError, ValueError):
+                    return float(default)
+        return float(default)
+
+    @staticmethod
     def _quadrant_tf_snapshot(df: pd.DataFrame, idx: int) -> Dict[str, Any]:
         row = df.iloc[idx]
+        history = df.iloc[: idx + 1].tail(200)
         hist = df.iloc[: idx + 1]['macd_hist'].dropna().tolist() if 'macd_hist' in df.columns else []
         return {
             "open": float(row.get("open", row.get("close", 0.0)) or 0.0),
             "high": float(row.get("high", row.get("close", 0.0)) or 0.0),
             "low": float(row.get("low", row.get("close", 0.0)) or 0.0),
             "close": float(row.get("close", 0.0) or 0.0),
+            "close_series": [float(v or 0.0) for v in history["close"].tolist()] if "close" in history.columns else [],
+            "high_series": [float(v or 0.0) for v in history["high"].tolist()] if "high" in history.columns else [],
+            "low_series": [float(v or 0.0) for v in history["low"].tolist()] if "low" in history.columns else [],
             "ema20": float(row.get("ema20", row.get("ema21", 0.0)) or 0.0),
             "ema50": float(row.get("ema50", row.get("ema55", 0.0)) or 0.0),
             "ema200": float(row.get("ema200", 0.0) or 0.0),
@@ -2225,6 +2242,8 @@ class BacktestEngine:
 
     def _quadrant_to_macd_signal(self, q_signal: QuadrantSignal) -> MACDSignalV2:
         metadata = dict(q_signal.metadata or {})
+        signal_score = float(metadata.get("signal_score", q_signal.resonance_score) or 0.0)
+        competition_score = float(metadata.get("competition_score", signal_score) or signal_score)
         metadata.update(
             {
                 "strategy_mode": "quadrant_resonance",
@@ -2240,7 +2259,8 @@ class BacktestEngine:
                 "take_profit_levels": copy.deepcopy(q_signal.take_profit_levels),
                 "entry_atr_15m": float(metadata.get("entry_atr_15m", 0.0) or 0.0),
                 "blocked_reason": q_signal.reason if not q_signal.allowed else "",
-                "competition_score": float(q_signal.resonance_score),
+                "signal_score": signal_score,
+                "competition_score": competition_score,
             }
         )
         stop_loss_pct = 0.02
@@ -2248,9 +2268,9 @@ class BacktestEngine:
             stop_loss_pct = q_signal.atr_stop_distance / q_signal.entry_price_ref
         return MACDSignalV2(
             direction=q_signal.direction if q_signal.allowed else "neutral",
-            signal_score=float(q_signal.resonance_score),
+            signal_score=signal_score,
             signal_type_1h=f"quadrant_{q_signal.quadrant.value}",
-            signal_strength_1h=float(q_signal.resonance_score),
+            signal_strength_1h=signal_score,
             is_4h_enhanced=False,
             enhancement_score=0.0,
             entry_type_15m="quadrant_resonance",
@@ -2682,11 +2702,20 @@ class BacktestEngine:
             row_4h = tf_4h.iloc[idx_4h]
             timeframes = self._build_quadrant_timeframes(data, idx_15m, idx_1h, idx_4h)
             equity = self._mark_to_market_equity({symbol: float(row_15m['close'])})
+            market_context = {
+                "market_breadth": dict(self._last_breadth_state or {}),
+                "cvd_ratio": self._row_float(row_15m, "cvd_ratio", "orderflow_cvd_ratio"),
+                "cvd_momentum": self._row_float(row_15m, "cvd_momentum", "orderflow_cvd_momentum"),
+                "oi_delta_ratio": self._row_float(row_15m, "oi_delta_ratio", default=self._row_float(row_1h, "oi_delta_ratio")),
+                "imbalance": self._row_float(row_15m, "imbalance", "trade_imbalance", "volume_imbalance"),
+                "liquidity_delta_norm": self._row_float(row_15m, "liquidity_delta_norm", "liquidity_delta"),
+            }
             q_signal = self.quadrant_engine.analyze(
                 symbol=symbol,
                 price=float(row_15m['close']),
                 timeframes=timeframes,
                 portfolio={"equity": equity, "positions": self.positions},
+                market_context=market_context,
             )
             signal = self._quadrant_to_macd_signal(q_signal)
             return {
@@ -2858,6 +2887,14 @@ class BacktestEngine:
 
         return position_value, leverage
 
+    def _apply_max_single_position_notional_cap(self, position_value: float, leverage: float) -> float:
+        cap = float(getattr(self.config, "max_single_position_notional", 0.0) or 0.0)
+        lev = max(1.0, float(leverage or 1.0))
+        margin = max(0.0, float(position_value or 0.0))
+        if cap <= 0.0 or margin * lev <= cap + 1e-12:
+            return margin
+        return max(0.0, cap / lev)
+
     def _signal_threshold(self, signal: MACDSignalV2) -> float:
         details = getattr(signal, 'details', {}) or {}
         primary_mode = str(getattr(self.strategy_config, 'primary_direction_timeframe', '1h'))
@@ -3005,6 +3042,7 @@ class BacktestEngine:
             if position_value * leverage < min_notional:
                 position_value = min_notional / max(float(leverage), 1.0)
             position_value = max(position_value, min_margin)
+        position_value = self._apply_max_single_position_notional_cap(position_value, leverage)
         if position_value <= 0:
             self._bump_execution_reason("execute_reject_reasons", "position_value_zero")
             return False

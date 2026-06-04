@@ -12,6 +12,10 @@ class MarketBreadthConfig:
     slow_bull_btc_ret_30m: float = 0.003
     slow_bull_btc_ret_60m: float = 0.005
     slow_bull_alt_median_60m: float = 0.004
+    slow_bear_breadth_ratio_max: float = 0.30
+    slow_bear_btc_ret_30m: float = -0.003
+    slow_bear_btc_ret_60m: float = -0.005
+    slow_bear_alt_median_60m: float = -0.004
     mode_a_breadth_min: float = 0.80
     mode_a_alt_median_min: float = 0.0025
     mode_a_btc_min: float = -0.001
@@ -31,6 +35,9 @@ class MarketBreadthDetector:
         self._confirm_count = 0
         self._invalid_count = 0
         self._is_slow_bull = False
+        self._bear_confirm_count = 0
+        self._bear_invalid_count = 0
+        self._is_slow_bear = False
         self._alt_rets: Dict[str, Deque[float]] = {
             symbol: deque(maxlen=4) for symbol in self.tracked
         }
@@ -47,7 +54,7 @@ class MarketBreadthDetector:
 
     def detect(self) -> Dict[str, object]:
         if not self.cfg.enabled or len(self._btc_rets) < 2:
-            return {"is_slow_bull": False, "reason": "insufficient_data"}
+            return {"is_slow_bull": False, "is_slow_bear": False, "reason": "insufficient_data"}
 
         btc_values = list(self._btc_rets)
         btc_30m = sum(btc_values[-2:])
@@ -62,7 +69,7 @@ class MarketBreadthDetector:
                 alt_60m_rets.append(sum(values[-2:]))
 
         if not alt_60m_rets:
-            return {"is_slow_bull": False, "reason": "no_alt_data"}
+            return {"is_slow_bull": False, "is_slow_bear": False, "reason": "no_alt_data"}
 
         alt_60m_rets.sort()
         n = len(alt_60m_rets)
@@ -94,6 +101,12 @@ class MarketBreadthDetector:
             and alt_median_60m >= float(self.cfg.mode_c_alt_median_min)
         )
         is_bull_candidate = mode_a or mode_b or mode_c
+        is_bear_candidate = (
+            btc_30m <= float(self.cfg.slow_bear_btc_ret_30m)
+            and btc_60m <= float(self.cfg.slow_bear_btc_ret_60m)
+            and breadth_ratio <= float(self.cfg.slow_bear_breadth_ratio_max)
+            and alt_median_60m <= float(self.cfg.slow_bear_alt_median_60m)
+        )
 
         if is_bull_candidate:
             self._confirm_count = min(self._confirm_count + 1, int(self.cfg.confirm_cycles))
@@ -107,6 +120,19 @@ class MarketBreadthDetector:
         if self._invalid_count >= int(self.cfg.invalidate_cycles):
             self._is_slow_bull = False
 
+        if is_bear_candidate:
+            self._bear_confirm_count = min(self._bear_confirm_count + 1, int(self.cfg.confirm_cycles))
+            self._bear_invalid_count = 0
+        else:
+            self._bear_invalid_count = min(self._bear_invalid_count + 1, int(self.cfg.invalidate_cycles))
+            self._bear_confirm_count = max(self._bear_confirm_count - 1, 0)
+
+        if self._bear_confirm_count >= int(self.cfg.confirm_cycles):
+            self._is_slow_bear = True
+            self._is_slow_bull = False
+        if self._bear_invalid_count >= int(self.cfg.invalidate_cycles):
+            self._is_slow_bear = False
+
         mode = "alt_breadth_led" if mode_a else "btc_led" if mode_b else "extreme_breadth" if mode_c else None
         reason = (
             f"mode_a={'OK' if mode_a else 'FAIL'} "
@@ -116,12 +142,16 @@ class MarketBreadthDetector:
         )
         return {
             "is_slow_bull": self._is_slow_bull,
+            "is_slow_bear": self._is_slow_bear,
             "mode": mode if self._is_slow_bull else None,
+            "slow_bear_mode": "bear_breadth_led" if self._is_slow_bear else None,
             "breadth_ratio": breadth_ratio,
             "btc_ret_30m": btc_30m,
             "btc_ret_60m": btc_60m,
             "alt_median_60m": alt_median_60m,
             "confirm_count": self._confirm_count,
             "invalid_count": self._invalid_count,
+            "bear_confirm_count": self._bear_confirm_count,
+            "bear_invalid_count": self._bear_invalid_count,
             "reason": reason,
         }

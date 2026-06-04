@@ -1145,6 +1145,11 @@ class QuadrantResonanceEngine:
         breadth_raw = ctx.get("market_breadth")
         breadth: Dict[str, Any] = breadth_raw if isinstance(breadth_raw, dict) else {}
         if bool(self.config.probe_no_15m_breadth_veto_enabled):
+            if bool(breadth.get("is_slow_bear", False)):
+                if direction == "short":
+                    return ""
+                if direction == "long":
+                    return "slow_bear_rejects_long"
             confirm_count = int(_float(breadth.get("confirm_count"), 0.0))
             invalid_count = int(_float(breadth.get("invalid_count"), 0.0))
             invalid_min = max(1, int(self.config.probe_breadth_zero_confirm_invalid_min or 2))

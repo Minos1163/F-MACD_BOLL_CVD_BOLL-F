@@ -80,6 +80,28 @@ def test_fast_fail_does_not_fire_before_min_age_bars() -> None:
     assert result["fast_fail_min_age_bars"] == 4
 
 
+def test_single_position_hard_fail_reduces_large_adverse_move_before_stop_loss() -> None:
+    scorer = BtcBetaRiskScorer(BtcBetaRiskConfig(risk_score_reduce_threshold=3))
+
+    result = scorer.score(
+        symbol="WLDUSDT",
+        direction="long",
+        btc_ret_15m=0.0,
+        btc_ret_30m=0.0,
+        alt_ret_15m=-0.02423,
+        alt_ret_30m=-0.02314,
+        position_age_bars=2,
+        mfe_pct=0.0,
+        mae_pct=-0.0309,
+        position_notional=43.52,
+        account_equity=99.0,
+    )
+
+    assert result["risk_score"] >= 3
+    assert result["action"] == "REDUCE_50"
+    assert "single_position_hard_fail" in result["reason"]
+
+
 def test_major_symbol_uses_default_corr_before_history_is_warmed() -> None:
     scorer = BtcBetaRiskScorer(BtcBetaRiskConfig(default_corr_major_symbols=0.40))
 

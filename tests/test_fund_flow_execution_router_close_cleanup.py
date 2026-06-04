@@ -19,6 +19,16 @@ class _Broker:
         return True
 
 
+class _PositionGateway:
+    def __init__(self, applied_leverage: int) -> None:
+        self.applied_leverage = applied_leverage
+        self.requests: List[Dict[str, Any]] = []
+
+    def change_leverage(self, symbol: str, leverage: int) -> Dict[str, Any]:
+        self.requests.append({"symbol": symbol, "leverage": leverage})
+        return {"leverage": str(self.applied_leverage)}
+
+
 class _Client:
     def __init__(
         self,
@@ -26,12 +36,17 @@ class _Client:
         close_order: Dict[str, Any] | None = None,
         retry_position_amt: float | None = None,
         all_positions: List[Dict[str, Any]] | None = None,
+        order_book: Dict[str, Any] | None = None,
+        applied_leverage: int | None = None,
     ) -> None:
         self.broker = _Broker()
+        if applied_leverage is not None:
+            self.position_gateway = _PositionGateway(applied_leverage)
         self.position_amt = position_amt
         self.retry_position_amt = retry_position_amt
         self.all_positions = list(all_positions or [])
         self.close_order = close_order or {"status": "FILLED", "executedQty": str(abs(position_amt)), "origQty": str(abs(position_amt))}
+        self.order_book = order_book or {"bids": [["9.99", "100"]], "asks": [["10.01", "100"]]}
         self.conditional_cancelled: List[str] = []
         self.open_cancelled: List[str] = []
         self.orders: List[Dict[str, Any]] = []
@@ -55,6 +70,9 @@ class _Client:
 
     def get_symbol_info(self, symbol: str) -> Dict[str, Any]:
         return {"tick_size": 0.01, "price_precision": 2}
+
+    def get_order_book(self, symbol: str, limit: int = 5) -> Dict[str, Any]:
+        return self.order_book
 
     def format_price(self, symbol: str, price: float) -> str:
         return f"{float(price):.2f}"
@@ -123,6 +141,27 @@ def _entry_router(client: _Client) -> FundFlowExecutionRouter:
                     "max_large_margin_positions": 4,
                     "small_margin_leverage": 9,
                 },
+                "max_leverage": 9,
+            }
+        },
+        symbol_whitelist=["ATOMUSDT"],
+    )
+    return FundFlowExecutionRouter(client, risk, _Attribution(), close_retry_times=1)
+
+
+def _entry_router_without_margin_floor(client: _Client) -> FundFlowExecutionRouter:
+    risk = FundFlowRiskEngine(
+        {
+            "fund_flow": {
+                "min_open_notional": {"default_usdt": 0.0},
+                "min_entry_margin_usdt": 0.0,
+                "max_open_portion": 1.0,
+                "execution_degradation": {
+                    "open_ioc_retry_times": 0,
+                    "open_gtc_fallback_enabled": False,
+                    "open_market_fallback_enabled": False,
+                },
+                "position_count_limit_by_margin": {"enabled": False},
                 "max_leverage": 9,
             }
         },
@@ -226,6 +265,30 @@ def test_entry_router_allows_atom_probe_below_legacy_six_percent_floor() -> None
 
     assert result["status"] != "error" or "decision 校验失败" not in result["message"]
     assert client.orders
+
+
+def test_entry_router_sizes_new_entries_from_equity_not_available_balance() -> None:
+    client = _Client(position_amt=0.0)
+    router = _entry_router_without_margin_floor(client)
+
+    result = router.execute_decision(
+        FundFlowDecision(
+            operation=Operation.BUY,
+            symbol="ATOMUSDT",
+            target_portion_of_balance=0.042,
+            leverage=3,
+            max_price=10.0,
+        ),
+        account_state={"equity": 100.0, "available_balance": 0.01},
+        current_price=10.0,
+        position=None,
+    )
+
+    assert result["status"] == "noop"
+    assert result["message"] == "可用余额不足以执行目标仓位，跳过开仓"
+    assert result["target_margin_usdt"] == pytest.approx(4.2)
+    assert result["available_balance"] == pytest.approx(0.01)
+    assert not client.orders
 
 
 def _position(symbol: str, margin: float, leverage: int = 2, side: str = "LONG") -> Dict[str, Any]:
@@ -348,7 +411,7 @@ def test_entry_router_uses_nine_x_leverage_for_small_margin_entry() -> None:
     assert result["small_margin_leverage_override"]["original_leverage"] == 4
 
 
-def test_entry_router_uses_nine_x_leverage_for_quadrant_small_margin_entry() -> None:
+def test_entry_router_preserves_requested_leverage_for_quadrant_small_margin_entry() -> None:
     client = _Client(position_amt=0.0)
     router = _entry_router(client)
 
@@ -374,10 +437,66 @@ def test_entry_router_uses_nine_x_leverage_for_quadrant_small_margin_entry() -> 
     margin = 111.18 * 0.04
     assert margin < 5.0
     assert result["status"] != "error"
-    assert result["leverage"] == 9
+    assert result["leverage"] == 3
     assert result["margin"] == pytest.approx(margin)
-    assert result["position_value"] == pytest.approx(margin * 9)
-    assert result["small_margin_leverage_override"]["original_leverage"] == 3
+    assert result["position_value"] == pytest.approx(margin * 3)
+    assert result["small_margin_leverage_override"] is None
+
+
+def test_entry_router_blocks_when_exchange_applies_different_leverage() -> None:
+    client = _Client(position_amt=0.0, applied_leverage=9)
+    router = _entry_router(client)
+
+    result = router.execute_decision(
+        FundFlowDecision(
+            operation=Operation.BUY,
+            symbol="ATOMUSDT",
+            target_portion_of_balance=0.04,
+            leverage=3,
+            max_price=10.0,
+            metadata={"strategy_mode": "quadrant_resonance"},
+        ),
+        account_state={"equity": 111.18, "available_balance": 111.18},
+        current_price=10.0,
+        position=None,
+    )
+
+    assert result["status"] == "error"
+    assert result["message"] == "交易所杠杆与策略请求不一致，已阻止开仓"
+    assert result["leverage_sync"]["requested"] == 3
+    assert result["leverage_sync"]["applied"] == 9
+    assert not client.orders
+
+
+def test_entry_router_uses_orderbook_touch_price_for_ioc_buy() -> None:
+    client = _Client(
+        position_amt=0.0,
+        order_book={"bids": [["10.00", "100"]], "asks": [["10.10", "100"]]},
+    )
+    router = _entry_router(client)
+
+    result = router.execute_decision(
+        FundFlowDecision(
+            operation=Operation.BUY,
+            symbol="ATOMUSDT",
+            target_portion_of_balance=0.04,
+            leverage=3,
+            max_price=10.0,
+            metadata={
+                "entry_use_orderbook_touch_price": True,
+                "entry_orderbook_touch_offset_bps": 15,
+            },
+        ),
+        account_state={"equity": 111.18, "available_balance": 111.18},
+        current_price=10.0,
+        position=None,
+    )
+
+    assert result["status"] != "error"
+    assert client.orders[-1]["params"]["price"] == pytest.approx(10.12)
+    assert result["entry_orderbook_price_context"]["entry_original_limit_price"] == pytest.approx(10.0)
+    assert result["entry_orderbook_price_context"]["entry_touch_best_ask"] == pytest.approx(10.10)
+    assert result["entry_orderbook_price_context"]["entry_formatted_touch_price"] == pytest.approx(10.12)
 
 
 def test_entry_router_blocks_entry_margin_below_one_usdt_before_leverage_override() -> None:

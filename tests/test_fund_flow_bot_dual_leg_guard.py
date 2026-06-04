@@ -102,6 +102,65 @@ def test_timeframe_context_keeps_exact_positive_ema_fields_over_aliases() -> Non
     assert out["timeframes"]["4h"]["ema200"] == pytest.approx(90.0)
 
 
+def test_quadrant_multi_bar_live_fetches_required_direction_timeframes() -> None:
+    bot = _bot(
+        {
+            "fund_flow": {
+                "decision_timeframe": "15m",
+                "strategy_mode": "quadrant_resonance",
+                "quadrant_resonance": {
+                    "entry": {
+                        "direction_model": "multi_bar_slope",
+                        "direction_4h_lookback_bars": 50,
+                        "direction_1h_lookback_bars": 50,
+                        "direction_15m_lookback_bars": 30,
+                    }
+                },
+            }
+        }
+    )
+    calls: list[tuple[str, int]] = []
+    market_data = Mock()
+    market_data.get_realtime_market_data.return_value = {}
+
+    def _trend_filter(symbol: str, interval: str, limit: int) -> dict:
+        calls.append((interval, limit))
+        return {"close": 100.0, "close_series": [100.0] * limit}
+
+    market_data.get_trend_filter_metrics.side_effect = _trend_filter
+    market_data.get_order_flow_snapshot.return_value = {}
+    bot.market_data = market_data
+    bot._extract_orderbook_flow = Mock(return_value={})
+    bot._closed_15m_returns_4bar_from_symbol = Mock(return_value=[])
+
+    result = bot.get_market_data_for_symbol("FETUSDT")
+
+    requested = {interval: limit for interval, limit in calls}
+    assert requested["15m"] >= 30
+    assert requested["1h"] >= 50
+    assert requested["4h"] >= 50
+    assert set(("15m", "1h", "4h")).issubset(result["trend_filters_by_timeframe"])
+
+
+def test_quadrant_resonance_live_signal_score_uses_direction_execution_score() -> None:
+    bot = _bot()
+    decision = FundFlowDecision(
+        operation=Operation.SELL,
+        symbol="FETUSDT",
+        metadata={
+            "strategy_mode": "quadrant_resonance",
+            "direction_score": 0.44,
+            "signal_score": 0.44,
+            "competition_score": 0.44,
+            "legacy_resonance_score": 0.20,
+            "long_score": 0.0,
+            "short_score": 0.0,
+        },
+    )
+
+    assert bot._decision_signal_score(decision) == pytest.approx(0.44)
+
+
 def test_extreme_dual_leg_guard_allows_opposite_hedge_only_when_loss_and_shock_are_large() -> None:
     bot = _bot()
     decision = FundFlowDecision(
@@ -473,6 +532,137 @@ def test_entry_audit_includes_quadrant_defense_debug_metadata() -> None:
     assert payload["signal"]["quadrant_debug"] == debug
 
 
+def test_entry_audit_expands_quadrant_direction_quality_fields() -> None:
+    bot = _bot({"fund_flow": {"min_entry_margin_usdt": 1.0}})
+    decision = FundFlowDecision(
+        operation=Operation.BUY,
+        symbol="HYPEUSDT",
+        target_portion_of_balance=0.042,
+        leverage=3,
+        reason="quadrant_resonance_probe_no_15m",
+        metadata={
+            "strategy_mode": "quadrant_resonance",
+            "signal_score": 0.90,
+            "signal_score_threshold": 0.85,
+            "factor_scores": {"quadrant": 0.5, "ema_1h": 0.2, "macd_1h": 0.15, "rsi_15m": 0.05},
+            "entry_rsi_15m": 72.0,
+            "entry_rsi_1h": 69.0,
+            "macd_hist_15m_last3": [0.03, 0.02, 0.01],
+            "macd_hist_1h_last3": [0.04, 0.03, 0.02],
+            "macd_hist_15m_strengthening": False,
+            "macd_hist_1h_strengthening": False,
+            "entry_15m_detail": {"ok": False, "near_ema": True, "hist_cross": False},
+            "probe_no_15m_veto_reasons": ["breadth_zero_confirm_invalid_2"],
+            "requested_leverage": 3,
+            "effective_leverage": 9,
+        },
+    )
+
+    payload = bot._build_entry_exit_audit_payload(
+        stage="pre_execution",
+        symbol="HYPEUSDT",
+        decision=decision,
+        account_summary={"equity": 98.0},
+        current_price=62.42,
+        flow_context={"market_breadth": {"confirm_count": 0, "invalid_count": 2}},
+    )
+
+    assert payload["signal"]["factor_scores"]["macd_1h"] == pytest.approx(0.15)
+    assert payload["signal"]["entry_rsi_15m"] == pytest.approx(72.0)
+    assert payload["signal"]["macd_hist_15m_last3"] == [0.03, 0.02, 0.01]
+    assert payload["signal"]["entry_15m_detail"]["ok"] is False
+    assert payload["gates"]["probe_no_15m_veto_reasons"] == ["breadth_zero_confirm_invalid_2"]
+    assert payload["sizing"]["requested_leverage"] == 3
+    assert payload["sizing"]["effective_leverage"] == 9
+
+
+def test_entry_audit_includes_watchlist_and_probe_quality_metadata() -> None:
+    bot = _bot({"fund_flow": {"min_entry_margin_usdt": 1.0}})
+    decision = FundFlowDecision(
+        operation=Operation.HOLD,
+        symbol="JSTUSDT",
+        reason="probe_no_15m_direction_veto",
+        metadata={
+            "signal_score": 0.90,
+            "signal_score_threshold": 0.85,
+            "entry_15m_quality_score": 0.55,
+            "entry_15m_quality_bucket": "watch",
+            "entry_15m_missing_conditions": ["hist_cross"],
+            "probe_resonance_score": 0.65,
+            "probe_flow_alignment_score": -0.12,
+            "probe_no_15m_veto_reasons": ["breadth_zero_confirm_invalid_2"],
+            "watchlist_intent": {
+                "enabled": True,
+                "dry_run": True,
+                "symbol": "JSTUSDT",
+                "side": "long",
+                "score": 0.90,
+                "candidate_reason": "reversible_probe_veto",
+                "missing_conditions": ["hist_cross"],
+                "ttl_bars": 2,
+            },
+            "quadrant_state": "recovering",
+            "quadrant_recovering_direction": "long",
+            "watchlist_update": {"result": "added", "symbol": "JSTUSDT"},
+            "watchlist_review": {"result": "pending", "ttl_remaining_bars": 3},
+        },
+    )
+
+    payload = bot._build_entry_exit_audit_payload(
+        stage="post_execution",
+        symbol="JSTUSDT",
+        decision=decision,
+        account_summary={"equity": 100.0},
+    )
+
+    assert payload["signal"]["entry_15m_quality_score"] == 0.55
+    assert payload["signal"]["entry_15m_quality_bucket"] == "watch"
+    assert payload["signal"]["entry_15m_missing_conditions"] == ["hist_cross"]
+    assert payload["signal"]["watchlist_intent"]["candidate_reason"] == "reversible_probe_veto"
+    assert payload["signal"]["watchlist_update"]["result"] == "added"
+    assert payload["signal"]["watchlist_review"]["result"] == "pending"
+    assert payload["signal"]["quadrant_state"] == "recovering"
+    assert payload["signal"]["quadrant_recovering_direction"] == "long"
+    assert payload["gates"]["probe_resonance_score"] == 0.65
+    assert payload["gates"]["probe_flow_alignment_score"] == -0.12
+
+
+def test_entry_audit_includes_direction_gate_metadata() -> None:
+    bot = _bot({"fund_flow": {"min_entry_margin_usdt": 1.0}})
+    direction_gate = {
+        "ok": False,
+        "reason": "multi_bar_direction_no_entry",
+        "blocked_reason": "anchor_timeframe_not_aligned",
+        "direction_model": "multi_bar_slope",
+        "direction": "long",
+        "direction_score": 0.12,
+        "scores": {"4h": 0.22, "1h": -0.10, "15m": 0.35},
+        "aligned_scores": {"4h": 0.22, "1h": -0.10, "15m": 0.35},
+        "history_counts": {"4h": 50, "1h": 50, "15m": 30},
+    }
+    decision = FundFlowDecision(
+        operation=Operation.HOLD,
+        symbol="JUPUSDT",
+        reason="multi_bar_direction_no_entry",
+        metadata={
+            "signal_score": 0.0,
+            "signal_score_threshold": 0.85,
+            "direction_gate": direction_gate,
+        },
+    )
+
+    payload = bot._build_entry_exit_audit_payload(
+        stage="post_execution",
+        symbol="JUPUSDT",
+        decision=decision,
+        account_summary={"equity": 100.0},
+    )
+
+    assert payload["gates"]["direction_gate"] == direction_gate
+    assert payload["gates"]["direction_gate"]["blocked_reason"] == "anchor_timeframe_not_aligned"
+    assert payload["gates"]["direction_gate"]["scores"]["1h"] == pytest.approx(-0.10)
+
+
 def test_live_slow_bull_fee_fragmentation_blocks_small_probe_notional() -> None:
     bot = _bot(
         {
@@ -612,6 +802,231 @@ def test_execute_and_log_decision_writes_entry_exit_audit_events(tmp_path: Path)
     assert pre["sizing"]["micro_margin_gate"]["reason"] == "margin_check_passed"
     assert post["execution"]["status"] == "success"
     assert post["execution"]["order"]["orderId"] == "42"
+
+
+def test_execute_and_log_decision_writes_fill_reconciled_audit_when_pending_order_has_fills(tmp_path: Path) -> None:
+    bot = _bot({"fund_flow": {"min_entry_notional_usdt": 0.10}})
+    bot.logs_dir = str(tmp_path)
+    bot.fund_flow_attribution_engine = Mock()
+    bot.fund_flow_execution_router = Mock()
+    bot.fund_flow_execution_router.execute_decision.return_value = {
+        "status": "pending",
+        "message": "entry submitted",
+        "order": {"orderId": 8172959957, "status": "NEW", "executedQty": "0.00"},
+        "quantity": 0.0,
+    }
+    bot._fetch_order_trade_fills = Mock(return_value=[{"orderId": 8172959957, "id": 123, "qty": "0.5", "price": "62.4637"}])
+    bot.position_data = Mock()
+    bot.position_data.get_current_position.return_value = {"side": "LONG", "amount": 0.5, "entry_price": 62.4637}
+    bot._post_execution_protection_hook = Mock(return_value={"status": "repaired", "message": "protection_repaired"})
+    bot._update_dca_state_after_execution = Mock()
+    bot._safe_storage_call = Mock()
+    bot._write_trade_fill_log = Mock()
+    bot._has_pending_close_order = Mock(return_value=False)
+    bot.trade_count = 0
+    bot._opened_symbols_this_cycle = set()
+    bot._position_first_seen_ts = {}
+    bot._position_extrema_by_pos = {}
+
+    decision = FundFlowDecision(
+        operation=Operation.BUY,
+        symbol="HYPEUSDT",
+        target_portion_of_balance=0.042,
+        leverage=9,
+        reason="quadrant_resonance_probe_no_15m",
+        metadata={"signal_score": 0.90},
+    )
+
+    bot._execute_and_log_decision(
+        symbol="HYPEUSDT",
+        decision=decision,
+        account_summary={"equity": 98.0},
+        current_price=62.42,
+        position=None,
+        flow_context={},
+        trigger_type="test",
+        trigger_id="hype-entry",
+        trigger_context={"trigger_type": "test", "trigger_id": "hype-entry"},
+        portfolio={},
+    )
+
+    rows = [json.loads(line) for line in (tmp_path / "fund_flow_entry_exit_audit.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [row["stage"] for row in rows] == ["pre_execution", "post_execution", "entry_order_reconciled"]
+    assert rows[2]["execution"]["status"] == "success"
+    assert rows[2]["execution"]["message"] == "pending_order_fills_confirmed"
+    assert rows[2]["execution"]["fills"][0]["qty"] == "0.5"
+
+
+def test_execute_and_log_decision_writes_entry_order_reconciled_audit_when_pending_ioc_expired(tmp_path: Path) -> None:
+    bot = _bot({"fund_flow": {"min_entry_notional_usdt": 0.10}})
+    bot.logs_dir = str(tmp_path)
+    bot.fund_flow_attribution_engine = Mock()
+    bot.fund_flow_execution_router = Mock()
+    bot.fund_flow_execution_router.execute_decision.return_value = {
+        "status": "pending",
+        "message": "entry submitted",
+        "order": {
+            "orderId": 21904933202,
+            "status": "NEW",
+            "executedQty": "0",
+            "price": "0.5237000",
+            "side": "BUY",
+            "timeInForce": "IOC",
+        },
+        "quantity": 0.0,
+    }
+    bot._fetch_order_trade_fills = Mock(return_value=[])
+    bot._fetch_entry_order_final_state = Mock(
+        return_value={
+            "symbol": "WLDUSDT",
+            "orderId": 21904933202,
+            "status": "EXPIRED",
+            "executedQty": "0",
+            "avgPrice": "0",
+            "price": "0.5237000",
+            "side": "BUY",
+            "timeInForce": "IOC",
+            "updateTime": 1780508715000,
+        }
+    )
+    bot._extract_orderbook_flow = Mock(
+        return_value={
+            "best_bid": 0.5240,
+            "best_ask": 0.5246,
+            "spread_pct": 0.001145,
+        }
+    )
+    bot.position_data = Mock()
+    bot.position_data.get_current_position.return_value = None
+    bot._post_execution_protection_hook = Mock(return_value={})
+    bot._update_dca_state_after_execution = Mock()
+    bot._safe_storage_call = Mock()
+    bot._write_trade_fill_log = Mock()
+    bot._has_pending_close_order = Mock(return_value=False)
+    bot.trade_count = 0
+    bot._opened_symbols_this_cycle = set()
+    bot._position_first_seen_ts = {}
+    bot._position_extrema_by_pos = {}
+
+    decision = FundFlowDecision(
+        operation=Operation.BUY,
+        symbol="WLDUSDT",
+        target_portion_of_balance=0.068658,
+        leverage=3,
+        reason="multi_bar_direction_generated_pass",
+        metadata={"signal_score": 0.85},
+    )
+
+    bot._execute_and_log_decision(
+        symbol="WLDUSDT",
+        decision=decision,
+        account_summary={"equity": 100.0},
+        current_price=0.5237,
+        position=None,
+        flow_context={},
+        trigger_type="test",
+        trigger_id="wld-entry",
+        trigger_context={"trigger_type": "test", "trigger_id": "wld-entry"},
+        portfolio={},
+    )
+
+    rows = [json.loads(line) for line in (tmp_path / "fund_flow_entry_exit_audit.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [row["stage"] for row in rows] == ["pre_execution", "post_execution", "entry_order_reconciled"]
+    execution = rows[2]["execution"]
+    assert execution["status"] == "expired"
+    assert execution["message"] == "pending_entry_order_final_status_expired"
+    assert execution["order"]["status"] == "EXPIRED"
+    assert execution["entry_order_final_status"] == "EXPIRED"
+    assert execution["entry_order_executed_qty"] == pytest.approx(0.0)
+    assert execution["entry_order_limit_price"] == pytest.approx(0.5237)
+    assert execution["entry_ioc_fail_reason"].startswith("limit_below_ask")
+    assert execution["entry_best_bid_at_reconcile"] == pytest.approx(0.5240)
+    assert execution["entry_best_ask_at_reconcile"] == pytest.approx(0.5246)
+    assert execution["entry_spread_pct_at_reconcile"] == pytest.approx(0.001145)
+
+
+def test_execute_and_log_decision_marks_pending_ioc_success_when_final_order_is_filled(tmp_path: Path) -> None:
+    bot = _bot({"fund_flow": {"min_entry_notional_usdt": 0.10}})
+    bot.logs_dir = str(tmp_path)
+    bot.fund_flow_attribution_engine = Mock()
+    bot.fund_flow_execution_router = Mock()
+    bot.fund_flow_execution_router.execute_decision.return_value = {
+        "status": "pending",
+        "message": "entry submitted",
+        "order": {"orderId": 7016851051, "status": "NEW", "executedQty": "0", "price": "3.084000", "side": "BUY"},
+        "quantity": 0.0,
+    }
+    bot._fetch_order_trade_fills = Mock(return_value=[])
+    bot._fetch_entry_order_final_state = Mock(
+        return_value={
+            "symbol": "ICPUSDT",
+            "orderId": 7016851051,
+            "status": "FILLED",
+            "executedQty": "1.2",
+            "avgPrice": "3.083",
+            "price": "3.084000",
+            "side": "BUY",
+            "timeInForce": "IOC",
+        }
+    )
+    bot._extract_orderbook_flow = Mock(return_value={})
+    bot.position_data = Mock()
+    bot.position_data.get_current_position.return_value = {"side": "LONG", "amount": 1.2, "entry_price": 3.083}
+    bot._post_execution_protection_hook = Mock(return_value={"status": "repaired", "message": "protection_repaired"})
+    bot._update_dca_state_after_execution = Mock()
+    bot._safe_storage_call = Mock()
+    bot._write_trade_fill_log = Mock()
+    bot._has_pending_close_order = Mock(return_value=False)
+    bot.trade_count = 0
+    bot._opened_symbols_this_cycle = set()
+    bot._position_first_seen_ts = {}
+    bot._position_extrema_by_pos = {}
+
+    decision = FundFlowDecision(
+        operation=Operation.BUY,
+        symbol="ICPUSDT",
+        target_portion_of_balance=0.115082,
+        leverage=3,
+        reason="multi_bar_direction_generated_pass",
+        metadata={"signal_score": 0.85},
+    )
+
+    bot._execute_and_log_decision(
+        symbol="ICPUSDT",
+        decision=decision,
+        account_summary={"equity": 100.0},
+        current_price=3.084,
+        position=None,
+        flow_context={},
+        trigger_type="test",
+        trigger_id="icp-entry",
+        trigger_context={"trigger_type": "test", "trigger_id": "icp-entry"},
+        portfolio={},
+    )
+
+    rows = [json.loads(line) for line in (tmp_path / "fund_flow_entry_exit_audit.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [row["stage"] for row in rows] == ["pre_execution", "post_execution", "entry_order_reconciled"]
+    assert rows[2]["execution"]["status"] == "success"
+    assert rows[2]["execution"]["message"] == "pending_entry_order_final_status_filled"
+    assert rows[2]["execution"]["quantity"] == pytest.approx(1.2)
+    assert rows[2]["execution"]["entry_order_avg_price"] == pytest.approx(3.083)
+    assert rows[2]["execution"]["post_protection_hook"]["status"] == "repaired"
+
+
+def test_fetch_entry_order_final_state_retries_new_zero_qty_order() -> None:
+    bot = _bot()
+    bot.client = Mock()
+    bot.client.get_order = Mock(
+        side_effect=[
+            {"symbol": "WLDUSDT", "orderId": 1, "status": "NEW", "executedQty": "0"},
+            {"symbol": "WLDUSDT", "orderId": 1, "status": "EXPIRED", "executedQty": "0"},
+        ]
+    )
+
+    result = bot._fetch_entry_order_final_state("WLDUSDT", 1)
+
+    assert result["status"] == "EXPIRED"
+    assert bot.client.get_order.call_count == 2
 
 
 def test_execute_and_log_decision_writes_close_audit_details(tmp_path: Path) -> None:

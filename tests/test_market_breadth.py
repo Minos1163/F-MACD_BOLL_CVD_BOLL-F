@@ -100,3 +100,31 @@ def test_alt_breadth_led_slow_bull_enters_true_when_btc_is_flat() -> None:
     assert second["is_slow_bull"] is True
     assert second["mode"] in {"alt_breadth_led", "extreme_breadth"}
     assert second["breadth_ratio"] >= 0.80
+
+
+def test_slow_bear_confirms_when_btc_and_alt_breadth_are_weak() -> None:
+    detector = MarketBreadthDetector(
+        MarketBreadthConfig(confirm_cycles=2, invalidate_cycles=2),
+        ["ADAUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "FETUSDT"],
+    )
+    alt_rets = {
+        "ADAUSDT": -0.0025,
+        "SOLUSDT": -0.0020,
+        "XRPUSDT": -0.0018,
+        "DOGEUSDT": 0.0003,
+        "FETUSDT": -0.0022,
+    }
+
+    for _ in range(4):
+        detector.update(btc_ret_15m=-0.0020, alt_rets=alt_rets)
+
+    first = detector.detect()
+    assert first["is_slow_bear"] is False
+    assert first["bear_confirm_count"] == 1
+
+    detector.update(btc_ret_15m=-0.0020, alt_rets=alt_rets)
+    second = detector.detect()
+    assert second["is_slow_bear"] is True
+    assert second["is_slow_bull"] is False
+    assert second["slow_bear_mode"] == "bear_breadth_led"
+    assert second["breadth_ratio"] <= 0.30

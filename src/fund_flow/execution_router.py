@@ -758,6 +758,28 @@ class FundFlowExecutionRouter:
             retry_times = min(retry_times, max(1, allowed_retry_count + 1))
         return retry_times, step_bps
 
+    def _marketable_ioc_entry_price(
+        self,
+        *,
+        side: str,
+        current_order_price: float,
+        best_bid: float,
+        best_ask: float,
+        offset_bps: int,
+    ) -> float:
+        side_upper = str(side or "").upper()
+        price = self._to_float(current_order_price, 0.0)
+        bid = self._to_float(best_bid, 0.0)
+        ask = self._to_float(best_ask, 0.0)
+        offset = max(0, int(offset_bps or 0)) / 10000.0
+        if side_upper == "BUY" and ask > 0.0:
+            touch = ask * (1.0 + offset)
+            return max(price, touch) if price > 0.0 else touch
+        if side_upper == "SELL" and bid > 0.0:
+            touch = bid * (1.0 - offset)
+            return min(price, touch) if price > 0.0 else touch
+        return price
+
     def _try_place_with_fallback(
         self,
         *,
@@ -1191,7 +1213,23 @@ class FundFlowExecutionRouter:
                     self.attribution.log_execution(decision, result)
                     return result
 
-                margin = available_balance * decision.target_portion_of_balance
+                sizing_balance = self._to_float(account_state.get("equity"), 0.0)
+                if sizing_balance <= 0 and isinstance(decision.metadata, dict):
+                    sizing_balance = self._to_float(decision.metadata.get("account_equity"), 0.0)
+                if sizing_balance <= 0:
+                    sizing_balance = available_balance
+                margin = sizing_balance * decision.target_portion_of_balance
+                if margin > available_balance + 1e-8:
+                    result = {
+                        "status": "noop",
+                        "message": "可用余额不足以执行目标仓位，跳过开仓",
+                        "target_margin_usdt": margin,
+                        "available_balance": available_balance,
+                        "sizing_balance_usdt": sizing_balance,
+                        "trigger_context": trigger_context,
+                    }
+                    self.attribution.log_execution(decision, result)
+                    return result
                 margin_gate = self._check_min_entry_margin(
                     decision=decision,
                     margin=margin,
@@ -1235,6 +1273,7 @@ class FundFlowExecutionRouter:
                     and margin > 0
                     and margin < self.position_count_small_margin_threshold_usdt
                     and self.position_count_small_margin_leverage > leverage
+                    and strategy_mode != "quadrant_resonance"
                 ):
                     original_leverage = leverage
                     leverage = self.position_count_small_margin_leverage
@@ -1260,7 +1299,17 @@ class FundFlowExecutionRouter:
                     return result
                 if leverage_sync.get("status") == "success":
                     try:
-                        leverage = int(leverage_sync.get("applied", leverage))
+                        applied_leverage = int(leverage_sync.get("applied", leverage))
+                        if strict_sync and applied_leverage != int(leverage):
+                            result = {
+                                "status": "error",
+                                "message": "交易所杠杆与策略请求不一致，已阻止开仓",
+                                "leverage_sync": leverage_sync,
+                                "trigger_context": trigger_context,
+                            }
+                            self.attribution.log_execution(decision, result)
+                            return result
+                        leverage = applied_leverage
                     except Exception:
                         pass
 
@@ -1304,6 +1353,50 @@ class FundFlowExecutionRouter:
                     self._to_float(md.get("competition_score"), 0.0),
                     self._to_float(md.get("signal_score"), 0.0),
                 )
+                ff_cfg = ((self.risk.config or {}).get("fund_flow", {}) or {})
+                degrade_cfg = ff_cfg.get("execution_degradation", {}) if isinstance(ff_cfg.get("execution_degradation"), dict) else {}
+                touch_enabled_raw = md.get(
+                    "entry_use_orderbook_touch_price",
+                    degrade_cfg.get("entry_use_orderbook_touch_price", False),
+                )
+                entry_use_orderbook_touch = self._to_bool(touch_enabled_raw, False)
+                entry_orderbook_touch_offset_bps = int(
+                    self._to_float(
+                        md.get(
+                            "entry_orderbook_touch_offset_bps",
+                            degrade_cfg.get("entry_orderbook_touch_offset_bps", 15),
+                        ),
+                        15.0,
+                    )
+                )
+                entry_orderbook_price_context: Dict[str, Any] = {}
+                if entry_use_orderbook_touch and entry_tif == TimeInForce.IOC:
+                    try:
+                        orderbook = self.client.get_order_book(decision.symbol, limit=5)
+                    except Exception:
+                        orderbook = None
+                    if isinstance(orderbook, dict):
+                        bids = orderbook.get("bids") if isinstance(orderbook.get("bids"), list) else []
+                        asks = orderbook.get("asks") if isinstance(orderbook.get("asks"), list) else []
+                        best_bid = self._to_float(bids[0][0], 0.0) if bids and isinstance(bids[0], (list, tuple)) else 0.0
+                        best_ask = self._to_float(asks[0][0], 0.0) if asks and isinstance(asks[0], (list, tuple)) else 0.0
+                        adjusted_price = self._marketable_ioc_entry_price(
+                            side=side,
+                            current_order_price=order_price,
+                            best_bid=best_bid,
+                            best_ask=best_ask,
+                            offset_bps=entry_orderbook_touch_offset_bps,
+                        )
+                        entry_orderbook_price_context = {
+                            "entry_use_orderbook_touch_price": True,
+                            "entry_orderbook_touch_offset_bps": entry_orderbook_touch_offset_bps,
+                            "entry_original_limit_price": order_price,
+                            "entry_touch_best_bid": best_bid,
+                            "entry_touch_best_ask": best_ask,
+                            "entry_touch_adjusted_price": adjusted_price,
+                        }
+                        order_price = self._format_price(decision.symbol, adjusted_price)
+                        entry_orderbook_price_context["entry_formatted_touch_price"] = order_price
 
                 order_result = self._try_place_with_fallback(
                     symbol=decision.symbol,
@@ -1330,6 +1423,8 @@ class FundFlowExecutionRouter:
                         "leverage_sync": leverage_sync,
                         "trigger_context": trigger_context,
                     }
+                    if entry_orderbook_price_context:
+                        result["entry_orderbook_price_context"] = entry_orderbook_price_context
                     self.attribution.log_execution(decision, result)
                     return result
                 if not self._is_success(order_result):
@@ -1345,6 +1440,8 @@ class FundFlowExecutionRouter:
                         "quantity_info": qty_info,
                         "trigger_context": trigger_context,
                     }
+                    if entry_orderbook_price_context:
+                        result["entry_orderbook_price_context"] = entry_orderbook_price_context
                     self.attribution.log_execution(decision, result)
                     return result
 
@@ -1375,6 +1472,8 @@ class FundFlowExecutionRouter:
                             "quantity_info": qty_info,
                             "trigger_context": trigger_context,
                         }
+                        if entry_orderbook_price_context:
+                            result["entry_orderbook_price_context"] = entry_orderbook_price_context
                         self.attribution.log_execution(decision, result)
                         return result
                 else:
@@ -1399,6 +1498,8 @@ class FundFlowExecutionRouter:
                     "small_margin_leverage_override": small_margin_leverage_override,
                     "trigger_context": trigger_context,
                 }
+                if entry_orderbook_price_context:
+                    result["entry_orderbook_price_context"] = entry_orderbook_price_context
                 self.attribution.log_execution(decision, result)
                 return result
 

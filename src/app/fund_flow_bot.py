@@ -939,6 +939,52 @@ class TradingBot:
                 return rows
         return []
 
+    def _fetch_entry_order_final_state(self, symbol: str, order_id: Optional[int]) -> Dict[str, Any]:
+        if not symbol or order_id is None:
+            return {}
+        getter = getattr(self.client, "get_order", None)
+        if not callable(getter):
+            return {}
+        last_data: Dict[str, Any] = {}
+        for attempt in range(3):
+            try:
+                data = getter(symbol, int(order_id))
+            except Exception:
+                return last_data
+            if not isinstance(data, dict):
+                return last_data
+            last_data = data
+            status = str(data.get("status") or "").upper()
+            executed_qty = self._to_float(data.get("executedQty"), 0.0)
+            if status != "NEW" or executed_qty > 0.0:
+                return data
+            if attempt < 2:
+                time.sleep(0.25)
+        return last_data
+
+    def _diagnose_entry_ioc_fail(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        limit_price: float,
+        orderbook: Dict[str, Any],
+    ) -> str:
+        side_upper = str(side or "").upper()
+        best_bid = self._to_float(orderbook.get("best_bid"), 0.0)
+        best_ask = self._to_float(orderbook.get("best_ask"), 0.0)
+        if side_upper == "BUY" and best_ask > 0.0 and limit_price > 0.0:
+            gap = (best_ask - limit_price) / best_ask
+            if gap > 0.0:
+                return f"limit_below_ask: limit={limit_price:.8f} ask={best_ask:.8f} gap={gap:.6%}"
+            return "buy_limit_crossed_ask_but_unfilled"
+        if side_upper == "SELL" and best_bid > 0.0 and limit_price > 0.0:
+            gap = (limit_price - best_bid) / best_bid
+            if gap > 0.0:
+                return f"limit_above_bid: limit={limit_price:.8f} bid={best_bid:.8f} gap={gap:.6%}"
+            return "sell_limit_crossed_bid_but_unfilled"
+        return "unknown_ioc_fail"
+
     def _append_trade_fill_rows(self, rows: List[Dict[str, Any]]) -> None:
         if not rows:
             return
@@ -1175,6 +1221,18 @@ class TradingBot:
                 "order": result.get("order"),
                 "fills": result.get("fills"),
                 "post_protection_hook": result.get("post_protection_hook"),
+                "entry_order_final_status": result.get("entry_order_final_status"),
+                "entry_order_executed_qty": result.get("entry_order_executed_qty"),
+                "entry_order_avg_price": result.get("entry_order_avg_price"),
+                "entry_order_limit_price": result.get("entry_order_limit_price"),
+                "entry_ioc_fail_reason": result.get("entry_ioc_fail_reason"),
+                "entry_best_bid_at_reconcile": result.get("entry_best_bid_at_reconcile"),
+                "entry_best_ask_at_reconcile": result.get("entry_best_ask_at_reconcile"),
+                "entry_spread_pct_at_reconcile": result.get("entry_spread_pct_at_reconcile"),
+                "entry_best_bid_at_submit": result.get("entry_best_bid_at_submit"),
+                "entry_best_ask_at_submit": result.get("entry_best_ask_at_submit"),
+                "entry_spread_pct_at_submit": result.get("entry_spread_pct_at_submit"),
+                "entry_orderbook_price_context": result.get("entry_orderbook_price_context"),
             }
         return payload
 
@@ -1199,19 +1257,81 @@ class TradingBot:
             qty = self._to_float(fill.get("qty"), self._to_float(fill.get("executedQty"), 0.0))
             if qty > 0.0:
                 visible_fills.append(fill)
-        if not visible_fills:
-            return {}
-        return {
-            "status": "success",
-            "message": "pending_order_fills_confirmed",
-            "order": order_obj,
-            "fills": visible_fills,
-            "quantity": sum(
+
+        try:
+            final_order = self._fetch_entry_order_final_state(symbol=symbol, order_id=order_id)
+        except Exception:
+            final_order = {}
+        final_order = final_order if isinstance(final_order, dict) else {}
+        merged_order = final_order or order_obj
+        final_status = str(merged_order.get("status") or "").upper()
+        final_qty = self._to_float(merged_order.get("executedQty"), 0.0)
+        avg_price = self._to_float(merged_order.get("avgPrice"), self._to_float(merged_order.get("average"), 0.0))
+        limit_price = self._to_float(merged_order.get("price"), self._to_float(order_obj.get("price"), 0.0))
+        side = str(merged_order.get("side") or order_obj.get("side") or "")
+
+        if visible_fills:
+            filled_qty = sum(
                 self._to_float(fill.get("qty"), self._to_float(fill.get("executedQty"), 0.0))
                 for fill in visible_fills
                 if isinstance(fill, dict)
-            ),
-        }
+            )
+            return {
+                "status": "success",
+                "message": "pending_order_fills_confirmed",
+                "order": merged_order,
+                "fills": visible_fills,
+                "quantity": filled_qty,
+                "entry_order_final_status": final_status or "FILLED",
+                "entry_order_executed_qty": filled_qty,
+                "entry_order_avg_price": avg_price,
+                "entry_order_limit_price": limit_price,
+            }
+
+        if final_status in ("FILLED", "PARTIALLY_FILLED") or final_qty > 0.0:
+            return {
+                "status": "success",
+                "message": "pending_entry_order_final_status_filled",
+                "order": merged_order,
+                "fills": [],
+                "quantity": final_qty,
+                "entry_order_final_status": final_status or "FILLED",
+                "entry_order_executed_qty": final_qty,
+                "entry_order_avg_price": avg_price,
+                "entry_order_limit_price": limit_price,
+            }
+
+        if final_status:
+            orderbook = self._extract_orderbook_flow(symbol)
+            orderbook = orderbook if isinstance(orderbook, dict) else {}
+            fail_reason = ""
+            if final_status in ("EXPIRED", "CANCELED", "REJECTED") and final_qty <= 0.0:
+                fail_reason = self._diagnose_entry_ioc_fail(
+                    symbol=symbol,
+                    side=side,
+                    limit_price=limit_price,
+                    orderbook=orderbook,
+                )
+            status_lower = final_status.lower()
+            return {
+                "status": status_lower,
+                "message": f"pending_entry_order_final_status_{status_lower}",
+                "order": merged_order,
+                "fills": [],
+                "quantity": final_qty,
+                "entry_order_final_status": final_status,
+                "entry_order_executed_qty": final_qty,
+                "entry_order_avg_price": avg_price,
+                "entry_order_limit_price": limit_price,
+                "entry_ioc_fail_reason": fail_reason,
+                "entry_best_bid_at_reconcile": self._to_float(orderbook.get("best_bid"), 0.0),
+                "entry_best_ask_at_reconcile": self._to_float(orderbook.get("best_ask"), 0.0),
+                "entry_spread_pct_at_reconcile": self._to_float(
+                    orderbook.get("spread_pct"),
+                    self._to_float(orderbook.get("spread_bps"), 0.0),
+                ),
+            }
+        return {}
 
     @staticmethod
     def _normalize_trade_fill_fee(fee: float) -> float:
@@ -2424,6 +2544,15 @@ class TradingBot:
             small_notional_close_threshold=self._to_float(raw.get("small_notional_close_threshold"), 5.0),
             small_notional_close_equity_pct=self._to_float(raw.get("small_notional_close_equity_pct"), 0.02),
             tiny_notional_skip_threshold=self._to_float(raw.get("tiny_notional_skip_threshold"), 1.0),
+            single_position_hard_fail_enabled=self._to_bool(raw.get("single_position_hard_fail_enabled"), True),
+            single_position_hard_fail_mae_threshold=self._to_float(
+                raw.get("single_position_hard_fail_mae_threshold"),
+                -0.025,
+            ),
+            single_position_hard_fail_mfe_max=self._to_float(
+                raw.get("single_position_hard_fail_mfe_max"),
+                0.005,
+            ),
         )
 
     def _market_breadth_config(self) -> MarketBreadthConfig:
@@ -2435,6 +2564,10 @@ class TradingBot:
             slow_bull_btc_ret_30m=self._to_float(raw.get("slow_bull_btc_ret_30m"), 0.003),
             slow_bull_btc_ret_60m=self._to_float(raw.get("slow_bull_btc_ret_60m"), 0.005),
             slow_bull_alt_median_60m=self._to_float(raw.get("slow_bull_alt_median_60m"), 0.004),
+            slow_bear_breadth_ratio_max=self._to_float(raw.get("slow_bear_breadth_ratio_max"), 0.30),
+            slow_bear_btc_ret_30m=self._to_float(raw.get("slow_bear_btc_ret_30m"), -0.003),
+            slow_bear_btc_ret_60m=self._to_float(raw.get("slow_bear_btc_ret_60m"), -0.005),
+            slow_bear_alt_median_60m=self._to_float(raw.get("slow_bear_alt_median_60m"), -0.004),
             mode_a_breadth_min=self._to_float(raw.get("mode_a_breadth_min"), 0.80),
             mode_a_alt_median_min=self._to_float(raw.get("mode_a_alt_median_min"), 0.0025),
             mode_a_btc_min=self._to_float(raw.get("mode_a_btc_min"), -0.001),
@@ -7197,7 +7330,8 @@ class TradingBot:
                 + min(1.0, bb_width_norm / 1.2) * 12.0
             )
 
-            risk_plan = md.get("risk_plan") if isinstance(md.get("risk_plan"), dict) else {}
+            raw_risk_plan = md.get("risk_plan")
+            risk_plan = raw_risk_plan if isinstance(raw_risk_plan, dict) else {}
             effective_stop_pct = self._to_float(risk_plan.get("effective_stop_pct"), 0.0)
             raw_stop_pct = self._to_float(risk_plan.get("raw_stop_pct"), 0.0)
             ff_cfg = self.config.get("fund_flow", {}) or {}
@@ -7552,6 +7686,13 @@ class TradingBot:
             )
             return
 
+        submit_orderbook: Dict[str, Any] = {}
+        if decision.operation in (FundFlowOperation.BUY, FundFlowOperation.SELL):
+            try:
+                submit_orderbook = self._extract_orderbook_flow(symbol)
+            except Exception:
+                submit_orderbook = {}
+
         execution_result = self.fund_flow_execution_router.execute_decision(
             decision=decision,
             account_state=account_summary,
@@ -7559,6 +7700,13 @@ class TradingBot:
             position=position,
             trigger_context=exec_trigger_context,
         )
+        if isinstance(execution_result, dict) and submit_orderbook:
+            execution_result["entry_best_bid_at_submit"] = self._to_float(submit_orderbook.get("best_bid"), 0.0)
+            execution_result["entry_best_ask_at_submit"] = self._to_float(submit_orderbook.get("best_ask"), 0.0)
+            execution_result["entry_spread_pct_at_submit"] = self._to_float(
+                submit_orderbook.get("spread_pct"),
+                self._to_float(submit_orderbook.get("spread_bps"), 0.0),
+            )
         if isinstance(execution_result, dict):
             post_hook = self._post_execution_protection_hook(
                 symbol=symbol,
@@ -7585,9 +7733,26 @@ class TradingBot:
             execution_result if isinstance(execution_result, dict) else {},
         )
         if reconciled_result:
+            if isinstance(execution_result, dict):
+                for key in (
+                    "entry_best_bid_at_submit",
+                    "entry_best_ask_at_submit",
+                    "entry_spread_pct_at_submit",
+                    "entry_orderbook_price_context",
+                ):
+                    if execution_result.get(key) is not None:
+                        reconciled_result[key] = execution_result.get(key)
+            if str(reconciled_result.get("status", "")).lower() == "success":
+                post_hook = self._post_execution_protection_hook(
+                    symbol=symbol,
+                    decision=decision,
+                    execution_result=reconciled_result,
+                )
+                if isinstance(post_hook, dict) and post_hook:
+                    reconciled_result["post_protection_hook"] = post_hook
             self._append_entry_exit_audit_log(
                 self._build_entry_exit_audit_payload(
-                    stage="fill_reconciled",
+                    stage="entry_order_reconciled",
                     symbol=symbol,
                     decision=decision,
                     account_summary=account_summary,
@@ -10285,6 +10450,7 @@ class TradingBot:
                     continue
 
                 position = position_snapshot.get(symbol)
+                stale_cleanup: Dict[str, Any] = {}
                 if ingestion_only:
                     self._materialize_flow_snapshot(symbol, market_data)
                     continue

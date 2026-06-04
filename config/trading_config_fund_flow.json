@@ -377,7 +377,10 @@
       "small_notional_close_threshold": 3.0,
       "small_notional_close_equity_pct": 0.015,
       "tiny_notional_skip_threshold": 0.5,
-      "comment": "BTC 15M beta risk accelerates exits only; low-correlation symbols ignore BTC weight"
+      "comment": "BTC 15M beta risk accelerates exits only; low-correlation symbols ignore BTC weight",
+      "single_position_hard_fail_enabled": true,
+      "single_position_hard_fail_mae_threshold": -0.025,
+      "single_position_hard_fail_mfe_max": 0.005
     },
     "btc_entry_regime_gate": {
       "enabled": true,
@@ -402,7 +405,11 @@
       "mode_c_breadth_min": 0.9,
       "mode_c_alt_median_min": 0.001,
       "confirm_cycles": 2,
-      "invalidate_cycles": 2
+      "invalidate_cycles": 2,
+      "slow_bear_breadth_ratio_max": 0.3,
+      "slow_bear_btc_ret_30m": -0.003,
+      "slow_bear_btc_ret_60m": -0.005,
+      "slow_bear_alt_median_60m": -0.004
     },
     "slow_bull_live_test": {
       "enabled": true,
@@ -690,7 +697,7 @@
         "macd_15m_fast": 12,
         "macd_15m_slow": 26,
         "macd_15m_signal": 9,
-        "macd_threshold": 5e-05
+        "macd_threshold": 5E-05
       },
       "boll_config": {
         "period": 20,
@@ -1321,8 +1328,8 @@
       "required_short_cvd_norm": 0.08,
       "required_price_oi_alignment_15m": 0.0,
       "required_adx_slope": -0.02,
-      "required_long_ema_spread_expand": -5e-05,
-      "required_short_ema_spread_expand": -5e-05,
+      "required_long_ema_spread_expand": -5E-05,
+      "required_short_ema_spread_expand": -5E-05,
       "short_min_score_boost": 0.01,
       "short_min_gap_boost": 0.0,
       "short_require_confirm_3m": false,
@@ -1397,7 +1404,7 @@
       "turn_confirm": {
         "enabled": true,
         "mode": "2bar_peak_valley",
-        "min_delta": 5e-05,
+        "min_delta": 5E-05,
         "micro_turn_enabled": true,
         "phantom_decay_enabled": true,
         "trap_decay_enabled": true,
@@ -1728,6 +1735,8 @@
       ]
     },
     "execution_degradation": {
+      "entry_use_orderbook_touch_price": true,
+      "entry_orderbook_touch_offset_bps": 15,
       "open_ioc_retry_times": 4,
       "open_ioc_retry_step_bps": 20,
       "open_ioc_dynamic_step_enabled": true,

@@ -104,6 +104,16 @@ class FundFlowDecisionEngine:
             slow_bull_btc_ret_30m=self._to_float(market_breadth_cfg.get("slow_bull_btc_ret_30m"), 0.003),
             slow_bull_btc_ret_60m=self._to_float(market_breadth_cfg.get("slow_bull_btc_ret_60m"), 0.005),
             slow_bull_alt_median_60m=self._to_float(market_breadth_cfg.get("slow_bull_alt_median_60m"), 0.004),
+            slow_bear_breadth_ratio_max=self._to_float(
+                market_breadth_cfg.get("slow_bear_breadth_ratio_max"),
+                0.30,
+            ),
+            slow_bear_btc_ret_30m=self._to_float(market_breadth_cfg.get("slow_bear_btc_ret_30m"), -0.003),
+            slow_bear_btc_ret_60m=self._to_float(market_breadth_cfg.get("slow_bear_btc_ret_60m"), -0.005),
+            slow_bear_alt_median_60m=self._to_float(
+                market_breadth_cfg.get("slow_bear_alt_median_60m"),
+                -0.004,
+            ),
             mode_a_breadth_min=self._to_float(market_breadth_cfg.get("mode_a_breadth_min"), 0.80),
             mode_a_alt_median_min=self._to_float(market_breadth_cfg.get("mode_a_alt_median_min"), 0.0025),
             mode_a_btc_min=self._to_float(market_breadth_cfg.get("mode_a_btc_min"), -0.001),
